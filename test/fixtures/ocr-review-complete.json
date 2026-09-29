@@ -1,0 +1,106 @@
+{
+  "status": "complete",
+  "llm": {
+    "provider": "sensenova",
+    "model": "sensenova-6.8-flash-lite"
+  },
+  "message": "Review complete: 3 finding(s) across 1 selected item(s).",
+  "summary": {
+    "files_reviewed": 1,
+    "comments": 3,
+    "total_tokens": 20487,
+    "input_tokens": 19038,
+    "output_tokens": 1449,
+    "cache_read_tokens": 4096,
+    "elapsed": "51s"
+  },
+  "tool_calls": {
+    "total": 5,
+    "by_tool": {
+      "code_comment": 1,
+      "code_search": 2,
+      "file_find": 1,
+      "file_read": 1
+    },
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [
+    {
+      "path": "app.js",
+      "content": "ReferenceError at module load time: `missingVar` is not declared, imported, or exported anywhere in this file or the codebase. Since this is a top-level `const` initializer, it executes as soon as `app.js` is required — every consumer of this module (the `login` and `total` functions) will crash with `ReferenceError: missingVar is not defined`. This looks like a leftover from debugging/incomplete rename. Remove the line, or add the actual definition/import for the variable.",
+      "suggestion_code": "// remove dead reference; define the missing symbol or delete the line",
+      "existing_code": "const x = missingVar",
+      "start_line": 19,
+      "end_line": 19,
+      "category": "bug",
+      "severity": "critical"
+    },
+    {
+      "path": "app.js",
+      "content": "Both `unused()` and the constant `x` are declared but never read, exported, or referenced anywhere else in the codebase (`app.js` is the only file matching `app`, and nothing requires it). This is pure dead code — delete it to keep the module surface minimal.",
+      "existing_code": "function unused() { return null }",
+      "start_line": 18,
+      "end_line": 18,
+      "category": "other",
+      "severity": "low"
+    },
+    {
+      "path": "app.js",
+      "content": "The file ends with two trailing blank lines. Trivial, but trim the trailing whitespace so it ends cleanly with a single newline.",
+      "existing_code": "const x = missingVar\n",
+      "start_line": 19,
+      "end_line": 19,
+      "category": "style",
+      "severity": "low"
+    }
+  ],
+  "groups": [
+    {
+      "label": "app.js",
+      "files": ["app.js"]
+    }
+  ],
+  "session_id": "6fd23af8-df04-43c7-a6e8-10b04391ec96",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "run_id": "6fd23af8-df04-43c7-a6e8-10b04391ec96",
+    "operation": "review",
+    "terminal_state": "complete",
+    "repository": {},
+    "input": {
+      "mode": "workspace",
+      "resolved_base": "34f713f6846c4e56bc8ea6830033314b0f631f9c",
+      "source_artifact_sha256": "019adb9a8266504673261e91fcfb247fdfd01ef6767024ab59d404d08518f4d0"
+    },
+    "execution": {
+      "ocr_version": "1.12.0",
+      "provider": "sensenova",
+      "model": "sensenova-6.8-flash-lite",
+      "configured_concurrency": 8,
+      "rule_config_sha256": "e85d22baeb3a9d3f35b254ea1df9f9644e5523ffdc5302939267695650e429c0",
+      "runtime_config_sha256": "db08c835780df59353ac95b4b6dce021a6dcc047d8c8eb51fd04e5398bca7370"
+    },
+    "coverage": {
+      "selected": [
+        {
+          "item_id": "38bde6f39a222d0d7fddcfd55909740f376e02fcfd4c80e51fea6136418e3e10",
+          "path": "app.js",
+          "fingerprint": "fe60030438f8e40a21a4fead3520402fbadc5727c0cff6a9dfb92ba18b257324"
+        }
+      ],
+      "completed": [
+        {
+          "item_id": "38bde6f39a222d0d7fddcfd55909740f376e02fcfd4c80e51fea6136418e3e10",
+          "path": "app.js",
+          "fingerprint": "fe60030438f8e40a21a4fead3520402fbadc5727c0cff6a9dfb92ba18b257324"
+        }
+      ],
+      "reused": [],
+      "failed": [],
+      "waived": []
+    },
+    "elapsed_ms": 50613
+  }
+}

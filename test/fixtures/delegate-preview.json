@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "mode": "workspace",
+  "repository": "/private/tmp/ocr-smoke-repo",
+  "total_files": 1,
+  "reviewable_count": 1,
+  "excluded_count": 0,
+  "total_insertions": 4,
+  "total_deletions": 0,
+  "reviewable_files": [
+    {
+      "path": "app.js",
+      "status": "modified",
+      "insertions": 4,
+      "deletions": 0
+    }
+  ],
+  "excluded_files": []
+}
