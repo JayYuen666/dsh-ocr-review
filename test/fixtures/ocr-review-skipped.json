@@ -1,0 +1,53 @@
+{
+  "status": "skipped",
+  "llm": {
+    "provider": "sensenova",
+    "model": "sensenova-6.8-flash-lite"
+  },
+  "message": "Review skipped: no items were selected.",
+  "summary": {
+    "files_reviewed": 0,
+    "comments": 0,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "elapsed": "0s"
+  },
+  "tool_calls": {
+    "total": 0,
+    "by_tool": {},
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [],
+  "session_id": "ea629b79-2872-4ec5-811a-a2d04979f64d",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "run_id": "ea629b79-2872-4ec5-811a-a2d04979f64d",
+    "operation": "review",
+    "terminal_state": "skipped",
+    "repository": {},
+    "input": {
+      "mode": "workspace",
+      "resolved_base": "34f713f6846c4e56bc8ea6830033314b0f631f9c",
+      "source_artifact_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "execution": {
+      "ocr_version": "1.12.0",
+      "provider": "sensenova",
+      "model": "sensenova-6.8-flash-lite",
+      "configured_concurrency": 8,
+      "rule_config_sha256": "e85d22baeb3a9d3f35b254ea1df9f9644e5523ffdc5302939267695650e429c0",
+      "runtime_config_sha256": "db08c835780df59353ac95b4b6dce021a6dcc047d8c8eb51fd04e5398bca7370"
+    },
+    "coverage": {
+      "selected": [],
+      "completed": [],
+      "reused": [],
+      "failed": [],
+      "waived": []
+    },
+    "elapsed_ms": 120
+  }
+}
