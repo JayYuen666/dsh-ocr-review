@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-ocr-review",
-  "version": "0.3.1",
+  "version": "1.0.0",
   "description": "dsh 工作区代码审查插件：把 open-code-review（ocr CLI）封装为 5 个模型工具 + 设置卡片（从 settings.yaml 选 provider/model 应用到 OCR 配置）。",
   "license": "MIT",
   "author": "JayYuen",
@@ -50,7 +50,7 @@
     "@deepseek-ai/dsh-credentials": "0.2.0-rc.2",
     "@deepseek-ai/dsh-home-paths": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
-    "@jayyuen66/dsh-plugin-shared": "^0.6.3",
+    "@jayyuen66/dsh-plugin-shared": "^1.0.0",
     "js-yaml": "^5.4.2"
   },
   "devDependencies": {
