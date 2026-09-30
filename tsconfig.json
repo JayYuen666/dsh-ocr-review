@@ -1,6 +1,6 @@
-// ocr-review/tsconfig.json —— 编译选项全部继承 @jayyuen666/dsh-plugin-shared/config/tsconfig.base.json，这里只留本包与基线不同的部分。
+// ocr-review/tsconfig.json —— 编译选项全部继承 @jayyuen66/dsh-plugin-shared/config/tsconfig.base.json，这里只留本包与基线不同的部分。
 {
-  "extends": "@jayyuen666/dsh-plugin-shared/config/tsconfig.base.json",
+  "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.base.json",
   "include": ["host.ts", "lib/**/*.ts", "test/**/*.ts"],
   "exclude": ["test/client-card.test.ts"]
 }

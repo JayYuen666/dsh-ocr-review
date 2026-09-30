@@ -13,7 +13,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { rolldown } from "rolldown";
-import { canonicalizeRegionPaths } from "@jayyuen666/dsh-plugin-shared/lib/canonicalize-region-paths";
+import { canonicalizeRegionPaths } from "@jayyuen66/dsh-plugin-shared/lib/canonicalize-region-paths";
 
 /**
  * 对象守卫（shared/lib/tool-events 同款防御）：typeof 收窄为 Record 而不经断言。

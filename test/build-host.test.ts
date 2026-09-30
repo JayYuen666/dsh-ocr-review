@@ -1,7 +1,7 @@
 // host.js 构建冒烟 + 防回归锁。
 //
 // 各自防的回归：
-//   1. 跨包依赖必须保持 external（尤其 `@jayyuen666/dsh-plugin-shared/lib/http` 这类**子路径**
+//   1. 跨包依赖必须保持 external（尤其 `@jayyuen66/dsh-plugin-shared/lib/http` 这类**子路径**
 //      说明符：external 的字符串项是精确匹配，匹配不到子路径 → 必须按包名段判定）；
 //   2. Config schema 用的是宿主 fork 的 `@deepseek-ai/schemastery`（0.1.7 的 `.volatile()`
 //      解析只在它有实现），产物里既不能被内联、也不能退回公共 schemastery；
@@ -34,7 +34,7 @@ describe("ocr-review host 构建", () => {
 
   it("跨包依赖保持 external（含 shared 子路径说明符）", async () => {
     const text = await buildHost();
-    // **逐个**子路径列名：只查 `@jayyuen666/dsh-plugin-shared/` 前缀会被 lib/http 一条
+    // **逐个**子路径列名：只查 `@jayyuen66/dsh-plugin-shared/` 前缀会被 lib/http 一条
     // 满足，lib/text 哪天被内联（shared 的模块级状态复制成第二份）这条断言看不见。
     for (const subpath of [
       "lib/http",
@@ -44,7 +44,7 @@ describe("ocr-review host 构建", () => {
       "lib/errors",
       "lib/job-outcome",
     ]) {
-      expect(text).toContain(`from "@jayyuen666/dsh-plugin-shared/${subpath}"`);
+      expect(text).toContain(`from "@jayyuen66/dsh-plugin-shared/${subpath}"`);
     }
     expect(text).toContain('from "node:path"');
   });
@@ -128,7 +128,7 @@ describe("闸门的外部化面（shared/lib/trust）", () => {
     // 这些包原先只钉了 http/project-key/record/jsonl 几枚子路径，`lib/trust` 是新增的第四个坑位：
     // external 的字符串项是精确匹配，子路径一旦漏掉就把整份判据复制进本包产物（判据分叉的起点）。
     const out = await buildHost();
-    expect(out).toContain('from "@jayyuen666/dsh-plugin-shared/lib/trust"');
+    expect(out).toContain('from "@jayyuen66/dsh-plugin-shared/lib/trust"');
     expect(/^function guardTrust\(/mu.test(out)).toBe(false);
   });
 });

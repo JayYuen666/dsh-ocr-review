@@ -22,7 +22,7 @@
 //   - host.ts resolveHost 的装载期守卫：此刻 settings 面还没验过，语言偏好无从读取。
 // lib/cli.ts 与 lib/output.ts 里被迁走的只是**拒绝理由那半句人话**：shq() 转义、
 // 白名单钳制与 key 脱敏的调用位置一字未动，各道校验闸的先后次序也没变。
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包 host 侧产出的全部人读文案。 */
 export interface OcrReviewMessages {

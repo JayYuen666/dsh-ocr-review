@@ -25,7 +25,7 @@
 import type { JsonSchemaNode } from "@deepseek-ai/dsh-tools";
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
-import { isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** 守卫支持的 schema 关键字（官方 enforced subset 的全部关键字，见
  *  installed dsh-tools lib/index.js:206；description/title/default/examples 是

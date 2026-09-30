@@ -11,7 +11,7 @@
 // config.language 并透传给外部 ocr CLI 的枚举值，label 是语言的自称（任何界面语言
 // 里「中文」都写作「中文」，翻成 Chinese 反而认错）。二者都不是界面文案。
 import type { TranslateNS as OfficialTranslateNS } from "@deepseek-ai/dsh-client-ui-slots";
-import type { MessagesCatalog } from "@jayyuen666/dsh-plugin-shared/lib/locale";
+import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包设置卡产出的全部界面文案。 */
 export interface UiMessages {

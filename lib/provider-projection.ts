@@ -10,7 +10,7 @@
 // 安全口径与 lib/ocr-config.ts 一致：投影只搬形状，`apiKeyEnv` 是凭据 ref 名而不是 key 值，
 // 本模块不读任何凭据，返回值里也不会出现 key。
 
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 /** llm-pi-ai 命名空间里 provider 表的字段名。 */
 const PROVIDERS_FIELD = "providers";

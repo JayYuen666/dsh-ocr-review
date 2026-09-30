@@ -21,7 +21,7 @@
 // 排序位与计数聚合都在 lib/severity.ts（摘要的排序与聚合共用那一个口径）。
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
-import { isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { aggregateComments, severityRank } from "./severity.ts";
 import type { CommentAggregation } from "./severity.ts";
 

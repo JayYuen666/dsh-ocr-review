@@ -1,4 +1,4 @@
-# @jayyuen666/dsh-ocr-review
+# @jayyuen66/dsh-ocr-review
 
 [中文](#中文) · [English](#english)
 
@@ -24,18 +24,16 @@
 ### 安装
 
 ```sh
-npm config --global @jayyuen666:registry=https://npm.pkg.github.com
-printf '//npm.pkg.github.com/:_authToken=<PAT:read:packages>\n' >> ~/.npmrc
-dsh plugin --profile web add @jayyuen666/dsh-ocr-review
+dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 ```
 
-- GitHub Packages 连「读」也要凭据，缺第二条时 `dsh plugin add` 直接失败。
+- 包在公共 npm 上，安装不需要凭据。
 - 发布面只含 `host.js`、`client.js`、`cordis.patch.yml`、`scripts`（`prepack` 重建两个 bundle），源码仓见 package.json 的 `repository.url`。
-- 运行期值依赖 `@jayyuen666/dsh-plugin-shared`、`@deepseek-ai/schemastery`（宿主 fork 的 schemastery，0.1.7 的 `.volatile()` 解析只在它有实现）与 `js-yaml`（后者只被 `scripts/get-cred.mjs` 用）。
+- 运行期值依赖 `@jayyuen66/dsh-plugin-shared`、`@deepseek-ai/schemastery`（宿主 fork 的 schemastery，0.1.7 的 `.volatile()` 解析只在它有实现）与 `js-yaml`（后者只被 `scripts/get-cred.mjs` 用）。
 
 ### 在 dsh 里启用
 
-- 包内 `cordis.patch.yml` 声明 `- id: ocr-review` / `name: "@jayyuen666/dsh-ocr-review"`，由 `package.json` 的 `dsh.bundle.patch` 指向。
+- 包内 `cordis.patch.yml` 声明 `- id: ocr-review` / `name: "@jayyuen66/dsh-ocr-review"`，由 `package.json` 的 `dsh.bundle.patch` 指向。
 - `dsh plugin --profile web add/remove` 负责登记与摘除，改完重启 dsh。
 - 卡片要 web profile（`dsh.client.platform: web`、`immediately: true`）。
 - 4 个 `/_dsh/ocr-review/*` 端点挂在 `inject(["webServer"])` 的子 fiber 上：宿主没有 webServer（如 TUI）时子 fiber 不激活、端点不存在，工具与设置照常。真实宿主上 webServer 比本条目晚到位约 1 秒，所以它必须是依赖而不是在 apply 里 `ctx.get` 读一次。
@@ -139,18 +137,16 @@ dsh plugin --profile web add @jayyuen666/dsh-ocr-review
 ### Installation
 
 ```sh
-npm config --global @jayyuen666:registry=https://npm.pkg.github.com
-printf '//npm.pkg.github.com/:_authToken=<PAT:read:packages>\n' >> ~/.npmrc
-dsh plugin --profile web add @jayyuen666/dsh-ocr-review
+dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 ```
 
-- GitHub Packages requires credentials even to read, so without the second line `dsh plugin add` fails outright.
+- The packages are on the public npm registry, so installation needs no credentials.
 - The published files are only `host.js`, `client.js`, `cordis.patch.yml` and `scripts` (`prepack` rebuilds both bundles); source repository: see `repository.url` in package.json.
-- Runtime value dependencies are `@jayyuen666/dsh-plugin-shared`, `@deepseek-ai/schemastery` (the host's fork of schemastery — only it implements the 0.1.7 `.volatile()` resolution) and `js-yaml` (the last one used only by `scripts/get-cred.mjs`).
+- Runtime value dependencies are `@jayyuen66/dsh-plugin-shared`, `@deepseek-ai/schemastery` (the host's fork of schemastery — only it implements the 0.1.7 `.volatile()` resolution) and `js-yaml` (the last one used only by `scripts/get-cred.mjs`).
 
 ### Enabling it in dsh
 
-- The in-package `cordis.patch.yml` declares `- id: ocr-review` / `name: "@jayyuen666/dsh-ocr-review"` and is pointed at by `dsh.bundle.patch` in `package.json`.
+- The in-package `cordis.patch.yml` declares `- id: ocr-review` / `name: "@jayyuen66/dsh-ocr-review"` and is pointed at by `dsh.bundle.patch` in `package.json`.
 - `dsh plugin --profile web add/remove` registers and removes it, then restart dsh.
 - The card needs a web profile (`dsh.client.platform: web`, `immediately: true`).
 - The four `/_dsh/ocr-review/*` endpoints hang off an `inject(["webServer"])` child fiber: with no webServer (a TUI host) the child never activates, so the endpoints simply do not exist while tools and settings stay available.

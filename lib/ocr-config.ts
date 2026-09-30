@@ -44,7 +44,7 @@ import path from "node:path";
 // 偏好取一份注入——纯函数不读设置，所以 messages 是入参。
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { PI_AI_NAMESPACE, markKeyFlags, readProviders } from "./provider-source.ts";
 import type { DshConfigGateway, DshProviderWithKey, ProviderSource } from "./provider-source.ts";
 import type { DshProvider } from "./provider-projection.ts";

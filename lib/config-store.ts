@@ -20,7 +20,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { withFileLock, writeFileAtomic } from "@deepseek-ai/dsh-atomic-write";
 import { expandHomePath } from "@deepseek-ai/dsh-home-paths";
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 // 本模块产出的错误与降级原因全进消息表（lib/messages.ts），由 host.ts 按官方 locale
 // 偏好取一份注入——纯函数不读设置，所以 messages 是入参。
 import { format } from "./messages.ts";

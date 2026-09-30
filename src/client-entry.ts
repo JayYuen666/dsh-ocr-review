@@ -5,7 +5,7 @@
 // （key 走 api_key_cmd 动态读取，不落盘明文）；附带 llm test 验证、明文 key
 // 一键迁移，以及 effort/language/autoVerify/ocrConfigPath 设置行（保存条暂存-写入）。
 // React 一律 createElement；卡片注册进 keyed plugins.bundle.config 槽的 **bundle 包名**键
-// （`@jayyuen666/dsh-ocr-review`，见 BUNDLE_PKG），不是裸条目 id。
+// （`@jayyuen66/dsh-ocr-review`，见 BUNDLE_PKG），不是裸条目 id。
 //
 // 界面文案全在 src/ui-messages.ts（中英两份）：apply 里 `ctx.locale.register(NS, UI_MESSAGES)`
 // （官方类型化重载，两语一次交齐）+ `ctx.locale.bind(NS)` 拿到取文案函数，再以 `t` prop
@@ -43,7 +43,7 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
-import { fieldOf, isRecord } from "@jayyuen666/dsh-plugin-shared/lib/record";
+import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
 const NS: LocaleNs = "ocr-review";
 /**
@@ -63,7 +63,7 @@ const NS: LocaleNs = "ocr-review";
  * 设置命名空间**不跟着改**：下面 `ctx.configForms.get(NS)` 仍吃裸条目 id（installed
  * dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当 settings 命名空间用）。
  */
-const BUNDLE_PKG = "@jayyuen666/dsh-ocr-review";
+const BUNDLE_PKG = "@jayyuen66/dsh-ocr-review";
 const PROVIDERS_URL = "/_dsh/ocr-review/providers";
 const SELECT_URL = "/_dsh/ocr-review/select";
 const MIGRATE_URL = "/_dsh/ocr-review/migrate";

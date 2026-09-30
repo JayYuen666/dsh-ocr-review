@@ -19,7 +19,7 @@ import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import { providersFromSettingsValue } from "./provider-projection.ts";
 import type { DshProvider } from "./provider-projection.ts";
-import { errorText } from "@jayyuen666/dsh-plugin-shared/lib/errors";
+import { errorText } from "@jayyuen66/dsh-plugin-shared/lib/errors";
 
 /** provider 清单所在的官方 settings 命名空间（base bundle 的 pi-ai 适配器注册）。 */
 export const PI_AI_NAMESPACE = "llm-pi-ai";
