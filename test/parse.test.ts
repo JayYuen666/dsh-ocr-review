@@ -211,10 +211,12 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
     // 非白名单字符串同样拒绝（不再凭空造出 status:"unknown"）
     expect(parseOcr('{"status":"weird"}').ok).toBe(false);
     expect(parseOcr('{"status":42}').message).toContain("42");
-    // 五个文档值全部接受
+    // 六个源码值全部接受（partial 是 manifest 终态 StatePartial，exit 0——
+    // review_cmd.go 的退出注释 "complete/partial/skipped all succeed"）。
     for (const status of [
       "success",
       "complete",
+      "partial",
       "completed_with_warnings",
       "completed_with_errors",
       "skipped",
@@ -224,6 +226,33 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
     // JSON 顶层是数组/数字 ⇒ unparseable
     expect(parseOcr("[1]").status).toBe("unparseable");
     expect(parseOcr("null").status).toBe("unparseable");
+  });
+
+  it("partial（manifest 终态，exit 0）⇒ ok:true，评论与 summary 完整保留不丢弃", () => {
+    // 回归钉：此前白名单漏了 partial，整场已花费 token 的部分评审被误报
+    // 「status 非法」并把全部评论丢掉。
+    const parsed = parseOcr(
+      JSON.stringify({
+        status: "partial",
+        message: "Some files could not be reviewed.",
+        comments: [{ path: "a.ts", content: "x", start_line: 1, end_line: 2, severity: "high" }],
+        summary: { files_reviewed: 3, comments: 1, total_tokens: 100 },
+        warnings: [{ file: "b.ts", error: "boom" }],
+        session_id: "sess-p",
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.status).toBe("partial");
+    expect(parsed.skipped).toBe(false);
+    expect(parsed.comments).toHaveLength(1);
+    expect(parsed.sessionId).toBe("sess-p");
+    expect(parsed.summary?.filesReviewed).toBe(3);
+    expect(parsed.warnings).toStrictEqual(["b.ts：boom"]);
+    // 摘要视图同样可用：totalCommentCount 计入，model 能看到 partial 状态本身。
+    const view = summarizeView(parsed);
+    expect(view.status).toBe("partial");
+    expect(view.totalCommentCount).toBe(1);
+    expect(view.topComments[0]?.location).toBe("a.ts:1-2");
   });
 
   it("comments 不是数组 ⇒ ok:false（无法证明评论完整）", () => {

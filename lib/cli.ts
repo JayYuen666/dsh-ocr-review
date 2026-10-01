@@ -12,7 +12,7 @@
 // 注入防线与此并行，不受语言影响：拼进 argv 的值全部经 shq()，枚举一律白名单钳制，
 // 校验闸的调用位置与抛错先后次序都不因文案迁移而改变。
 //
-// 契约依据（open-codereview.ai/docs，v1.12.0 实测）：
+// 契约依据（open-codereview.ai/docs；1.12.x 起以源码逐条核对，当前 1.12.10）：
 //   - ocr review：workspace（默认）/ commit（-c）/ range（--from/--to）三模式互斥。
 //   - ocr scan：--path 逗号分隔；二者都接受 --format/--output/--audience/--exclude。
 //   - ocr delegate preview / rule：--format json 机器可读，reviewable_files
@@ -29,7 +29,6 @@ import type { OcrReviewMessages } from "./messages.ts";
 import {
   assertAbsoluteRoot,
   clampEffort,
-  clampPositiveInt,
   commaList,
   resolveOutputFormat,
   shq,
@@ -54,8 +53,9 @@ export function resolveRoot(
   throw new Error(messages.repoRequiredUnknownWorkspace);
 }
 
-/** 报错用的值形态（永不调用可能被劫持的 toJSON/toString）。 */
-function describeValue(value: unknown): string {
+/** 报错用的值形态（永不调用可能被劫持的 toJSON/toString）。host.ts 的入参闸
+ *  （effort/wait）复用同一口径，故导出。 */
+export function describeValue(value: unknown): string {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
@@ -118,6 +118,9 @@ export interface ScanScopeArgs {
   maxTools?: unknown;
   maxTokens?: unknown;
   maxTokensBudget?: unknown;
+  /** OCR scan 原生 --provider/--model（shared_flags.go:223-247 共享 flags），与 review 对齐。 */
+  provider?: unknown;
+  model?: unknown;
   /** 同 ReviewScopeArgs.format：未知来源、白名单钳制。 */
   format?: unknown;
 }
@@ -212,7 +215,8 @@ function pushTextFlag(
 /** --exclude/--background/--provider/--model 等通用 flag。
  * 注意：ocr 的 --exclude 是 String 类型（实测 v1.12.0 多 flag 实例只认最后一个，
  * 逗号分隔才生效）——多值必须合并为一个 flag 逗号连接，绝不能展开多个。
- */
+ * resume 不在这里：它与 scope 是互斥语义（workspace 禁恢复），由
+ * buildReviewCommand 在拿到 scopeFlags 结果后前置校验。 */
 function optionalFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[] {
   const parts: string[] = [];
   const excludes = commaList(args.exclude, "exclude", 50, messages);
@@ -222,7 +226,6 @@ function optionalFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): stri
   pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
   pushTextFlag(parts, "--provider", args.provider, messages);
   pushTextFlag(parts, "--model", args.model, messages);
-  pushTextFlag(parts, "--resume", args.resume, messages);
   return parts;
 }
 
@@ -343,6 +346,38 @@ export function ocrCommand(
 }
 
 /**
+ * HOME 重定向：ocrConfigPath 设置项生效的唯一通道。OCR 的 Go 侧全部家目录定位
+ * （config、sessions、shell-rc 回退）都走 `os.UserHomeDir()`——Unix 上就是 `$HOME`
+ * 环境变量（go doc os.UserHomeDir 原文 "On Unix, including macOS, it returns the
+ * $HOME environment variable"），而 config 文件本身没有任何 env/flag 可改
+ * （config_cmd.go:92-99 的 defaultConfigPath 是唯一定位，全仓 Getenv 无 config 类
+ * 覆盖）。设置项命中 `<X>/.opencodereview/config.json` 布局时，本包把 X 传进来，
+ * 在命令串前加 POSIX 赋值前缀 `HOME=<X>`——OCR 及其全部子孙（含 api_key_cmd 起的
+ * get-cred）就在重定向后的家目录里读 config、写 sessions，world 自洽。
+ *
+ * home 为 undefined（默认路径）时不加前缀，命令串一字不动。win32 没有 POSIX
+ * 赋值前缀与 HOME 语义（且 resolveOcrConfigPath 对自定义值的布局校验两平台一致），
+ * 与 wrapWithHostReaper 同款按平台放行。
+ */
+export function withHomeEnv(command: string, home: string | undefined): string {
+  if (home === undefined || process.platform === "win32") {
+    return command;
+  }
+  return `HOME=${shq(home)} ${command}`;
+}
+
+/**
+ * `ocr llm test` 命令词（select 的 autoVerify 与卡片「测试连接」共用）。
+ * 必须与五个工具走同一个解析源（ocrCommand()）：随包 launcher 装法下 PATH 上没有
+ * 裸 `ocr`，硬编码字符串会让 llm test 永远 exit 127 而评审照常工作——autoVerify
+ * 从此没有一次能通过，还误导用户去装全局包。`--color` 是 root 持久 flag
+ * （color.go:35-39），子命令合法。
+ */
+export function buildLlmTestCommand(): string {
+  return `${ocrCommand()} llm test --color never`;
+}
+
+/**
  * 构造 `ocr review` 命令。--output 固定为调用方给定的临时文件路径（防截断），
  * --audience agent --format json 是默认（结构化、无进度行）。
  * outputPath 缺省（后台模式）省略 --output：结果以 OCR 会话记录为准。
@@ -369,7 +404,18 @@ export function buildReviewCommand(
   pushIntFlag(parts, "--max-tools", args.maxTools, 0, messages);
   pushIntFlag(parts, "--max-tokens", args.maxTokens, 0, messages);
   pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
-  parts.push(...scopeFlags(args, messages), ...optionalFlags(args, messages));
+  const scopeParts = scopeFlags(args, messages);
+  parts.push(...scopeParts, ...optionalFlags(args, messages));
+  const resume = idValue(args.resume, "resume", messages);
+  if (resume !== "") {
+    // OCR 契约：workspace 模式禁 resume（"resume requires --from/--to or --commit"，
+    // shared_flags.go:207；review_cmd.go:364-366）。scopeFlags 返回空 = workspace，
+    // 此时带 resume 只会烧一次进程启动才拿到英文报错——前置拦下。
+    if (scopeParts.length === 0) {
+      throw new Error(messages.resumeNeedsScope);
+    }
+    parts.push("--resume", shq(resume));
+  }
   if (outputPath !== undefined) {
     parts.push("--output", shq(outputPath));
   }
@@ -403,6 +449,8 @@ export function buildScanCommand(
     parts.push("--exclude", shq(excludes.join(",")));
   }
   pushTextFlag(parts, "--batch", args.batch, messages);
+  pushTextFlag(parts, "--provider", args.provider, messages);
+  pushTextFlag(parts, "--model", args.model, messages);
   pushIntFlag(parts, "--concurrency", args.concurrency, 1, messages);
   pushIntFlag(parts, "--timeout", args.timeoutMinutes, 0, messages);
   pushIntFlag(parts, "--max-tools", args.maxTools, 0, messages);
@@ -479,6 +527,27 @@ export interface SessionArgs {
 const SESSION_ACTIONS = ["list", "show", "comments"] as const;
 type SessionAction = (typeof SESSION_ACTIONS)[number];
 
+/** session list --limit：缺省 10（OCR 原生默认 20，本包收紧；OCR 的 0=不限在本包
+ * 上限 100 下无意义）。显式给出时必须是 1-100 的整数（与工具 description 的承诺
+ * 一致），越界/错类型抛错而不是钳制——静默钳到 1 会把「想看更多」的 0 变成
+ * 「只看一条」。数字字符串接受（"3"），与 pushIntFlag 的数值槽位同一口径。 */
+function sessionLimit(value: unknown, messages: OcrReviewMessages): number {
+  if (value === undefined || value === null) {
+    return 10;
+  }
+  // 数字字符串接受（"3"），与 pushIntFlag 的数值槽位同一口径；布尔/其它一律 NaN 落到抛错。
+  let num = Number.NaN;
+  if (typeof value === "number") {
+    num = value;
+  } else if (typeof value === "string") {
+    num = Number(value);
+  }
+  if (!Number.isInteger(num) || num < 1 || num > 100) {
+    throw new Error(format(messages.sessionLimitRange, { received: describeValue(value) }));
+  }
+  return num;
+}
+
 /** 构造 `ocr session list/show/comments` 命令（历史评审会话闭环，Json 输出）。 */
 export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessages): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
@@ -490,18 +559,29 @@ export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessag
       format(messages.invalidAction, { action, expected: SESSION_ACTIONS.join("/") }),
     );
   }
+  // action=list 与 id 同给是自相矛盾：静默改写成 show 属于「悄悄换语义」，抛错让模型改参。
+  if (requested === "list" && id !== "") {
+    throw new Error(messages.listRejectsId);
+  }
   // action=show/comments 但 id 缺失 → 优雅降级为 list（防御：绝不输出空 id 的 show/comments）。
+  // 未声明 action 时带 id 视为 show（查单个）。
   let sub: SessionAction;
   if (requested === "comments" || requested === "show") {
     sub = id === "" ? "list" : requested;
+  } else if (requested === "list") {
+    sub = "list";
   } else {
     sub = id === "" ? "list" : "show";
   }
   const parts: string[] = [ocrCommand(), "session", sub];
   if (sub === "list") {
-    parts.push("--json", "--repo", shq(repo));
-    const limit = clampPositiveInt(args.limit, 10, 1, 100);
-    parts.push("--limit", String(limit));
+    parts.push(
+      "--json",
+      "--repo",
+      shq(repo),
+      "--limit",
+      String(sessionLimit(args.limit, messages)),
+    );
   } else {
     parts.push("--json", "--repo", shq(repo), shq(id));
   }

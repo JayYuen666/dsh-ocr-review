@@ -1,10 +1,12 @@
 // lib/parse.ts —— 纯函数：把 ocr CLI 的 JSON 输出解析为省 token 的结构化摘要。
-// 契约依据（open-codereview.ai/docs/cli-reference + FAQ + 1.12.0 实测）：
+// 契约依据（open-codereview.ai/docs/cli-reference + FAQ；1.12.x 起以源码为准逐一
+// 核对，见 REVIEW_STATUSES 处的注释）：
 //   - review/scan JSON 恰好一个对象：status/summary/comments/warnings/session_id
 //     /manifest 可选；comments 字段 per-comment：path/content/start_line/end_line
 //     /existing_code/suggestion_code/category/severity/thinking。
-//   - status: success | complete | completed_with_warnings | completed_with_errors
-//     | skipped。skipped 表示无变更可审（区别于“审了但零发现”）。白名单外
+//   - status: success | complete | partial | completed_with_warnings
+//     | completed_with_errors | skipped。skipped 表示无变更可审（区别于“审了但零
+//     发现”），partial 表示部分文件未完成但整体有覆盖（评论仍有效）。白名单外
 //     （含缺失、`{"error":…}` 型错误对象）一律 ok=false：exit 0 不等于评审成功。
 //   - 退出码 0 = 完成（可能有 warning）；1 = 致命错误。致命错误由调用方根据
 //     stderr 抛错，不走到本解析。
@@ -26,14 +28,21 @@ import { aggregateComments, severityRank } from "./severity.ts";
 import type { CommentAggregation } from "./severity.ts";
 
 /**
- * OCR 评审 JSON 的 status 枚举（docs/cli-reference + 1.12.0 实测）。
+ * OCR 评审 JSON 的 status 枚举（1.12.x 源码核对：cmd/opencodereview/output.go 的
+ * jsonOutput 装配 + internal/session/manifest.go:166-169 的 TerminalState）。
  * 白名单外的一律视为失败：exit 0 不等于评审成功——`{"error":"auth failed"}`
  * 这类「没有 status 的错误对象」若被当作 ok:true，模型会把「0 条评论」读成
  * 「代码干净」，是最坏的一类假阳性。
+ *
+ * partial 是 manifest 终态之一（StatePartial）：部分文件失败但整体有覆盖、以及
+ * --max-tokens-budget 截断后仍有覆盖，都以 exit 0 + status "partial" 输出
+ * （review_cmd.go 的退出注释 "complete/partial/skipped all succeed"）。此前白名单
+ * 漏了它，整场已花费 token 的评审被误报成「status 非法」并丢弃全部评论。
  */
 const REVIEW_STATUSES = [
   "success",
   "complete",
+  "partial",
   "completed_with_warnings",
   "completed_with_errors",
   "skipped",

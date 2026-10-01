@@ -25,6 +25,7 @@ import type { GatewayFixture } from "./fixtures/gateway-fixture.ts";
 import {
   applyProviderSelection,
   migratePlaintextKeys,
+  ocrHomeOverride,
   providersForCard,
   resolveOcrConfigPath,
 } from "../lib/ocr-config.ts";
@@ -88,11 +89,12 @@ interface MigrateResult {
   skippedUnknown: string[];
 }
 const readOf = (gateway: GatewayFixture): ProvidersRead => readProviders(gateway, zh);
-const buildApiKeyCmdOf = (scriptPath: string, envKey: string): string =>
-  buildApiKeyCmd(scriptPath, envKey, zh);
+const buildApiKeyCmdOf = (scriptPath: string, envKey: string, dshHome?: string): string =>
+  buildApiKeyCmd(scriptPath, envKey, dshHome, zh);
 const renderOf = (input: SelectInput): string => renderSelectedConfig(input, zh);
 const configPathOf = (configured: string | undefined): string =>
   resolveOcrConfigPath(configured, zh);
+const homeOf = (configured: string | undefined): string | undefined => ocrHomeOverride(configured);
 const cardOf = (gateway: GatewayFixture, paths: OcrPaths): Promise<CardPayload> =>
   providersForCard(gateway, paths, zh);
 const selectOf = (
@@ -121,6 +123,7 @@ function makePaths(): OcrPaths {
   writeFileSync(path.join(pluginDir, "scripts", GET_CRED_FILE), "#!/usr/bin/env node\n");
   return {
     ocrConfigJson: path.join(tmp, OCR_CONFIG_FILE),
+    homeOverride: undefined,
     pluginDir,
     getCredScript: path.join(pluginDir, "scripts", GET_CRED_FILE),
   };
@@ -145,11 +148,48 @@ describe("providersFromSettingsValue", () => {
     ]);
   });
 
-  it("protocol 映射：openai-completions→openai；openai-responses→openai-responses", () => {
+  it("protocol 映射：openai-completions→openai；openai-responses→openai-responses；anthropic-messages→anthropic", () => {
     expect(providers.find((provider) => provider.name === "sensenova")?.protocol).toBe("openai");
     expect(providers.find((provider) => provider.name === "xkiro")?.protocol).toBe(
       RESPONSES_PROTOCOL,
     );
+    // 回归钉：anthropic-messages 是 llm-pi-ai 的合法协议（provider.ts PROTOCOLS），
+    // 此前二值映射把它静默写成 openai——select 成功、OCR 按 OpenAI 线协议打
+    // Anthropic 端点必然调不通。
+    const anthropic = providersFromSettingsValue({
+      providers: {
+        relay: {
+          apiKeyEnv: "RELAY_API_KEY",
+          api: "anthropic-messages",
+          baseURL: "https://relay.example.com",
+          models: [{ id: "claude-x" }],
+        },
+      },
+    });
+    expect(anthropic[0]?.protocol).toBe("anthropic");
+  });
+
+  it("api 缺省按 llm-pi-ai 的默认 openai-completions 兜底（discovery.ts:300）；未知 api 原样透传给写侧白名单拒绝", () => {
+    const value = {
+      providers: {
+        noApi: { apiKeyEnv: "K", baseURL: "https://n", models: [] },
+        weird: { apiKeyEnv: "K", api: "smoke-signals", baseURL: "https://w", models: [] },
+      },
+    };
+    const parsed = providersFromSettingsValue(value);
+    expect(parsed[0]?.protocol).toBe("openai");
+    expect(parsed[1]?.protocol).toBe("smoke-signals");
+    // 写侧闸：未知协议拒绝写入，错误点名 provider 与协议值。
+    expect(() =>
+      renderOf({
+        existingText: "{}",
+        configLabel: CONFIG_LABEL,
+        providers: parsed,
+        provider: "weird",
+        model: "m",
+        apiKeyCmd: "node x K",
+      }),
+    ).toThrow(/无法映射到 OCR 支持的 protocol/u);
   });
 
   it("displayName 回退到 name；models 空数组合法", () => {
@@ -306,6 +346,13 @@ describe("buildApiKeyCmd", () => {
   it("非法 env key 名拒绝", () => {
     expect(() => buildApiKeyCmdOf("/x", "foo;echo pwned")).toThrow(/非法 env key/u);
   });
+
+  it("第三参数（dsh 数据目录）追加为 get-cred 的第一档显式定位；缺省省略", () => {
+    expect(buildApiKeyCmdOf("/s/get-cred.mjs", "K", "/home/t/.dsh")).toBe(
+      "node '/s/get-cred.mjs' 'K' '/home/t/.dsh'",
+    );
+    expect(buildApiKeyCmdOf("/s/get-cred.mjs", "K")).toBe("node '/s/get-cred.mjs' 'K'");
+  });
 });
 
 describe("renderSelectedConfig", () => {
@@ -429,10 +476,28 @@ describe("resolveOcrConfigPath（外部 ocr CLI 配置的位置）", () => {
     );
   });
 
-  it("~ 与 ~/ 前缀按 home 展开；绝对路径原样采用", () => {
-    expect(configPathOf("~")).toBe(HOME);
-    expect(configPathOf("~/ocr/conf.json")).toBe(path.join(HOME, "ocr/conf.json"));
-    expect(configPathOf("/etc/ocr.json")).toBe("/etc/ocr.json");
+  it("<X>/.opencodereview/config.json 布局被接受（含 ~ 展开到该布局的形态）", () => {
+    const custom = "/data/ocr/.opencodereview/config.json";
+    expect(configPathOf(custom)).toBe(custom);
+    expect(configPathOf("~/.opencodereview/config.json")).toBe(
+      path.join(HOME, OCR_CONFIG_DIR, OCR_CONFIG_FILE),
+    );
+  });
+
+  it("布局外的一切绝对路径拒绝（OCR 无文件级覆盖，写了也读不到，宁可直接报错）", () => {
+    // 此前这三条被原样接受——静默失配的源头。
+    expect(() => configPathOf("~")).toThrow(/布局/u);
+    expect(() => configPathOf("~/ocr/conf.json")).toThrow(/布局/u);
+    expect(() => configPathOf("/etc/ocr.json")).toThrow(/布局/u);
+  });
+
+  it("ocrHomeOverride：布局内返回 X；未设置/布局外/相对路径一律 undefined（绝不抛错）", () => {
+    expect(homeOf(undefined)).toBeUndefined();
+    expect(homeOf("")).toBeUndefined();
+    expect(homeOf("/data/ocr/.opencodereview/config.json")).toBe("/data/ocr");
+    expect(homeOf("~/.opencodereview/config.json")).toBe(HOME);
+    expect(homeOf("/etc/ocr.json")).toBeUndefined();
+    expect(homeOf("relative/ocr.json")).toBeUndefined();
   });
 
   it("相对路径拒绝（会把配置写到当时的工作区，用户找不到也修不了）", () => {
@@ -469,6 +534,7 @@ describe("credentialScriptPath / defaultCredScriptPath", () => {
   it("显式脚本路径优先", () => {
     const paths: OcrPaths = {
       ocrConfigJson: "/tmp/c.json",
+      homeOverride: undefined,
       pluginDir: PLUGIN_DIR_SAMPLE,
       getCredScript: "/opt/other.mjs",
     };
@@ -478,6 +544,7 @@ describe("credentialScriptPath / defaultCredScriptPath", () => {
   it("getCredScript 为空 ⇒ 按 pluginDir 兜底，两处拼法同源", () => {
     const paths: OcrPaths = {
       ocrConfigJson: "/tmp/c.json",
+      homeOverride: undefined,
       pluginDir: PLUGIN_DIR_SAMPLE,
       getCredScript: "",
     };
@@ -938,7 +1005,9 @@ describe("配置通道文案双语（en 注入）", () => {
     expect(() => resolveOcrConfigPath("ocr/config.json", en)).toThrow(
       /must be absolute or start with ~/u,
     );
-    expect(() => buildApiKeyCmd("/x", "foo;echo", en)).toThrow(/invalid env key: foo;echo/u);
+    expect(() => buildApiKeyCmd("/x", "foo;echo", undefined, en)).toThrow(
+      /invalid env key: foo;echo/u,
+    );
     const base = {
       configLabel: CONFIG_LABEL,
       providers: providersFromSettingsValue(PI_AI_SETTINGS_VALUE),
