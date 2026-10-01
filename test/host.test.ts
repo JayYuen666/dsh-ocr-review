@@ -1880,7 +1880,12 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
         { repo: "/repo", path: ["src", "test"] },
         makeExec(),
       )) as { totalCommentCount: number };
-      expect(String(host.shell.resolveCalls[0]?.command)).toContain("ocr scan");
+      // 命令词可能是 PATH 上的裸 `ocr`，也可能是随包 launcher 的绝对路径；
+      // 而 reaper 还要对整条内层再转义一次。故这里只钉子命令骨架与合并后的 path 列表，
+      // 命令词的解析形态由 lib/cli.ts 自己的用例覆盖。
+      const command = String(host.shell.resolveCalls[0]?.command);
+      expect(command).toMatch(/scan --audience agent/u);
+      expect(command).toContain("src,test");
       expect(result.totalCommentCount).toBe(1);
     });
 

@@ -21,6 +21,9 @@
 //     effort=low 的评审约 19k input tokens），宿主 stdout 有 400KB 截断上限，
 //     落盘读取可避免「截断当完整」误判（zvec-grep 同款思路）。
 
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import {
@@ -252,6 +255,14 @@ function optionalFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): stri
  * 只包 review/scan（分钟级任务）；delegate/session/llm-test 秒级命令不包。
  */
 export function wrapWithHostReaper(command: string): string {
+  // reaper 整条链是 POSIX shell：bash 的 trap/作业控制，加上 ps / pgrep / kill 的
+  // 进程组语义。Windows 上这三样都不成立（没有 `bash -c` 可言、kill 不认 -TERM
+  // 进程组），硬包只会得到 execNotFound 而**不是**任何降级——所以这里按平台闸直接
+  // 放行裸命令：不收割，但能跑。前台另有调用方的超时兜底，代价是宿主硬退出后 OCR
+  // 可能留一个孤儿（Windows 上 launchd 式的收养本身也不存在）。
+  if (process.platform === "win32") {
+    return command;
+  }
   const inner = [
     `p0=$(ps -o ppid= -p $$ | tr -d ' ')`,
     `{ ${command} ; } & ocr=$!`,
@@ -275,6 +286,63 @@ export function wrapWithHostReaper(command: string): string {
 }
 
 /**
+ * `ocr` 命令词。优先用**随包装上**的 `@alibaba-group/open-code-review` 入口：它经
+ * optionalDependencies 带进来（平台二进制再由它自己的 optionalDependencies 选一），
+ * 于是「装上本插件 = 工具可用」，不必用户自己再 brew/npm i -g 一遍。
+ * 解析不到（平台二进制装不上、或部署刻意不随包分发）就回落到 PATH 上的裸 `ocr`，
+ * 与本包一直以来的形态完全一致——两种装法都继续支持。
+ *
+ * 惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在
+ * 装载期抛，否则整包会因为一个可选二进制而下线。
+ */
+/** 随包 launcher 的绝对路径；依赖缺席（或入口不在盘上）时给 undefined。
+ *  默认实现用 createRequire 以本文件为基准解析**本插件自己**的依赖树（打包产物
+ *  host.js 里即随包发布的那个），不走宿主 profile 的目录。做成入参是为了让回落那一档
+ *  在单测里可构造——它平时只在「部署刻意不随包分发」时才发生。 */
+export type LauncherLocator = () => string | null;
+
+export function locateLauncher(): string | null {
+  let launcher: string | null = null;
+  try {
+    const entry = createRequire(import.meta.url).resolve(
+      "@alibaba-group/open-code-review/package.json",
+    );
+    const candidate = path.join(path.dirname(entry), "bin", "ocr.js");
+    // 走 launcher 的绝对路径而不是 `node <path>`：Electron 宿主里 process.execPath
+    // 是 electron 自己，用它去跑脚本会拉起一个 Electron 窗口而不是 Node。
+    // launcher 自带 `#!/usr/bin/env node`，直接执行即可（本包目标平台是 POSIX）。
+    if (existsSync(candidate)) {
+      launcher = candidate;
+    }
+  } catch {
+    // 依赖缺席（optionalDependencies 没装上）：留在 PATH 那一档。
+  }
+  return launcher;
+}
+
+/** 进程级记忆槽（默认那一档）：整包共用一次解析结果。 */
+const memoBox: { value?: string } = {};
+
+/** 解析出的 `ocr` 命令词（已 shq 转义）：随包入口的绝对路径，或 PATH 上的裸 `ocr`。
+ *  惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在
+ *  装载期抛，否则整包会因为一个可选二进制而下线。
+ *  导出给同包的命令构造单测——它们按同一个解析结果写期望值，测试与生产同源，
+ *  而不是各自把「ocr 还是某个绝对路径」写死一遍。
+ * @param locate 随包 launcher 的定位口（默认实现即生产那一档）。
+ * @param memo 记忆槽（默认进程级单例；单测传自己的盒以便反复构造两条分支）。
+ */
+export function ocrCommand(
+  locate: LauncherLocator = locateLauncher,
+  memo: { value?: string } = memoBox,
+): string {
+  if (memo.value === undefined) {
+    const launcher = locate();
+    memo.value = launcher === null ? "ocr" : shq(launcher);
+  }
+  return memo.value;
+}
+
+/**
  * 构造 `ocr review` 命令。--output 固定为调用方给定的临时文件路径（防截断），
  * --audience agent --format json 是默认（结构化、无进度行）。
  * outputPath 缺省（后台模式）省略 --output：结果以 OCR 会话记录为准。
@@ -287,7 +355,7 @@ export function buildReviewCommand(
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
   const parts: string[] = [
-    "ocr",
+    ocrCommand(),
     "review",
     "--audience",
     "agent",
@@ -319,7 +387,7 @@ export function buildScanCommand(
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
   const parts: string[] = [
-    "ocr",
+    ocrCommand(),
     "scan",
     "--audience",
     "agent",
@@ -365,7 +433,7 @@ export function buildDelegatePreviewCommand(
   const repo = assertAbsoluteRoot(args.repo, messages);
   const scopeArgs: ReviewScopeArgs = { ...args, format: "json" };
   const parts: string[] = [
-    "ocr",
+    ocrCommand(),
     "delegate",
     "preview",
     "--format",
@@ -394,7 +462,7 @@ export function buildDelegateRuleCommand(
   }
   // 位置参数以 -- 分隔，避免路径以 '-' 开头被当 flag（clap 同 zvec-grep 处理，
   // cobra 实测支持 -- 分隔）。
-  const parts: string[] = ["ocr", "delegate", "rule", "--format", "json", "--", ...paths];
+  const parts: string[] = [ocrCommand(), "delegate", "rule", "--format", "json", "--", ...paths];
   return { command: parts.join(" "), workdir: repo };
 }
 
@@ -429,7 +497,7 @@ export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessag
   } else {
     sub = id === "" ? "list" : "show";
   }
-  const parts: string[] = ["ocr", "session", sub];
+  const parts: string[] = [ocrCommand(), "session", sub];
   if (sub === "list") {
     parts.push("--json", "--repo", shq(repo));
     const limit = clampPositiveInt(args.limit, 10, 1, 100);

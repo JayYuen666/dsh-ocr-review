@@ -5,7 +5,7 @@
 // 一致），末尾一组用例注入 en 那份，证明同一批校验闸换语言只是换文案、不改判定。
 // 取值闸（转义/绝对路径/逗号列表/钳制）按这层边界直接取用 lib/argv-guard.ts，
 // 命令构造走 lib/cli.ts——与生产侧的引用关系一致。
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   shq,
   assertAbsoluteRoot,
@@ -17,6 +17,8 @@ import {
 import {
   resolveRoot,
   wrapWithHostReaper,
+  ocrCommand,
+  locateLauncher,
   buildReviewCommand,
   buildScanCommand,
   buildDelegatePreviewCommand,
@@ -36,7 +38,28 @@ import type { OcrReviewMessages } from "../lib/messages.ts";
 const { zh } = MESSAGES;
 
 /** 降级回落的目标子命令（action=show/comments 缺 id 时命令必须落回这一条）。 */
-const SESSION_LIST_CMD = "ocr session list";
+/** 解析出的命令词：随包入口的绝对路径，或 PATH 上的裸 `ocr`。测试与生产同源。 */
+
+/** 随包 launcher 的入口是否「在盘上」的可切换替身：lib/cli.ts 的定位口经 existsSync
+ *  判入口，缺了它就只有「装上了」这一档分支——而那取决于本机装没装 optionalDependencies。 */
+const fsStub = vi.hoisted(() => ({ exists: true }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const patched = {
+    ...actual,
+    existsSync: (target: string): boolean =>
+      target.endsWith("ocr.js") ? fsStub.exists : actual.existsSync(target),
+  };
+  return { ...patched, default: patched };
+});
+
+const OCR = ocrCommand();
+/** 可控槽位数（决定命令里应有几段 shq 引号）：命令词另占一段。 */
+const REVIEW_SLOTS = 7;
+const SCAN_SLOTS = 5;
+
+const SESSION_LIST_CMD = `${OCR} session list`;
 
 /* ── 注入中文文案的薄封装（下面的用例因此与迁移前逐字同形）──────────────── */
 
@@ -138,18 +161,72 @@ describe("clampEffort / commaList", () => {
   });
 });
 
+/** 守护包装用例共用的最小命令（字面量散在多处改一处就漏）。 */
+const REVIEW_CMD = "ocr review --audience agent";
+
+describe("ocrCommand：命令词解析", () => {
+  it("定位到随包 launcher → 命令词是它的绝对路径（shq 已转义）", () => {
+    const memo = {};
+    const command = ocrCommand(() => "/opt/pkg/bin/ocr.js", memo);
+    expect(command).toBe("'/opt/pkg/bin/ocr.js'");
+    // 记忆生效：第二次即便定位口给出别的答案也不重解析。
+    expect(ocrCommand(() => "/other/bin/ocr.js", memo)).toBe("'/opt/pkg/bin/ocr.js'");
+  });
+
+  it("定位不到（依赖没随包装上）→ 回落到 PATH 上的裸 ocr，同样只解析一次", () => {
+    const memo = {};
+    // 定位口交出 null 表示「没找到」：与「抛错/找不到模块」同一档回落。
+    expect(ocrCommand(() => null, memo)).toBe("ocr");
+    expect(ocrCommand(() => "/other/bin/ocr.js", memo)).toBe("ocr");
+  });
+
+  it("生产那一档解析出的命令词可直接执行两种装法之一", () => {
+    // 不注入：走默认定位口。装上 optionalDependencies 时是 launcher 绝对路径，
+    // 否则是裸 ocr——两者都是可执行命令词，这里只钉住这个不变量。
+    expect(ocrCommand()).toMatch(/^(?:'.*ocr\.js'|ocr)$/u);
+  });
+
+  it("定位口两档：入口在盘上给出绝对路径，不在盘上给 null（依赖装了一半那一档）", () => {
+    expect(locateLauncher()).toMatch(/ocr\.js$/u);
+    fsStub.exists = false;
+    try {
+      expect(locateLauncher()).toBeNull();
+    } finally {
+      fsStub.exists = true;
+    }
+  });
+});
+
 describe("wrapWithHostReaper", () => {
   it("外层 bash -c，内部命令完整保留且 ppid 监视在位", () => {
-    const wrapped = wrapWithHostReaper("ocr review --audience agent");
+    const wrapped = wrapWithHostReaper(REVIEW_CMD);
     expect(wrapped.startsWith("bash -c '")).toBe(true);
     const inner = unwrapReaper(wrapped);
-    expect(inner).toContain("ocr review --audience agent");
-    expect(inner).toContain("{ ocr review --audience agent ; } & ocr=$!");
+    expect(inner).toContain(REVIEW_CMD);
+    expect(inner).toContain(`{ ${REVIEW_CMD} ; } & ocr=$!`);
     expect(inner).toContain("p0=$(ps -o ppid= -p $$ | tr -d ' ')");
     expect(inner).toContain("trap 'reap; exit 143' TERM INT");
     expect(inner).toContain('killmPid "$ocr"');
     expect(inner).toContain("isl && kill -KILL -- -$$");
     expect(inner).toContain('wait "$ocr"; exit $?');
+  });
+
+  it("进程平台为 win32 时不套守护：POSIX 工具链缺席就放行裸命令（否则 execNotFound）", () => {
+    // 守护整条链是 bash + ps/pgrep/kill 的进程组语义，Windows 上一样都不成立。
+    // 这里把 process.platform 钉成 win32，断言返回的就是原命令、没有任何包装。
+    const real = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      const command = REVIEW_CMD;
+      expect(wrapWithHostReaper(command)).toBe(command);
+      expect(wrapWithHostReaper(command)).not.toContain("bash -c");
+    } finally {
+      if (real === undefined) {
+        Reflect.deleteProperty(process, "platform");
+      } else {
+        Object.defineProperty(process, "platform", real);
+      }
+    }
   });
 
   it("原命令含单引号时二次转义，可精确还原（注入防护）", () => {
@@ -164,7 +241,7 @@ describe("buildReviewCommand", () => {
   it("workspace 默认形态：--audience agent --format json --output", () => {
     const { command, workdir } = reviewCmd({ repo: "/r" }, "/tmp/out.json");
     expect(workdir).toBe("/r");
-    expect(command).toContain("ocr review --audience agent --format json");
+    expect(command).toContain(`${OCR} review --audience agent --format json`);
     expect(command).toContain("--output '/tmp/out.json'");
     expect(command).toContain("--effort medium");
   });
@@ -275,16 +352,16 @@ describe("buildScanCommand", () => {
 describe("buildSessionCommand", () => {
   it("list 缺省：--json --repo --limit 钳制", () => {
     const { command } = sessionCmd({ repo: "/r" });
-    expect(command).toContain("ocr session list --json");
+    expect(command).toContain(`${OCR} session list --json`);
     expect(command).toContain("--repo '/r' --limit 10");
   });
 
   it("id 存在 → show；action=comments → comments", () => {
     expect(sessionCmd({ repo: "/r", id: "abc" }).command).toContain(
-      "ocr session show --json --repo '/r' 'abc'",
+      `${OCR} session show --json --repo '/r' 'abc'`,
     );
     expect(sessionCmd({ repo: "/r", action: "comments", id: "abc" }).command).toContain(
-      "ocr session comments --json --repo '/r' 'abc'",
+      `${OCR} session comments --json --repo '/r' 'abc'`,
     );
   });
 });
@@ -297,13 +374,13 @@ describe("delegate 命令", () => {
       from: "main",
       to: "f",
     });
-    expect(command).toContain("ocr delegate preview --format json");
+    expect(command).toContain(`${OCR} delegate preview --format json`);
     expect(command).toContain("--from 'main' --to 'f'");
   });
 
   it("rule：位置参数逐条转义、-- 分隔防 dash 开头", () => {
     const { command } = ruleCmd({ repo: "/r", paths: ["-weird.ts", "src/a.ts"] });
-    expect(command).toContain("ocr delegate rule --format json -- '-weird.ts' 'src/a.ts'");
+    expect(command).toContain(`${OCR} delegate rule --format json -- '-weird.ts' 'src/a.ts'`);
     expect(() => ruleCmd({ repo: "/r", paths: [] })).toThrow(/至少传一个/u);
   });
 });
@@ -409,8 +486,9 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
       const stripped = skeleton(command);
       expect(stripped).not.toMatch(METACHARS);
       // 载荷必须整段落在引号里：⟦Q⟧ 个数 = 可控槽位数（commit/background/
-      // exclude/provider/model/resume/output）。少一个引号段就意味着裸拼接。
-      expect(stripped.split("⟦Q⟧").length - 1).toBe(7);
+      // exclude/provider/model/resume/output）+ 命令词本身（它也是一段 shq 转义的
+      // 绝对路径）。少一段就意味着裸拼接。
+      expect(stripped.split("⟦Q⟧").length - 1).toBe(REVIEW_SLOTS + 1);
     }
   });
 
@@ -429,7 +507,7 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
       );
       const stripped = skeleton(command);
       expect(stripped).not.toMatch(METACHARS);
-      expect(stripped.split("⟦Q⟧").length - 1).toBe(5);
+      expect(stripped.split("⟦Q⟧").length - 1).toBe(SCAN_SLOTS + 1);
     }
   });
 
@@ -511,7 +589,7 @@ describe("错类型参数：静默回落会扩大审查范围，一律抛错", (
     expect(() => sessionCmd({ repo: "/r", action: "rm -rf /" })).toThrow(/action 非法/u);
     expect(() => sessionCmd({ repo: "/r", id: 9 })).toThrow(/id 必须是字符串/u);
     expect(sessionCmd({ repo: "/r", action: "list", id: "abc" }).command).toContain(
-      "ocr session show",
+      `${OCR} session show`,
     );
   });
 });
@@ -559,7 +637,7 @@ describe("session：action 白名单下的优雅降级", () => {
   });
 
   it("action 缺省但有 id ⇒ show；limit 只在 list 下出现", () => {
-    expect(sessionCmd({ repo: "/r", id: "s1" }).command).toContain("ocr session show");
+    expect(sessionCmd({ repo: "/r", id: "s1" }).command).toContain(`${OCR} session show`);
     expect(sessionCmd({ repo: "/r", id: "s1" }).command).not.toContain("--limit");
   });
 });

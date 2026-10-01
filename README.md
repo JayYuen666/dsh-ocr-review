@@ -16,7 +16,9 @@
 - 本包不 import 任何 OCR 库，只起进程：`ocr review` / `ocr scan` / `ocr delegate preview` / `ocr delegate rule` / `ocr session` / `ocr llm test`。
 - 命令按 v1.12.0 实测契约拼装（`lib/cli.ts`、`lib/parse.ts` 头注释），形如 `ocr review --audience agent --format json --effort medium --output <临时文件>`。
 - 多值 `--exclude`/`--path` 合并成一个逗号分隔 flag，`--format` 只认 json/text/sarif。
-- `ocr` 不在 PATH 上时子进程 exit 127，工具报「ocr 命令不存在」并给出 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review`。
+- 命令解析优先级：先解析**随包装上**的 `@alibaba-group/open-code-review`（`optionalDependencies`，平台二进制由它自己的 optionalDependencies 选一），取其 `bin/ocr.js` 绝对路径；解析不到才回落到 PATH 上的裸 `ocr`——两种装法都继续支持，装上本插件即工具可用，不必用户自己再 brew/npm i -g 一遍。解析是惰性的且每进程只做一次（与 dsh 核心解析 `@vscode/ripgrep` 同款），解析失败不在装载期抛，否则整包会因一个可选二进制而下线。
+- 两条路径都没有时子进程 exit 127，工具报「ocr 命令不存在」并给出 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review`。
+- 平台：目标平台是 macOS / Linux。进程收割（`ocr_review` / `ocr_scan` 的 reaper 守护）依赖 POSIX 工具链——bash 的 trap 与作业控制，加上 `ps` / `pgrep` / `kill` 的进程组语义。Windows 上这层整体缺席，本包按 `process.platform` 直接放行裸命令（不收割但能跑）；代价是宿主硬退出后 OCR 可能留下孤儿进程。
 - provider 清单与 key 状态走宿主官方通道 `ctx.settings.describe()`（`llm-pi-ai` 那条的 `value.providers`）与 `ctx.credentials`。
 - 两者缺席时卡片显示降级原因，工具与设置照常可用。
 - 宿主版本要求 `>=0.2.0-rc.2`：写在 `peerDependencies`（0.1.7-rc 起宿主装插件时校验它；alpha.1 还没有这道门）与 `engines.dsh`（同值、无人读）。
@@ -129,7 +131,9 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 - This package imports no OCR library, it only spawns processes: `ocr review` / `ocr scan` / `ocr delegate preview` / `ocr delegate rule` / `ocr session` / `ocr llm test`.
 - Commands are built against the contract verified on v1.12.0 (header comments of `lib/cli.ts` and `lib/parse.ts`), shaped like `ocr review --audience agent --format json --effort medium --output <temp file>`.
 - Multi-value `--exclude`/`--path` are merged into one comma-separated flag, and `--format` only accepts json/text/sarif.
-- When `ocr` is not on PATH the child exits 127 and the tool reports "ocr command not found", offering `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`.
+- Command resolution order: the launcher bundled with the package first - `@alibaba-group/open-code-review` (an `optionalDependencies` entry, whose own optionalDependencies pick the platform binary) resolved to the absolute path of its `bin/ocr.js` - and only when that does not resolve does it fall back to a bare `ocr` on PATH. Both installation shapes keep working, so installing this plugin is enough to get a working tool without a separate brew / npm i -g step. Resolution is lazy and memoized once per process (the same shape dsh core uses to resolve `@vscode/ripgrep`); a failed resolve never throws at load time, which would take the whole plugin offline over one optional binary.
+- With neither path available the child exits 127 and the tool reports "ocr command not found", offering `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`.
+- Platforms: macOS and Linux are the targets. Process reaping (the reaper guard around `ocr_review` / `ocr_scan`) depends on a POSIX toolchain - bash traps and job control plus the process-group semantics of `ps` / `pgrep` / `kill`. None of that exists on Windows, so the package runs the bare command there (guarded by `process.platform`): no reaping, but it still works. The cost is that a hard host exit can leave an orphaned OCR process.
 - The provider list and the key status come from the official host channels `ctx.settings.describe()` (the `value.providers` of the `llm-pi-ai` entry) and `ctx.credentials`.
 - When either is missing the card shows the degradation reason while tools and settings keep working.
 - The host must be `>=0.2.0-rc.2`: declared in `peerDependencies` (the host checks it on plugin install from 0.1.7-rc; alpha.1 has no such gate yet) and in `engines.dsh` (same value, read by nothing).
