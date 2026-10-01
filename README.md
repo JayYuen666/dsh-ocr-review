@@ -31,6 +31,33 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 - 包在公共 npm 上，安装不需要凭据。
 - 发布面只含 `host.js`、`client.js`、`cordis.patch.yml`、`scripts`（`prepack` 重建两个 bundle），源码仓见 package.json 的 `repository.url`。
+
+#### 安装时 pnpm 拦下依赖脚本（ERR_PNPM_IGNORED_BUILDS）
+
+本包把 `@alibaba-group/open-code-review` 放在 `optionalDependencies`，上游带一个 `postinstall`（`scripts/install.js`）。pnpm 10+ 默认不执行依赖的构建脚本，于是安装会以这个错误收尾：
+
+```
+Error: ERR_PNPM_IGNORED_BUILDS
+  × installing dependencies
+  ╰─▶ Ignored build scripts: @alibaba-group/open-code-review@1.12.11
+```
+
+**这只需要放行一次，且只有装本包时才会遇到**（其余插件无需要构建脚本的依赖）。
+
+推荐做法 —— 在 profile 的 `pnpm-workspace.yaml` 里放行（`<dsh 数据目录>` 下的 `profiles/<profile>/`）：
+
+```yaml
+allowBuilds:
+  '@alibaba-group/open-code-review': true
+```
+
+改完重跑 `pnpm i` 即可。授权按精确包名保存在该 profile，再次安装失败后仍然有效。
+
+也可以走宿主自带的审批流程：失败时 Web 插件页会给出「允许这些脚本并重试」，或在对话里说明同意后让 Agent 通过 `install_bundle` 的 `approvedBuilds` 代为授权。宿主只校验待决定的包名，不核实对话里的批准，所以需要你先明确同意。
+
+**关于这个 postinstall：** 它在正常路径下什么都不做。平台二进制由上游的 `optionalDependencies`（`@alibaba-group/ocr-<os>-<arch>`，各自带 `os` / `cpu` 字段，pnpm 只装匹配当前平台的那个）提供，`install.js` 检测到就打印 `Binary provided by platform package, skipping download.` 后直接返回。实测放行与不放行都能让 `ocr` 正常执行，差别只是要不要在安装期跑那段脚本——它只在平台包装不上时才下载兜底，而在 pnpm 下平台包必然装得上。
+
+如果你更希望完全不执行安装期脚本，可以写 `'@alibaba-group/open-code-review': false`：`ocr` 同样可用（launcher 直接从平台包目录取二进制），但宿主 `readPendingBuilds()` 只认值为 `set this to true or false` 的条目，改成 `false` 后官方审批流程就不再能代为授权，只能手工维护。
 - 运行期值依赖 `@jayyuen66/dsh-plugin-shared`、`@deepseek-ai/schemastery`（宿主 fork 的 schemastery，0.1.7 的 `.volatile()` 解析只在它有实现）与 `js-yaml`（后者只被 `scripts/get-cred.mjs` 用）。
 
 ### 在 dsh 里启用
@@ -147,6 +174,33 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 - The packages are on the public npm registry, so installation needs no credentials.
 - The published files are only `host.js`, `client.js`, `cordis.patch.yml` and `scripts` (`prepack` rebuilds both bundles); source repository: see `repository.url` in package.json.
 - Runtime value dependencies are `@jayyuen66/dsh-plugin-shared`, `@deepseek-ai/schemastery` (the host's fork of schemastery — only it implements the 0.1.7 `.volatile()` resolution) and `js-yaml` (the last one used only by `scripts/get-cred.mjs`).
+
+#### pnpm blocks the dependency script on install (ERR_PNPM_IGNORED_BUILDS)
+
+This package keeps `@alibaba-group/open-code-review` in `optionalDependencies`, and upstream ships a `postinstall` (`scripts/install.js`). pnpm 10+ does not run dependency build scripts unless allowlisted, so the install ends like this:
+
+```
+Error: ERR_PNPM_IGNORED_BUILDS
+  × installing dependencies
+  ╰─▶ Ignored build scripts: @alibaba-group/open-code-review@1.12.11
+```
+
+**Allowlisting is a one-time step, and only this package triggers it** — no other plugin in this family depends on anything with a build script.
+
+The straightforward fix is to allowlist it in the profile's `pnpm-workspace.yaml` (under `<dsh data dir>/profiles/<profile>/`):
+
+```yaml
+allowBuilds:
+  '@alibaba-group/open-code-review': true
+```
+
+Then re-run `pnpm i`. The approval persists in that profile under the exact package name and survives later failed installs.
+
+The host also ships an approval flow of its own: a failed install surfaces "allow these scripts and retry" on the web plugin page, and an Agent can grant it for you through `install_bundle`'s `approvedBuilds` once you have said so in the conversation. The host validates only the pending package names, not the conversational consent, so you must approve it explicitly.
+
+**About that postinstall:** on the normal path it does nothing. The platform binary comes from upstream's `optionalDependencies` (`@alibaba-group/ocr-<os>-<arch>`, each carrying `os` / `cpu` fields so pnpm installs only the one matching your platform); `install.js` detects that, prints `Binary provided by platform package, skipping download.` and returns. Measured, `ocr` runs identically whether or not the script executes — the only difference is whether that code runs during install, and it only downloads when the platform package is missing, which under pnpm never happens.
+
+If you would rather run nothing at install time, write `'@alibaba-group/open-code-review': false` instead: `ocr` still works (the launcher reads the binary straight out of the platform package directory), but the host's `readPendingBuilds()` only recognises entries whose value is `set this to true or false`, so once it is `false` the approval flow can no longer grant it and you maintain that entry by hand.
 
 ### Enabling it in dsh
 
