@@ -1,151 +1,8 @@
 # @jayyuen66/dsh-ocr-review
 
-[中文](#中文) · [English](#english)
+English · [中文](README.zh-CN.md)
 
-## 中文
-
-### 它做什么
-
-- 把外部 `ocr`（open-code-review）CLI 封装成 dsh 的 5 个模型工具 + 1 张 web 设置卡片；宿主对工具入参零校验，形状与类型闸全在本包内做。
-- Host 半（`host.ts`）声明 6 个 `.volatile()` 设置项（0.1.7 起命名空间是隐式的：宿主按 profile 条目 id `ocr-review` 投影表单，插件不再 `settings.register`）、注册 5 个模型工具、一段 systemPrompt 路由（`ocr-review-routing`，order 1555）与 4 个 `/_dsh/ocr-review/*` 端点。
-- Client 半（`src/client-entry.ts` → `client.js`）是设置卡片，provider/model 取自设置服务的 `llm-pi-ai` 命名空间。
-- 卡片把 provider/model 落盘到外部 ocr CLI 自己的 `~/.opencodereview/config.json`，写进去的是 `api_key_cmd` 命令而非明文 key。
-
-### 前置条件（外部 CLI）
-
-- 本包不 import 任何 OCR 库，只起进程：`ocr review` / `ocr scan` / `ocr delegate preview` / `ocr delegate rule` / `ocr session` / `ocr llm test`。
-- 命令按 v1.12.0 实测契约拼装（`lib/cli.ts`、`lib/parse.ts` 头注释），形如 `ocr review --audience agent --format json --effort medium --output <临时文件>`。
-- 多值 `--exclude`/`--path` 合并成一个逗号分隔 flag，`--format` 只认 json/text/sarif。
-- 命令解析优先级：先解析**随包装上**的 `@alibaba-group/open-code-review`（`optionalDependencies`，平台二进制由它自己的 optionalDependencies 选一），取其 `bin/ocr.js` 绝对路径；解析不到才回落到 PATH 上的裸 `ocr`——两种装法都继续支持，装上本插件即工具可用，不必用户自己再 brew/npm i -g 一遍。解析是惰性的且每进程只做一次（与 dsh 核心解析 `@vscode/ripgrep` 同款），解析失败不在装载期抛，否则整包会因一个可选二进制而下线。
-- 两条路径都没有时子进程 exit 127，工具报「ocr 命令不存在」并给出 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review`。
-- 平台：目标平台是 macOS / Linux。进程收割（`ocr_review` / `ocr_scan` 的 reaper 守护）依赖 POSIX 工具链——bash 的 trap 与作业控制，加上 `ps` / `pgrep` / `kill` 的进程组语义。Windows 上这层整体缺席，本包按 `process.platform` 直接放行裸命令（不收割但能跑）；代价是宿主硬退出后 OCR 可能留下孤儿进程。
-- provider 清单与 key 状态走宿主官方通道 `ctx.settings.describe()`（`llm-pi-ai` 那条的 `value.providers`）与 `ctx.credentials`。
-- 两者缺席时卡片显示降级原因，工具与设置照常可用。
-- 宿主版本要求 `>=0.2.0-rc.2`：写在 `peerDependencies`（0.1.7-rc 起宿主装插件时校验它；alpha.1 还没有这道门）与 `engines.dsh`（同值、无人读）。
-
-### 安装
-
-```sh
-dsh plugin --profile web add @jayyuen66/dsh-ocr-review
-```
-
-- 包在公共 npm 上，安装不需要凭据。
-- 发布面只含 `host.js`、`client.js`、`cordis.patch.yml`、`scripts`（`prepack` 重建两个 bundle），源码仓见 package.json 的 `repository.url`。
-
-#### 安装时 pnpm 拦下依赖脚本（ERR_PNPM_IGNORED_BUILDS）
-
-本包把 `@alibaba-group/open-code-review` 放在 `optionalDependencies`，上游带一个 `postinstall`（`scripts/install.js`）。pnpm 10+ 默认不执行依赖的构建脚本，于是安装会以这个错误收尾：
-
-```
-Error: ERR_PNPM_IGNORED_BUILDS
-  × installing dependencies
-  ╰─▶ Ignored build scripts: @alibaba-group/open-code-review@1.12.11
-```
-
-**这只需要放行一次，且只有装本包时才会遇到**（其余插件无需要构建脚本的依赖）。
-
-推荐做法 —— 在 profile 的 `pnpm-workspace.yaml` 里放行（`<dsh 数据目录>` 下的 `profiles/<profile>/`）：
-
-```yaml
-allowBuilds:
-  '@alibaba-group/open-code-review': true
-```
-
-改完重跑 `pnpm i` 即可。授权按精确包名保存在该 profile，再次安装失败后仍然有效。
-
-也可以走宿主自带的审批流程：失败时 Web 插件页会给出「允许这些脚本并重试」，或在对话里说明同意后让 Agent 通过 `install_bundle` 的 `approvedBuilds` 代为授权。宿主只校验待决定的包名，不核实对话里的批准，所以需要你先明确同意。
-
-**关于这个 postinstall：** 它在正常路径下什么都不做。平台二进制由上游的 `optionalDependencies`（`@alibaba-group/ocr-<os>-<arch>`，各自带 `os` / `cpu` 字段，pnpm 只装匹配当前平台的那个）提供，`install.js` 检测到就打印 `Binary provided by platform package, skipping download.` 后直接返回。实测放行与不放行都能让 `ocr` 正常执行，差别只是要不要在安装期跑那段脚本——它只在平台包装不上时才下载兜底，而在 pnpm 下平台包必然装得上。
-
-如果你更希望完全不执行安装期脚本，可以写 `'@alibaba-group/open-code-review': false`：`ocr` 同样可用（launcher 直接从平台包目录取二进制），但宿主 `readPendingBuilds()` 只认值为 `set this to true or false` 的条目，改成 `false` 后官方审批流程就不再能代为授权，只能手工维护。
-- 运行期值依赖 `@jayyuen66/dsh-plugin-shared`、`@deepseek-ai/schemastery`（宿主 fork 的 schemastery，0.1.7 的 `.volatile()` 解析只在它有实现）与 `js-yaml`（后者只被 `scripts/get-cred.mjs` 用）。
-
-### 在 dsh 里启用
-
-- 包内 `cordis.patch.yml` 声明 `- id: ocr-review` / `name: "@jayyuen66/dsh-ocr-review"`，由 `package.json` 的 `dsh.bundle.patch` 指向。
-- `dsh plugin --profile web add/remove` 负责登记与摘除，改完重启 dsh。
-- 卡片要 web profile（`dsh.client.platform: web`、`immediately: true`）。
-- 4 个 `/_dsh/ocr-review/*` 端点挂在 `inject(["webServer"])` 的子 fiber 上：宿主没有 webServer（如 TUI）时子 fiber 不激活、端点不存在，工具与设置照常。真实宿主上 webServer 比本条目晚到位约 1 秒，所以它必须是依赖而不是在 apply 里 `ctx.get` 读一次。
-- 部署默认可写在 profile 注册行的 `config:` 上（cordis 按导出的 `Config` schema 校验并填默认），优先级：设置卡运行时值 > 行 config > 内置默认。
-
-### 提供给模型的工具
-
-| 工具                                         | 入参与约束                                                                                                                                                                                                                                                       |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ocr_review`                                 | repo（绝对路径，缺省=当前会话工作区）、scope workspace/commit/branch（branch 需同时给 from+to，且与 commit 互斥）、effort、background、exclude（最多 50 条）、provider/model/resume、wait                                                                        |
-| 数值参数组（`ocr_review` 的入参）            | concurrency/timeoutMinutes/maxTools/maxTokens/maxTokensBudget，落 `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`，非整数或小于下限即报错                                                                                         |
-| `ocr_scan`                                   | repo、path（最多 100 条）、exclude（50）、batch none/by-language/by-directory、同一组数值参数、wait；无需 git diff                                                                                                                                               |
-| `ocr_delegate_preview` / `ocr_delegate_rule` | 前者：repo、scope/commit/from/to、exclude 50、background；后者：repo、paths 必填 1–200 条，经 `--` 分隔的位置参数逐条转义。OCR 端零 LLM 消耗，只回文件清单与规则分组                                                                                             |
-| `ocr_session`                                | repo、action list/show/comments（白名单，越界即报错）、id、limit（钳到 1–100，缺省 10）；show/comments 缺 id 时回落 list                                                                                                                                         |
-| 后台与回收                                   | `wait: false`（后台启动、不挂宿主 deadline、2 小时后兜底回收、不写 `--output`，结果用 `ocr_session` 轮询）与宿主回收守护只作用于 review/scan 这两条分钟级命令。**那次子进程同时是一枚官方作业**（见下面的「后台作业面」一节），工具回执那份 JSON 在换装那次一字未改（输出契约后来另改为 canonical 对象直返，见下节） |
-
-### 设置项
-
-| 字段             | 取值、默认与用途                                                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `effort`         | low/medium/high，内置默认 medium；`ocr_review` 未显式传 effort 时用它                                                    |
-| `language`       | 中文/English，默认 中文；应用选择时作为顶层 `language` 键写进 OCR config                                                 |
-| `autoVerify`     | 默认 true；true 时 `/select` 成功后自动跑一次 `ocr llm test --color never`（90 秒上限）                                  |
-| `maxComments`    | 默认 12，即摘要保留条数；0 = 不截断，非整数或负数回退 12                                                                 |
-| `timeoutMinutes` | 默认 0 = 请求宿主上限（宿主按 min(请求, shell.maxTimeoutMs) 收口），>0 为分钟数                                          |
-| `ocrConfigPath`  | 外部 ocr CLI 配置的位置；留空按 `os.homedir()/.opencodereview/config.json` 派生，接受 `~` 与 `~/` 前缀，相对路径直接报错 |
-
-### 凭据与配置文件
-
-| 面                     | 事实                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| config 里的凭据形态    | 写进去的是命令不是明文：`api_key_cmd` = `node '<本包 scripts/get-cred.mjs 的路径>' '<REF>'`（两段都过单引号转义），REF 名必须匹配 `^[A-Z0-9_]+$`，否则拒绝构造                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| 写入方式               | 只走原子替换（交官方 `@deepseek-ai/dsh-atomic-write`）：同目录随机后缀 `.<hex>.tmp` → rename，新文件权限 0600 由新 inode 携带、父目录 0700；备份 `.bak` 由本包在 rename **之前**复制并 chmod 0600；整段「读→判→写」由官方 `withFileLock` 串行化，RMW 期间同目录会短暂出现 `config.json.lock`（正常路径下 `finally` 删除，持锁进程崩溃时按 pid 探活接管）；现有 config 是坏 JSON 或顶层非对象时中止写入，绝不「按空配置覆盖」。**已知不一致**：并发争用超过官方默认 2s 等待上限时，写会以 `atomic-write: timed out waiting for the writer lock at …` 抛出并回 400 JSON，这条文本来自官方件、不走 `lib/messages.ts`（本包其余用户可见错误都在消息表里）；换装前 RMW 同处一个 tick、没有超时这条路，是异步化换来的新失败模式，映射它需要给锁等待时间加注入缝并为 2s 超时写测试，本包选择记录而不是静默扩面 |
-| `POST migrate`         | 把 custom provider 条目里的明文 `api_key` 换成 `api_key_cmd` 并删除明文；settings 里查不到 `apiKeyEnv` 的条目原样不动、列进 `skippedUnknown`；一条都没迁移成功时不写盘                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `scripts/get-cred.mjs` | 由外部 ocr CLI 自己起进程调用，是本包唯一还在读宿主凭据文件的地方。数据目录按「命令行第三参数 > `$DSH_HOME` > `~/.dsh`」定位，取值层序为继承来的进程环境变量 > `<dsh 数据目录>/.credentials.yaml` 的 `refs.<REF>` > `<dsh 数据目录>/.env`。刻意不读被审查仓库的项目 `.env`；三层全落空即非零退出，并把查过的位置一并报出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-
-### 对外接口
-
-| 路由                         | 方法 | 入参                                                         | 成功回执                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------------------- | ---- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/_dsh/ocr-review/providers` | GET  | —                                                            | `{providers（每条附 hasKey 布尔）, current, getCredReady, source, csrf}`，不含任何 key 明文                                                                                                                                                                                                                                                                        |
-| `/_dsh/ocr-review/select`    | POST | body `{provider, model}`，两者必须命中 `describe()` 给的清单 | `{ok, applied, llmTest}`（`autoVerify` 关闭时 `llmTest` 为 null）                                                                                                                                                                                                                                                                                                  |
-| `/_dsh/ocr-review/migrate`   | POST | —                                                            | `{ok, migrated, skippedUnknown}`                                                                                                                                                                                                                                                                                                                                   |
-| `/_dsh/ocr-review/test`      | POST | —                                                            | `{ok, output}`（output 先脱敏再截 8000 字符）                                                                                                                                                                                                                                                                                                                      |
-| 三个写端点的统一前置         | —    | —                                                            | handler 第一句是 `guardTrust`（Host 权威 → `sec-fetch-site` 白名单 → `origin` 逐字比对，不过则 403 + `{ok:false,error:"untrusted host authority" \| "cross-origin request rejected"}`）；非 POST 405 带 `Allow: POST` 与 `{ok:false,error:"POST only"}`；缺或错 `x-ocr-csrf` 头 403、body 超 8KB 413、流中断 400；token 每次插件 apply 重新生成，旧 token 随即失效 |
-
-这四条路由随插件的注入子 fiber 生灭。官方 `webServer.register` 交回的是**必须自己调用**的释放器，且对重复路径当场抛错（installed dsh-host-webserver/lib/index.js:177-184），而路由表挂在宿主提供的 webServer 实例上、**不**随本插件卸载而死。本包把四枚释放器挂在 `inject(["webServer"])` 子 fiber 的效应上，于是：热重载（旧 fiber dispose ⇒ 新 apply）不会撞名而挂掉整张设置卡，禁用或卸载插件后这四条端点也不再可达。
-
-### 后台作业面（官方 `ctx.jobs`）
-
-`wait: false` 起的那只外部 `ocr` 子进程，从今天起同时登记为宿主 `ctx.jobs` 里的一枚**未拥有**作业（`kind: "ocr-review"` ⇒ id `ocr-review-N`）。改的是"谁能看见并停掉它"，不是"模型拿到什么"：
-
-| 面               | 事实                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 模型的观察面     | 多了三位：官方 `job_list` 列得出这次评审、`job_output` 读得到它的 stdout/stderr（注册表按自己的节奏从 `proc.observed` 拉，非消费式，与 `readOutput()` 游标互不争夺 — 官方 d.ts 明写 "without stealing bytes from `readOutput`"）、`job_kill` 停得掉它。评审结果本身仍以 `ocr_session` 会话记录为准；工具回执的内容自换装起未变，其后随输出契约改造改为 canonical 对象直返（不再把回执 stringify 进 `{ text }` 双重编码）                                                                              |
-| 坏掉的执行器读者 | 官方泵对"源抛错"的答法是只往宿主日志写一行、此后这一路读作空（实测）⇒ 本包额外写**一条**"这段不完整"进环，只写一次、也不再去敲坏掉的读者                                                                                                                                                                                                                                                                                                                                                                       |
-| controller 寿命  | 只挂在 `start` 那一瞬：官方件在"没有 controller 服务这个 owner"时拒绝 `start`，而 web 面宿主的 `tool-jobs` 在各 preset realm 内（宿主平面那一行被 disabled）⇒ 未拥有作业必须自己挂一枚。挂完立刻摘（实测：摘掉即恢复拒绝、后续 read/kill/落定都不依赖它）——常驻等于在"宿主故意没装 job 工具"的组成里替全宿主开着那道闸门                                                                                                                                                                                       |
-| 三条取消路径     | 工具调用被中止、插件卸载、2 小时兜底 deadline 都是 `jobs.kill(id, undefined, reason)` 而不是绕过它杀进程 ⇒ 记录推到 `stopping`、reason 落进 `detail`（实测绕过那一层，名册里这条会永远停在 `running`）。三条可以叠加（实测对 `stopping` 再 kill 仍回 `requested`、`proc.kill()` 幂等）。reason 是模型可见文本 ⇒ 取双语字典                                                                                                                                                                                     |
-| 取消链里不许抛   | `abort` 监听器里抛出的错误由 Node 以 `process.nextTick` 重抛 ⇒ 未捕获异常 ⇒ **整个宿主进程退出**（本机实跑复现：`Error: unknown job ...` + `EXIT=1`）。官方件也不替生产者兜：`killJob` 裸调 `job.cancel()`（installed dsh-jobs-local:611-622，只有 teardown 那一臂逐条 try/catch），注册表被重载/关掉时对陌生 id 抛（同文件 `:554-558`）。于是两层各兜一次：`cancel` 经 `killProc` 吞掉"进程早就不在了"那一类，`stop` 兜住注册表那一臂，兜不住时退化成直接杀我们自己的进程（各有一条用例，删掉任一层那条就红） |
-| 2 小时兜底       | 本包仍不给外部 CLI 套宿主 `timeoutMs`（长评审会被误砍），但"完全没有终点"在换装后有了新受害者：未拥有的 10 格桶是**全宿主共用**的（实测 `running` 与 `stopping` 都计数、满员直接拒绝新 `start`）⇒ 一条挂死的 CLI 会永久占一格。收法用注册表自己的 `wait(id, ms)` + `kill`，不用宿主 timer 也不裸 `setTimeout`                                                                                                                                                                                                  |
-| 未拥有的暴露面   | 官方件按 owner 隔离，未拥有作业任何 caller 都能 `list`/`read`/`kill`。这是本波已知并接受的暴露面（受有作业要 `dsh-agent` 注册表，实测不可得）；回滚这次换装是唯一的收回方式                                                                                                                                                                                                                                                                                                                                    |
-| 落定记录窗口     | 注册表不会自行回收已落定的记录，而它随宿主活着、不随本插件卸载而死 ⇒ 本包在每次登记前剪掉 `ocr-review` 这一 kind 最老的已落定记录，剪到 9 条再起新的 ⇒ 在册任何时刻都不超过 10 条（每条最多带一只 256 KiB 的环）。卸载时两件事都做：活着的经注册表 kill，已落定的 remove —— 用户直接禁用本包就没有"下一次 apply"来剪窗口了。在跑与正在收的一条都不被剪 —— 官方件对超额的答法是**拒绝新 start**（实测未拥有桶 10），不是替我们杀评审                                                                            |
-| 没注册表没后台   | 宿主没装 `dsh-jobs-local` 时，`wait: false` 直接抛出点名缺件的错误，**不会**先把子进程起在没人看得见的地方。前台（`wait: true`）不受影响                                                                                                                                                                                                                                                                                                                                                                       |
-
-### 数据与隐私
-
-| 面           | 事实                                                                                                                                                                                                                                                                                                     |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 进程边界     | 被审查仓库的路径与 diff 内容进 `ocr` 子进程，OCR 再把它发给自己在 config.json 里配置的 LLM 端点；这条外发是审查功能本身，不经 dsh 宿主。明文 key 不进工具返回、不进 `/_dsh/*`，宿主侧 `resolve()` 拿到的值只用于确认「现在解析得到」，当场丢弃                                                           |
-| 原始输出脱敏 | OCR 的原始 stdout/stderr（失败详情、llm test、解析失败回显、session 透传）出宿主前统一过 `redactKeyMaterial()`：Bearer 与赋值形态从严抹除，独立 key 形态额外要求随机串特征，以免把要交给模型的文件路径一起抹掉                                                                                           |
-| 写盘范围     | 本包写盘只有两处：外部 ocr CLI 的 `config.json`（含同目录随机后缀 `.tmp`、备份 `.bak`，以及 RMW 期间短暂存在、正常路径下即删的 `config.json.lock`）与系统临时目录下的 `ocr-review-*`/`ocr-scan-*`（读完即删）。迁移前的明文可能仍留在同一次写入产生的 `.bak` 里（权限 0600），要彻底清掉需自行删除该备份 |
-
-### 常见问题
-
-| 现象                   | 结论                                                                                                                                                                                                                         |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| exit 0 就以为评审成功  | exit 0 不等于评审成功：`status` 不在 success/complete/completed_with_warnings/completed_with_errors/skipped 白名单内即按失败报（`{"error": …}` 属这类），解析失败时回显脱敏后的原文前 500 码元（UTF-16，一张 emoji 占 2 枚） |
-| 摘要是否覆盖了全部产出 | `droppedCount` 与 `invalidCommentCount` 同时为 0 才覆盖 OCR 全部产出，否则调大 `maxComments`（或置 0）再复核；stdout 侧另有 400000 字节上限，所以评审结果统一走 `--output` 临时文件                                          |
-| dsh 退出时的后台进程   | dsh 以任何方式退出（含 kill -9 后被 launchd 收养）时，review/scan 的 OCR 进程树由命令内守护 TERM→1s→KILL 收走；取消工具调用即终止对应的后台进程                                                                              |
-
-## English
-
-### What it does
+## What it does
 
 - Wraps the external `ocr` (open-code-review) CLI into 5 model tools plus 1 web settings card for dsh; the host validates tool arguments not at all, so every shape and type gate lives in this package.
 - The host half (`host.ts`) declares 6 `.volatile()` settings fields — as of 0.1.7 the namespace is implicit: the host projects the form from the profile entry id `ocr-review` and the plugin calls no `settings.register`.
@@ -153,10 +10,10 @@ allowBuilds:
 - The client half (`src/client-entry.ts` → `client.js`) is the settings card, taking provider/model from the `llm-pi-ai` namespace of the settings service.
 - It writes provider/model into the external ocr CLI's own `~/.opencodereview/config.json` — as an `api_key_cmd` command, never as a plaintext key.
 
-### Prerequisites (external CLI)
+## Prerequisites (external CLI)
 
 - This package imports no OCR library, it only spawns processes: `ocr review` / `ocr scan` / `ocr delegate preview` / `ocr delegate rule` / `ocr session` / `ocr llm test`.
-- Commands are built against the contract verified on v1.12.0 (header comments of `lib/cli.ts` and `lib/parse.ts`), shaped like `ocr review --audience agent --format json --effort medium --output <temp file>`.
+- Commands are built against the contract verified line-by-line on the v1.12.x source (header comments of `lib/cli.ts` and `lib/parse.ts`), shaped like `ocr review --audience agent --format json --effort medium --output <temp file>`.
 - Multi-value `--exclude`/`--path` are merged into one comma-separated flag, and `--format` only accepts json/text/sarif.
 - Command resolution order: the launcher bundled with the package first - `@alibaba-group/open-code-review` (an `optionalDependencies` entry, whose own optionalDependencies pick the platform binary) resolved to the absolute path of its `bin/ocr.js` - and only when that does not resolve does it fall back to a bare `ocr` on PATH. Both installation shapes keep working, so installing this plugin is enough to get a working tool without a separate brew / npm i -g step. Resolution is lazy and memoized once per process (the same shape dsh core uses to resolve `@vscode/ripgrep`); a failed resolve never throws at load time, which would take the whole plugin offline over one optional binary.
 - With neither path available the child exits 127 and the tool reports "ocr command not found", offering `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`.
@@ -165,7 +22,7 @@ allowBuilds:
 - When either is missing the card shows the degradation reason while tools and settings keep working.
 - The host must be `>=0.2.0-rc.2`: declared in `peerDependencies` (the host checks it on plugin install from 0.1.7-rc; alpha.1 has no such gate yet) and in `engines.dsh` (same value, read by nothing).
 
-### Installation
+## Installation
 
 ```sh
 dsh plugin --profile web add @jayyuen66/dsh-ocr-review
@@ -175,7 +32,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 - The published files are only `host.js`, `client.js`, `cordis.patch.yml` and `scripts` (`prepack` rebuilds both bundles); source repository: see `repository.url` in package.json.
 - Runtime value dependencies are `@jayyuen66/dsh-plugin-shared`, `@deepseek-ai/schemastery` (the host's fork of schemastery — only it implements the 0.1.7 `.volatile()` resolution) and `js-yaml` (the last one used only by `scripts/get-cred.mjs`).
 
-#### pnpm blocks the dependency script on install (ERR_PNPM_IGNORED_BUILDS)
+## pnpm blocks the dependency script on install (ERR_PNPM_IGNORED_BUILDS)
 
 This package keeps `@alibaba-group/open-code-review` in `optionalDependencies`, and upstream ships a `postinstall` (`scripts/install.js`). pnpm 10+ does not run dependency build scripts unless allowlisted, so the install ends like this:
 
@@ -202,7 +59,7 @@ The host also ships an approval flow of its own: a failed install surfaces "allo
 
 If you would rather run nothing at install time, write `'@alibaba-group/open-code-review': false` instead: `ocr` still works (the launcher reads the binary straight out of the platform package directory), but the host's `readPendingBuilds()` only recognises entries whose value is `set this to true or false`, so once it is `false` the approval flow can no longer grant it and you maintain that entry by hand.
 
-### Enabling it in dsh
+## Enabling it in dsh
 
 - The in-package `cordis.patch.yml` declares `- id: ocr-review` / `name: "@jayyuen66/dsh-ocr-review"` and is pointed at by `dsh.bundle.patch` in `package.json`.
 - `dsh plugin --profile web add/remove` registers and removes it, then restart dsh.
@@ -211,18 +68,18 @@ If you would rather run nothing at install time, write `'@alibaba-group/open-cod
   - On the real host webServer arrives about a second after this entry, which is why it has to be a dependency rather than a one-off `ctx.get` in apply.
 - Deployment defaults can go on the profile's `config:` line (cordis validates and fills defaults through the exported `Config` schema); precedence: runtime settings value > line config > built-in default.
 
-### Tools exposed to the model
+## Tools exposed to the model
 
 | Tool                                         | Arguments and constraints                                                                                                                                                                                                                                                                                                                                  |
 | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ocr_review`                                 | repo (absolute path, default = current session workspace), scope workspace/commit/branch (branch needs both from+to and is mutually exclusive with commit), effort, background, exclude (at most 50 entries), provider/model/resume, wait                                                                                                                  |
-| Numeric group (arguments of `ocr_review`)    | concurrency/timeoutMinutes/maxTools/maxTokens/maxTokensBudget (mapped to `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`; non-integers or values below the floor are rejected)                                                                                                                                              |
-| `ocr_scan`                                   | repo, path (at most 100 entries), exclude (50), batch none/by-language/by-directory, the same numeric group, wait; no git diff required                                                                                                                                                                                                                    |
+| `ocr_review`                                 | repo (absolute path, default = current session workspace), scope workspace/commit/branch (branch needs both from+to and is mutually exclusive with commit), effort, background, exclude (at most 50 entries), provider/model/resume (resume only with commit/branch — workspace reviews cannot be resumed), wait                                                                                                                  |
+| Numeric group (arguments of `ocr_review`)    | concurrency/timeoutMinutes/maxTools/maxTokens/maxTokensBudget (mapped to `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`; non-integers or values below the floor are rejected; note that `--max-tools` values 1-49 are raised to 50 by OCR — its help text says min 50)                                                                                                                                              |
+| `ocr_scan`                                   | repo, path (at most 100 entries), exclude (50), batch none/by-language/by-directory, provider/model (native shared flags of scan_cmd, matching review), the same numeric group, wait; no git diff required                                                                                                                                                                                                                    |
 | `ocr_delegate_preview` / `ocr_delegate_rule` | The former: repo, scope/commit/from/to, exclude 50, background. The latter: repo, paths required, 1–200 entries, positional arguments after `--`, each escaped. Zero LLM cost on the OCR side, they return only the file list and the rule groups                                                                                                          |
 | `ocr_session`                                | repo, action list/show/comments (whitelist, anything else errors), id, limit (clamped to 1–100, default 10); show/comments without an id falls back to list                                                                                                                                                                                                |
 | Background and reaper                        | `wait: false` (background start, no host deadline, reclaimed by a 2-hour backstop, no `--output`, poll results with `ocr_session`) and the host reaper guard apply only to these two minute-scale commands, review and scan - that subprocess is also an official job (see the job-surface section below); that change left the tool's JSON untouched (a later output-contract rework switched it to the direct canonical object, see below) |
 
-### Settings
+## Settings
 
 | Field            | Values, defaults and use                                                                                                                                                |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -231,18 +88,26 @@ If you would rather run nothing at install time, write `'@alibaba-group/open-cod
 | `autoVerify`     | default true; when true, a successful `/select` also runs `ocr llm test --color never` (capped at 90 seconds)                                                           |
 | `maxComments`    | default 12, the number of comments kept in the summary; 0 = no truncation, non-integers and negatives fall back to 12                                                   |
 | `timeoutMinutes` | default 0 = request the host cap (the host clamps to min(request, shell.maxTimeoutMs)), >0 is a number of minutes                                                       |
-| `ocrConfigPath`  | where the external ocr CLI config lives; left empty it derives `os.homedir()/.opencodereview/config.json`, `~` and `~/` prefixes are accepted, relative paths error out |
+| `ocrConfigPath`  | where the external ocr CLI config lives; left empty it derives `os.homedir()/.opencodereview/config.json`, `~` and `~/` prefixes are accepted, relative paths error out. **A custom value must follow the `<X>/.opencodereview/config.json` layout**: OCR has no file-level path override (it only ever looks at `<HOME>/.opencodereview/config.json`, `config_cmd.go:92-99`), so the plugin makes it effective by injecting `HOME=<X>` into the ocr subprocess (config and sessions are redirected together, and `api_key_cmd` carries the host-resolved data directory as get-cred's explicit first-tier locator); any path outside that layout is rejected outright at the setting layer rather than silently mismatching (the HOME injection is a POSIX assignment prefix; Windows has no such channel, so custom paths only take effect on macOS/Linux) |
 
-### Credentials and config files
+Three deployment-level tuning keys are deliberately **not** on the settings card — they are plain (non-volatile) fields of the exported `Config`, settable only on the profile's `config:` line and taking effect on restart:
+
+| Key                  | Default   | Use                                                                                                          |
+| -------------------- | --------- | ------------------------------------------------------------------------------------------------------------ |
+| `llmTestTimeoutMs`   | `90000`   | Wall clock for `ocr llm test` (shared by autoVerify and the card's "test connection"); raise it on slow machines |
+| `ocrBackgroundMaxMs` | `7200000` | The 2-hour backstop window for background reviews (`jobs.wait` to the deadline, then `kill`)                    |
+| `stdoutMaxBytes`     | `400000`  | Executor stdout buffer cap, shared by foreground and background runs                                            |
+
+## Credentials and config files
 
 | Aspect                        | Fact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Credential form in the config | What lands in the config is a command, not a secret: `api_key_cmd` = `node '<path of scripts/get-cred.mjs in this package>' '<REF>'` (both parts single-quote escaped), and the REF name must match `^[A-Z0-9_]+$` or the command is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Credential form in the config | What lands in the config is a command, not a secret: `api_key_cmd` = `node '<path of scripts/get-cred.mjs in this package>' '<REF>' '<dsh data dir>'` (all three parts single-quote escaped; the third is the host's current `resolveDshHome()` result, so get-cred's fallback layers stay correct when HOME is redirected or the dsh home is set outside the env), and the REF name must match `^[A-Z0-9_]+$` or the command is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | How writes happen             | Atomic replacements via the official `@deepseek-ai/dsh-atomic-write`: a random-suffixed `.<hex>.tmp` sibling created with `wx`, then rename, with the new inode carrying 0600 (parent directories 0700). The `.bak` backup is copied by this package **before** the rename and chmod-ed to 0600 (the official helper has no backup semantics). The whole read→decide→write span is serialized by the official `withFileLock`, so a short-lived `config.json.lock` appears in that directory during a write and is removed in `finally`; a lock left by a crashed holder is taken over via a pid liveness probe. **Known inconsistency**: contention beyond the official default 2s wait makes the write throw `atomic-write: timed out waiting for the writer lock at …`, and the endpoint answers 400 with that English text verbatim — it comes from the official package and bypasses `lib/messages.ts`, unlike every other user-visible error here. Before this swap the read-modify-write shared one event-loop tick, so this failure mode did not exist; mapping it would need an injectable wait budget plus a timeout test, so this package documents it instead of silently widening the surface. An existing config that is invalid JSON or whose top level is not an object aborts the write instead of "treating it as empty and overwriting" |
 | `POST migrate`                | Replaces the plaintext `api_key` of custom provider entries with `api_key_cmd` and deletes the plaintext; entries whose `apiKeyEnv` is not found in settings are left untouched and listed in `skippedUnknown`; nothing is written when nothing was migrated                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `scripts/get-cred.mjs`        | Spawned by the external ocr CLI itself and the only place in this package still reading host credential files. The data directory is resolved as explicit third argument > `$DSH_HOME` > `~/.dsh`, and values are looked up in inherited process environment > `refs.<REF>` of `<dsh data dir>/.credentials.yaml` > `<dsh data dir>/.env`. The project `.env` of the reviewed repository is deliberately not read; when all three layers miss it exits non-zero and names every location it checked                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
-### Public endpoints
+## Public endpoints
 
 | Route                                    | Method | Input                                                                     | Success payload                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------------------------------------- | ------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -254,7 +119,7 @@ If you would rather run nothing at install time, write `'@alibaba-group/open-cod
 
 These four routes live and die with the plugin's injected child fiber. The official `webServer.register` hands back a disposer the **caller must invoke**, and it throws on a duplicate path outright (installed dsh-host-webserver/lib/index.js:177-184), while the route table belongs to the host-provided webServer instance and does **not** die when this plugin's fiber does. This package attaches all four disposers to the effect of the `inject(["webServer"])` child fiber, so a hot reload (old fiber disposes, then a new apply runs) cannot collide on the path and kill the whole settings card, and disabling or uninstalling the plugin makes these endpoints unreachable again.
 
-### The background job surface (official `ctx.jobs`)
+## The background job surface (official `ctx.jobs`)
 
 The external `ocr` subprocess started by `wait: false` is now also registered as an **unowned** job in the host's `ctx.jobs` (`kind: "ocr-review"`, id `ocr-review-N`). What changed is who can see and stop it, not what the model receives:
 
@@ -270,7 +135,7 @@ The external `ocr` subprocess started by `wait: false` is now also registered as
 | Settled-record window      | The registry never recycles settled records on its own, and it outlives this plugin - so before each registration this package prunes the oldest settled `ocr-review` records down to 9 and only then starts, so the roster never holds more than 10 (each ring is capped at 256 KiB). At unload both jobs are done: live ones are killed through the registry, settled ones are removed - disabling this plugin means there is no "next apply" left to prune the window. Live and stopping records are never pruned: the registry answers overflow by **refusing `start`** (measured: the unowned bucket holds 10), not by killing somebody's review                                                                        |
 | No registry, no background | When the host has not loaded `dsh-jobs-local`, `wait: false` throws an error naming the missing piece instead of starting a subprocess nobody can observe. Foreground runs (`wait: true`) are unaffected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
-### Data and privacy
+## Data and privacy
 
 | Aspect                  | Fact                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -278,10 +143,21 @@ The external `ocr` subprocess started by `wait: false` is now also registered as
 | Redaction of raw output | Raw OCR stdout/stderr (failure details, llm test, parse-failure echoes, session passthrough) all go through `redactKeyMaterial()` before leaving the host: bearer and assignment forms are redacted strictly, while the standalone-key form additionally demands random-string features so that file paths handed to the model are not erased as well                                                                                                                                       |
 | Places written          | This package writes to only two places: the external ocr CLI's `config.json` (plus its random-suffixed `.tmp`, the `.bak` backup, and the short-lived `config.json.lock` held only for the duration of one read-modify-write) and `ocr-review-*`/`ocr-scan-*` in the system temp directory (removed right after reading). Plaintext that predates a migration may still sit in the `.bak` produced by that same write (mode 0600); removing it for good means deleting that backup yourself |
 
-### FAQ
+## FAQ
 
 | Symptom                                | Verdict                                                                                                                                                                                                                                                                                          |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Exit 0 taken for a successful review   | Exit 0 is not a successful review: any `status` outside success/complete/completed_with_warnings/completed_with_errors/skipped is reported as failure (`{"error": …}` is of that kind), and a parse failure echoes the first 500 redacted UTF-16 code units of the raw output (an emoji takes 2) |
+| Exit 0 taken for a successful review   | Exit 0 is not a successful review: any `status` outside success/complete/**partial**/completed_with_warnings/completed_with_errors/skipped is reported as failure (`{"error": …}` is of that kind; partial is one of the manifest terminal states — some files failed but coverage remains, and the comments still stand), and a parse failure echoes the first 500 redacted UTF-16 code units of the raw output (an emoji takes 2) |
 | Whether the summary covered everything | It covers everything OCR produced only when `droppedCount` and `invalidCommentCount` are both 0, otherwise raise `maxComments` (or set 0) and re-check; stdout has its own 400000-byte cap, which is why review results always go through the `--output` temp file                               |
 | Background processes when dsh exits    | When dsh exits in any way (including kill -9 followed by launchd adoption), the OCR process tree of review/scan is taken down by the reaper guard inside the command with TERM→1s→KILL; cancelling the tool call terminates the corresponding background process too                             |
+
+## Development
+
+- `npm run check` is the single gate to run before publishing: typecheck (both tsconfigs) + `oxlint` + rebuild both bundles + `npm test` (vitest with coverage) + `oxfmt --check`.
+- `npm test` runs with `--coverage` under a **100% global threshold** (lines/statements/branches/functions) — any line or branch not pinned by a test turns the suite red by design.
+- `npm run build` / `npm run build:client` produce the published `host.js` / `client.js`. After editing `host.ts`, `lib/*` or `src/*` they must be rebuilt (`test/build-host.test.ts` pins bundle freshness against the sources, so a stale bundle fails the suite). Never hand-edit the bundles.
+- The plugin source is TypeScript loaded directly by the host's cordis loader (Node ≥ 22.18 type stripping); the bundles exist for the published npm surface.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
