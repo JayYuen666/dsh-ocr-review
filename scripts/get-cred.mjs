@@ -17,8 +17,12 @@
 // 本包代码不会 import 它，也没有别的调用点。
 //
 // 数据目录怎么找（刻意不写死 ~/.dsh）：显式第三参数 > $DSH_HOME > os.homedir()/.dsh
-//   —— 与宿主 util/home-paths 的 resolveDshHome 优先级一致（configured > env > 默认），
-//   第一档在这里只能是命令行参数，因为「启动参数指定的 home」 plugin 侧也无从得知。
+//   —— 与宿主 util/home-paths 的 resolveDshHome 优先级一致（configured > env > 默认）。
+//   第三参数由 buildApiKeyCmd（lib/config-store.ts）在写 api_key_cmd 时带上：值是
+//   **宿主进程此刻** resolveDshHome() 的解析结果。必须显式钉住的原因：设置项
+//   ocrConfigPath 会给 ocr 子进程注入 HOME（<X>/.opencodereview/config.json 布局），
+//   本脚本的 homedir() 兜底随之读 X/.dsh 就跑偏了；部署若以非 env 方式指定 dsh home，
+//   env 档同样不可靠。
 //
 // 取值的层序镜像官方 credentials-local 的优先级里**够得到**的那两层：
 //   1. 继承来的进程环境（dsh 的 env 层就是最高层：`DEEPSEEK_API_KEY=… dsh` 时，

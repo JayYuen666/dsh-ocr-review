@@ -27,10 +27,29 @@ export interface DshProvider {
   displayName: string;
   /** 该 provider 的 key 在凭据服务里的 ref 名（apiKeyEnv）；未声明为 null。 */
   apiKeyEnv: string | null;
-  protocol: "openai" | "openai-responses";
+  /** OCR config 的 protocol 值（由下面的映射表从 llm-pi-ai 的 `api` 算出；表外
+   *  值原样透传，由 apply 侧白名单拒绝——绝不静默降级成 openai）。 */
+  protocol: string;
   baseURL: string;
   models: DshModel[];
 }
+
+/**
+ * llm-pi-ai 的 `api` 协议 → OCR config 的 `protocol` 映射。
+ *
+ * 两侧枚举的对照（dsh packages/llm/llm-pi-ai/src/provider.ts:44-48 的 PROTOCOLS
+ * 对 OCR config_cmd.go:796 的 "Protocol values: anthropic, anthropic-bedrock,
+ * openai, openai-responses"）：openai-completions 与 OCR 的 openai 是同一条
+ * OpenAI Chat Completions 线协议；anthropic-messages 即 OCR 的 anthropic。
+ * 此前「非 openai-responses 一律 openai」的二值映射会把 anthropic-messages 的
+ * 端点按 OpenAI 线协议打出去——select 成功、OCR 调不通。表外值透传，让
+ * renderSelectedConfig 的白名单给出可读错误。
+ */
+const OCR_PROTOCOL_BY_API: Readonly<Record<string, string>> = {
+  "openai-completions": "openai",
+  "openai-responses": "openai-responses",
+  "anthropic-messages": "anthropic",
+};
 
 /** 原始 model 对象 → DshModel（缺 id 视为无效，返回 null）。 */
 function modelFromRaw(modelRaw: unknown): DshModel | null {
@@ -55,7 +74,10 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
     typeof entry["apiKeyEnv"] === "string" && entry["apiKeyEnv"].trim()
       ? entry["apiKeyEnv"].trim()
       : null;
-  const protocol = entry["api"] === "openai-responses" ? "openai-responses" : "openai";
+  // llm-pi-ai 侧 `api` 未声明时按 openai-completions 兜底（discovery.ts:300
+  // `request.api ?? 'openai-completions'`），与它保持同一默认。
+  const api = typeof entry["api"] === "string" ? entry["api"] : "";
+  const protocol = api === "" ? "openai" : (OCR_PROTOCOL_BY_API[api] ?? api);
   const baseURL = typeof entry["baseURL"] === "string" ? entry["baseURL"] : "";
   if (!baseURL) {
     return null;
@@ -79,7 +101,7 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
 /**
  * settings 命名空间解析值 → provider 列表（纯投影，不含任何 key 值）。
  * 上游形状（settings 里 llm-pi-ai.providers.<name>）：
- *   { displayName?, apiKeyEnv?, api: openai-completions|openai-responses,
+ *   { displayName?, apiKeyEnv?, api: openai-completions|openai-responses|anthropic-messages,
  *     baseURL, models?: [{id,name,…}] }
  * 形状不合的条目整条丢弃（读侧宽容：卡片要能打开让用户去修），写侧才 fail-loud。
  */

@@ -227,7 +227,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "前台墙钟超时（分钟）；0 = 宿主上限（shell.maxTimeoutMs，当前 60 分钟）；更长的评审用工具 wait=false 后台模式（不设宿主 deadline，2 小时后兜底回收）（默认 0）",
     configPathLabel: "OCR 配置文件 (ocrConfigPath)",
     configPathHint:
-      "外部 open-code-review CLI 自己的配置位置；留空 = 按当前用户主目录下的 ~/.opencodereview/config.json",
+      "外部 open-code-review CLI 自己的配置位置；留空 = ~/.opencodereview/config.json。自定义时必须是 <X>/.opencodereview/config.json 布局（OCR 只认该形状，插件经 HOME 重定向让它生效）",
     settingsLoading: "设置加载中，稍候可改",
     keyDynamicHint: "key 走 get-cred.mjs 动态读取，OCR 配置不留明文",
     keyScriptMissing: "⚠ get-cred 脚本缺失，api_key_cmd 无法工作",
@@ -292,7 +292,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "Foreground wall-clock timeout in minutes; 0 = host cap (shell.maxTimeoutMs, currently 60 min); for longer reviews use the tool's wait=false background mode (no host deadline, reclaimed by a 2-hour backstop) (default 0)",
     configPathLabel: "OCR config file (ocrConfigPath)",
     configPathHint:
-      "Where the external open-code-review CLI keeps its own config; empty = ~/.opencodereview/config.json under the current home directory",
+      "Where the external open-code-review CLI keeps its own config; empty = ~/.opencodereview/config.json. A custom value must follow the <X>/.opencodereview/config.json layout (OCR only reads that shape; the plugin makes it effective via a HOME redirect)",
     settingsLoading: "settings still loading — editable in a moment",
     keyDynamicHint: "Keys are read dynamically via get-cred.mjs; OCR config keeps no plain text",
     keyScriptMissing: "⚠ get-cred script missing, api_key_cmd cannot work",

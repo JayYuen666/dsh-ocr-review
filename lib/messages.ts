@@ -88,10 +88,18 @@ export interface OcrReviewMessages {
   readonly commitNeedsValue: string;
   /** scope 白名单外。 */
   readonly unknownScope: string;
+  /** resume 与 workspace 同给（OCR 契约：workspace 不支持恢复）。 */
+  readonly resumeNeedsScope: string;
+  /** wait 非布尔（字符串 "false" 若按真值处理会静默从后台变前台）。 */
+  readonly waitMustBeBoolean: string;
   /** delegate rule 的 paths 为空。 */
   readonly pathsRequired: string;
   /** session action 白名单外（点名期望值）。 */
   readonly invalidAction: string;
+  /** session limit 显式给出但不是 1-100 整数（不再静默钳制）。 */
+  readonly sessionLimitRange: string;
+  /** action=list 与 id 同给（自相矛盾，不再静默改写成 show）。 */
+  readonly listRejectsId: string;
   // ── 工具返回形态守卫（lib/output.ts 消费本表）───────────────────────────────
   /** 返回值不符合该工具的 output schema（violation 明细列表）。 */
   readonly resultSchemaViolation: string;
@@ -122,7 +130,11 @@ export interface OcrReviewMessages {
   readonly configNotObject: string;
   readonly providerNotInList: string;
   readonly modelNotInList: string;
+  /** provider 的 api 协议无法映射到 OCR 的 protocol（投影透传的未知值）。 */
+  readonly protocolUnsupported: string;
   readonly ocrConfigPathInvalid: string;
+  /** ocrConfigPath 不是 <X>/.opencodereview/config.json 布局（OCR 无文件级覆盖）。 */
+  readonly configPathLayoutInvalid: string;
   readonly noApiKeyEnv: string;
   readonly keyNotResolvable: string;
   readonly credScriptMissing: string;
@@ -223,8 +235,13 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     branchNeedsFromAndTo: "scope=branch 需要同时提供 from 与 to",
     commitNeedsValue: "scope=commit 需要 commit 参数",
     unknownScope: "未知 scope：{scope}（workspace/commit/branch）",
+    resumeNeedsScope:
+      "resume 需要 scope=commit 或 scope=branch（workspace 工作区评审不支持恢复，OCR 会直接拒绝）；请同时给出 commit 或 from/to",
+    waitMustBeBoolean: "wait 必须是布尔值（true/false），收到 {received}",
     pathsRequired: "paths 必填：至少传一个待审查文件的仓库相对路径",
     invalidAction: "action 非法：{action}（期望 {expected}）",
+    sessionLimitRange: "limit 需要为 1-100 的整数（缺省 10），收到 {received}",
+    listRejectsId: "action=list 不接受 id（查单个会话请用 action=show 或 action=comments）",
     resultSchemaViolation: "ocr {tool}: 返回值不符合该工具的 output schema：{violations}",
     resultSchemaUnsupported:
       "ocr {tool}: 返回形态守卫不支持 output schema 关键字 {keyword}（插件内 bug：lib/output.ts 的关键字子集没跟上 schema）",
@@ -238,8 +255,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     warningSeparator: "：",
     reviewSummaryHint:
       "完整评论与逐文件失败详情请用 `ocr session show <session_id>` 查看；start_line=0 表示 OCR 未能锚定行号，" +
-      "可依据 suggestion/existing_code 在文件中定位。" +
-      "判读口径：droppedCount 与 invalidCommentCount 同时为 0 时本摘要才覆盖 OCR 的全部产出；" +
+      "可依据 suggestion/existing_code 在文件中定位。status=partial 表示部分文件未完成审查（失败明细在 warnings），" +
+      "评论仍然有效。判读口径：droppedCount 与 invalidCommentCount 同时为 0 时本摘要才覆盖 OCR 的全部产出；" +
       "否则请调大 maxComments（或置 0 = 不截断）后复核，切勿把「本摘要无 critical」当作「代码干净」。",
     lineZeroNote: "(line 0: 定位失败，按 existing_code 手动定位)",
     parseFailedWithReason:
@@ -252,13 +269,23 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "dsh 配置里没有 {ns} 命名空间：未安装 pi-ai 适配器，或还没配置任何 provider",
     sourceCredentialsUnavailable:
       "dsh 凭据服务（ctx.credentials）未装配：无法确认 provider 的 API key 是否已配置",
-    badEnvKey: "非法 env key：{key}",
+    badEnvKey:
+      "非法 env key：{key}（get-cred 只接受 ^[A-Z0-9_]+$ 的大写 ref 名；" +
+      "请在 dsh 配置里把该 provider 的 apiKeyEnv 改成大写字母/数字/下划线）",
     configNotJson:
       "{where} 不是合法 JSON，已中止写入以保护既有配置（请先修复或删掉该文件）：{cause}",
     configNotObject: "{where} 顶层不是 JSON 对象，已中止写入以保护既有配置",
     providerNotInList: "provider 不在 dsh 配置的 {ns}.providers 列表：{provider}",
     modelNotInList: "model 不在 {provider} 的 models 列表中：{model}",
+    protocolUnsupported:
+      "provider {provider} 的 api 协议 {protocol} 无法映射到 OCR 支持的 protocol" +
+      "（openai/openai-responses/anthropic）；请在 dsh 配置里改用 openai-completions/" +
+      "openai-responses/anthropic-messages，或升级本插件",
     ocrConfigPathInvalid: "设置项 ocrConfigPath 必须是绝对路径或 ~ 开头的路径：{path}",
+    configPathLayoutInvalid:
+      "设置项 ocrConfigPath 必须是 <X>/.opencodereview/config.json 布局：{path}。" +
+      "OCR 端没有配置文件级的路径覆盖（只按 <HOME>/.opencodereview/config.json 定位），" +
+      "本插件通过给 ocr 子进程注入 HOME=<X> 让它生效；任意形状的文件路径写下去 OCR 也不会读",
     noApiKeyEnv:
       "provider {provider} 未声明 apiKeyEnv，无法动态读取 key（OCR 自定义 provider 不支持无 key 解析）",
     keyNotResolvable: "provider {provider} 的 API key 未配置：dsh 凭据服务未解析到 {ref}",
@@ -305,7 +332,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     unitFile: "文件",
     tuningConcurrency: "并发{unit}数（OCR --concurrency；缺省不传=OCR 原生 8）",
     tuningTimeout: "每{unit}任务超时分钟（OCR --timeout；0=不限时；缺省不传=OCR 原生 15）",
-    tuningMaxTools: "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；缺省不传=模板默认）",
+    tuningMaxTools:
+      "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；1-49 会被 OCR 抬到 50，帮助文本 min 50；缺省不传=模板默认）",
     tuningMaxTokens:
       "每{unit}提示词 token 上限（OCR --max-tokens；0=配置/模板默认；缺省不传=模板默认）",
     tuningMaxTokensBudget:
@@ -334,7 +362,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
   是当前模型的工具调用能力问题——建议在 ocr-review 卡片换一个支持原生工具调用的模型（sensenova、deepseek、glm、qwen 系），
   不要反复重试同一个模型。
 - LLM 调用本身有重试：OCR 内置重试（429/408/409 与 5xx 自动退避重试）；per-file 组失败被隔离并进 warnings，不整体重跑。
-  工具层超时（10 分钟）或部分文件失败后，可 ocr_session 查 session_id、用 ocr_review --resume 恢复中断的区间/commit 评审。
+  工具层超时（min(请求, shell.maxTimeoutMs)，缺省 10 分钟）或部分文件失败后，可 ocr_session 查 session_id、用 ocr_review --resume 恢复中断的区间/commit 评审。
 `.trim(),
   },
   en: {
@@ -387,8 +415,14 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     branchNeedsFromAndTo: "scope=branch requires both from and to",
     commitNeedsValue: "scope=commit requires the commit parameter",
     unknownScope: "unknown scope: {scope} (workspace/commit/branch)",
+    resumeNeedsScope:
+      "resume requires scope=commit or scope=branch (workspace reviews cannot be resumed; OCR rejects it outright); pass commit or from/to as well",
+    waitMustBeBoolean: "wait must be a boolean (true/false), got {received}",
     pathsRequired: "paths is required: pass at least one repo-relative path of a file to review",
     invalidAction: "invalid action: {action} (expected {expected})",
+    sessionLimitRange: "limit must be an integer 1-100 (default 10), got {received}",
+    listRejectsId:
+      "action=list does not take an id (use action=show or action=comments for a single session)",
     resultSchemaViolation:
       "ocr {tool}: the tool result does not match its output schema: {violations}",
     resultSchemaUnsupported:
@@ -404,7 +438,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     warningSeparator: ": ",
     reviewSummaryHint:
       "Use `ocr session show <session_id>` for the full comments and per-file failure details; start_line=0 " +
-      "means OCR could not anchor a line — locate it via suggestion/existing_code. " +
+      "means OCR could not anchor a line — locate it via suggestion/existing_code. status=partial means some " +
+      "files were not reviewed (failure details are in warnings); the comments still stand. " +
       "How to read this summary: only when droppedCount and invalidCommentCount are both 0 does it cover " +
       "everything OCR produced; otherwise raise maxComments (or set 0 = no truncation) and re-check — " +
       'never treat "no critical in this summary" as "the code is clean".',
@@ -420,14 +455,25 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "the dsh configuration has no {ns} namespace: the pi-ai adapter is not installed, or no provider is configured yet",
     sourceCredentialsUnavailable:
       "the dsh credentials service (ctx.credentials) is not wired up: cannot confirm whether a provider's API key is configured",
-    badEnvKey: "invalid env key: {key}",
+    badEnvKey:
+      "invalid env key: {key} (get-cred only accepts uppercase ref names matching ^[A-Z0-9_]+$; " +
+      "change the provider's apiKeyEnv in the dsh configuration to uppercase letters/digits/underscores)",
     configNotJson:
       "{where} is not valid JSON; the write was aborted to protect the existing configuration (fix or delete that file first): {cause}",
     configNotObject:
       "the top level of {where} is not a JSON object; the write was aborted to protect the existing configuration",
     providerNotInList: "provider is not in the {ns}.providers list configured by dsh: {provider}",
     modelNotInList: "model is not in the models list of {provider}: {model}",
+    protocolUnsupported:
+      "the api protocol {protocol} of provider {provider} cannot be mapped to an OCR-supported protocol " +
+      "(openai/openai-responses/anthropic); use openai-completions/openai-responses/anthropic-messages " +
+      "in the dsh configuration, or upgrade this plugin",
     ocrConfigPathInvalid: "the ocrConfigPath setting must be absolute or start with ~: {path}",
+    configPathLayoutInvalid:
+      "the ocrConfigPath setting must follow the <X>/.opencodereview/config.json layout: {path}. " +
+      "OCR has no file-level path override (it only looks at <HOME>/.opencodereview/config.json); " +
+      "this plugin makes it effective by injecting HOME=<X> into the ocr subprocess. A file path of any " +
+      "other shape would never be read by OCR",
     noApiKeyEnv:
       "provider {provider} declares no apiKeyEnv, so the key cannot be read dynamically (OCR custom providers do not support keyless resolution)",
     keyNotResolvable:
@@ -503,7 +549,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     tuningTimeout:
       "Per-{unit} task timeout in minutes (OCR --timeout; 0 = unlimited; unset = OCR native 15)",
     tuningMaxTools:
-      "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; unset = template default)",
+      "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; 1-49 is raised to 50 by OCR, help text says min 50; unset = template default)",
     tuningMaxTokens:
       "Per-{unit} prompt token cap (OCR --max-tokens; 0 = config/template default; unset = template default)",
     tuningMaxTokensBudget:
@@ -537,9 +583,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
   model's tool-calling ability is the problem — switch to a model with native tool calls in the ocr-review card
   (sensenova, deepseek, glm, qwen families) instead of retrying the same one.
 - LLM calls retry themselves: OCR has built-in backoff retries (429/408/409 and 5xx); per-file group failures are
-  isolated and land in warnings instead of re-running everything. After a tool-layer timeout (10 minutes) or partial
-  file failures, use ocr_session to find the session_id and ocr_review --resume to continue an interrupted
-  range/commit review.
+  isolated and land in warnings instead of re-running everything. After a tool-layer timeout (min(request,
+  shell.maxTimeoutMs), 10 minutes by default) or partial file failures, use ocr_session to find the session_id and
+  ocr_review --resume to continue an interrupted range/commit review.
 `.trim(),
   },
 };

@@ -24,6 +24,8 @@ import {
   buildDelegatePreviewCommand,
   buildDelegateRuleCommand,
   buildSessionCommand,
+  buildLlmTestCommand,
+  withHomeEnv,
 } from "../lib/cli.ts";
 import type {
   BuiltCommand,
@@ -317,6 +319,15 @@ describe("buildReviewCommand", () => {
     expect(review).not.toContain("--output");
     expect(scan).not.toContain("--output");
   });
+
+  it("resume 与 workspace 同给前置拒绝（OCR 契约 workspace 禁恢复，别烧一次进程才报错）", () => {
+    expect(() => reviewCmd({ repo: "/r", resume: "abc" }, "/o")).toThrow(/resume 需要 scope/u);
+    // commit/branch 模式下 resume 合法，原样透传。
+    const commit = reviewCmd({ repo: "/r", scope: "commit", commit: "abc", resume: "abc" }, "/o");
+    expect(commit.command).toContain("--resume 'abc'");
+    const branch = reviewCmd({ repo: "/r", from: "main", to: "f", resume: "abc" }, "/o");
+    expect(branch.command).toContain("--resume 'abc'");
+  });
 });
 
 describe("buildScanCommand", () => {
@@ -347,6 +358,14 @@ describe("buildScanCommand", () => {
     expect(command).toContain("--max-tokens 0");
     expect(command).toContain("--max-tokens-budget 0");
   });
+
+  it("provider/model 透传 --provider/--model（shared_flags.go:223-247 共享 flags，与 review 对齐）", () => {
+    const { command } = scanCmd({ repo: "/r", provider: "p1", model: "m1" }, "/o");
+    expect(command).toContain("--provider 'p1'");
+    expect(command).toContain("--model 'm1'");
+    // 缺省省略，跟随 OCR 全局配置。
+    expect(scanCmd({ repo: "/r" }, "/o").command).not.toContain("--provider");
+  });
 });
 
 describe("buildSessionCommand", () => {
@@ -363,6 +382,36 @@ describe("buildSessionCommand", () => {
     expect(sessionCmd({ repo: "/r", action: "comments", id: "abc" }).command).toContain(
       `${OCR} session comments --json --repo '/r' 'abc'`,
     );
+  });
+
+  it("limit 显式给出必须是 1-100 整数：0/101/浮点/布尔/非数字串抛错（0 不再静默钳成 1）", () => {
+    expect(sessionCmd({ repo: "/r", limit: 50 }).command).toContain("--limit 50");
+    // 数字字符串与 pushIntFlag 同口径：接受。
+    expect(sessionCmd({ repo: "/r", limit: "25" }).command).toContain("--limit 25");
+    for (const bad of [0, 101, 1.5, true, "abc"]) {
+      expect(() => sessionCmd({ repo: "/r", limit: bad })).toThrow(/1-100/u);
+    }
+  });
+
+  it("action=list 与 id 同给 ⇒ 抛错（不再静默改写成 show）", () => {
+    expect(() => sessionCmd({ repo: "/r", action: "list", id: "abc" })).toThrow(
+      /action=list 不接受 id/u,
+    );
+  });
+});
+
+describe("withHomeEnv / buildLlmTestCommand", () => {
+  it("home 未设原样返回；设置时加 HOME= 赋值前缀且路径经 shq", () => {
+    expect(withHomeEnv(`${OCR} review`, undefined)).toBe(`${OCR} review`);
+    expect(withHomeEnv(`${OCR} review`, "/data/ocr")).toBe(`HOME='/data/ocr' ${OCR} review`);
+    // 路径里的空格/元字符必须过 shq，否则赋值前缀就成了注入位。
+    expect(withHomeEnv(`${OCR} review`, "/da ta; x")).toBe(`HOME='/da ta; x' ${OCR} review`);
+  });
+
+  it("llm test 与五个工具同一命令词解析源（随包装法下 PATH 上没有裸 ocr）", () => {
+    // OCR 常量就是 ocrCommand() 的记忆值：两条必须同源，否则 autoVerify/测试连接
+    // 在「只随包装了 npm 包」的机器上永远 exit 127。
+    expect(buildLlmTestCommand()).toBe(`${OCR} llm test --color never`);
   });
 });
 
@@ -588,13 +637,14 @@ describe("错类型参数：静默回落会扩大审查范围，一律抛错", (
   it("session action 白名单、id 类型严格", () => {
     expect(() => sessionCmd({ repo: "/r", action: "rm -rf /" })).toThrow(/action 非法/u);
     expect(() => sessionCmd({ repo: "/r", id: 9 })).toThrow(/id 必须是字符串/u);
-    expect(sessionCmd({ repo: "/r", action: "list", id: "abc" }).command).toContain(
-      `${OCR} session show`,
+    // action=list 与 id 同给不再静默改写成 show（自相矛盾的入参一律抛错）。
+    expect(() => sessionCmd({ repo: "/r", action: "list", id: "abc" })).toThrow(
+      /action=list 不接受 id/u,
     );
   });
 });
 
-describe("clampPositiveInt（session --limit 的钳制：所有数值槽位都不裸拼）", () => {
+describe("clampPositiveInt（argv-guard 数值闸，session --limit 已改走严格校验）", () => {
   it("非数/非安全整数回退，越界钳到区间端点", () => {
     expect(clampPositiveInt(undefined, 10, 1, 100)).toBe(10);
     expect(clampPositiveInt(null, 10, 1, 100)).toBe(10);
@@ -606,9 +656,9 @@ describe("clampPositiveInt（session --limit 的钳制：所有数值槽位都�
     expect(clampPositiveInt(500, 10, 1, 100)).toBe(100);
   });
 
-  it("limit 进命令串时已是纯数字", () => {
-    expect(sessionCmd({ repo: "/r", limit: 500 }).command).toContain("--limit 100");
-    expect(sessionCmd({ repo: "/r", limit: "3" }).command).toContain("--limit 3");
+  it("session limit 越界/错类型抛错而非静默钳制（0=「想看全部」钳成 1 是最坏读法）", () => {
+    expect(() => sessionCmd({ repo: "/r", limit: 500 })).toThrow(/1-100/u);
+    expect(() => sessionCmd({ repo: "/r", limit: true })).toThrow(/1-100/u);
   });
 });
 

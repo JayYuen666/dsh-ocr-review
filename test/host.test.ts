@@ -30,6 +30,11 @@ import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import type { JobId, JobKind } from "@deepseek-ai/dsh-jobs";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
 import { MESSAGES } from "../lib/messages.ts";
+import { buildLlmTestCommand } from "../lib/cli.ts";
+import { shq } from "../lib/argv-guard.ts";
+
+const OCR_DIR_NAME = ".opencodereview";
+const OCR_CONFIG_NAME = "config.json";
 
 /**
  * 临时 home 沙箱：宿主侧 `.dsh/` 与外部 ocr CLI 的 `.opencodereview/` 都在这里，
@@ -39,7 +44,7 @@ import { MESSAGES } from "../lib/messages.ts";
 function makeSandboxHome(): string {
   const home = mkdtempSync(path.join(tmpdir(), "ocr-review-host-"));
   mkdirSync(path.join(home, ".dsh"), { recursive: true });
-  mkdirSync(path.join(home, ".opencodereview"), { recursive: true });
+  mkdirSync(path.join(home, OCR_DIR_NAME), { recursive: true });
   return home;
 }
 
@@ -60,7 +65,7 @@ const {
 // 其余文案走 apply 的官方 locale 偏好替身（makeHost({ locale: { preference } })）。
 const { zh } = MESSAGES;
 
-const OCR_CONFIG = path.join(HOME, ".opencodereview", "config.json");
+const OCR_CONFIG = path.join(HOME, OCR_DIR_NAME, OCR_CONFIG_NAME);
 const CSRF_HEADER = "x-ocr-csrf";
 const PROVIDERS_PATH = "/_dsh/ocr-review/providers";
 const SELECT_PATH = "/_dsh/ocr-review/select";
@@ -1370,6 +1375,49 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       expect(Array.isArray(view.topComments)).toBe(true);
     });
 
+    it("partial（部分文件失败但整体有覆盖，exit 0）⇒ 正常返回摘要而不是解析失败", async () => {
+      // 回归钉：此前 status 白名单漏了 partial，整场已花费 token 的评审被报成
+      // 「status 非法」并丢弃全部评论（输出 schema 的 enum 同步收 partial）。
+      host.shell.scripts.push({
+        output: JSON.stringify({
+          status: "partial",
+          message: "Some files could not be reviewed.",
+          session_id: "sess-p",
+          comments: [{ path: "src/a.ts", content: "空指针风险", start_line: 42, end_line: 44 }],
+          warnings: [{ file: "src/b.ts", error: "LLM timeout" }],
+        }),
+      });
+      const view = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+        status: string;
+        totalCommentCount: number;
+        warnings: string[];
+      };
+      expect(view.status).toBe("partial");
+      expect(view.totalCommentCount).toBe(1);
+      expect(view.warnings).toStrictEqual(["src/b.ts：LLM timeout"]);
+    });
+
+    it("ocrConfigPath 布局内自定义 ⇒ spawn 的命令带 HOME=<X> 前缀（重定向生效通道）", async () => {
+      // 端到端钉：设置层（端点读写）与执行层（HOME 注入）吃的是同一个设置值——
+      // 卡片把 provider 应用到 <X>/.opencodereview/config.json 后，评审进程就在 X
+      // 的家目录里读它，两侧 world 自洽。
+      const customHome = path.join(HOME, "elsewhere");
+      const custom = path.join(customHome, OCR_DIR_NAME, OCR_CONFIG_NAME);
+      mkdirSync(path.dirname(custom), { recursive: true });
+      host.settingsValue["ocrConfigPath"] = custom;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      const command = String(host.shell.resolveCalls[0]?.command);
+      // withHomeEnv 的 shq 引号被守护的 shq 二次转义成 '\''——按真实落串形态断言。
+      const homeAssignment = shq(customHome).replaceAll("'", String.raw`'\''`);
+      expect(command).toContain(`HOME=${homeAssignment} `);
+      // 未设置时命令不含 HOME=：默认路径零重定向。
+      host.settingsValue["ocrConfigPath"] = undefined;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      expect(String(host.shell.resolveCalls[1]?.command)).not.toContain("HOME=");
+    });
+
     it("临时目录解析后即删", async () => {
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
@@ -1422,6 +1470,23 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
       expect(String(host.shell.resolveCalls[2]?.command)).toContain("--effort medium");
+    });
+
+    it("effort/wait 错类型一律抛错（静默回落会改变审查深度或等待语义），null 仍按缺省", async () => {
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", effort: 3 }, makeExec()),
+      ).rejects.toThrow(/effort 必须是字符串（收到 3）/u);
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: "false" }, makeExec()),
+      ).rejects.toThrow(/wait 必须是布尔值（true\/false），收到 false/u);
+      // null 与 undefined 同口径：按缺省处理，不抛。
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", effort: null, wait: null },
+        makeExec(),
+      );
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain("--effort medium");
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain("--output");
     });
 
     it("wait=false 走后台通道：无 --output、无 timeoutMs、宿主 deadline 关闭", async () => {
@@ -2063,11 +2128,13 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
         }),
       });
       const result = (await preview.execute({ repo: "/repo" }, makeExec())) as {
+        mergeBase: string | null;
         reviewableCount: number;
         insertions: number;
         deletions: number;
         excludedFiles: unknown[];
       };
+      expect(result.mergeBase).toBe("abc");
       expect(result.reviewableCount).toBe(1);
       expect(result.insertions).toBe(3);
       expect(result.deletions).toBe(1);
@@ -2075,6 +2142,22 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       host.shell.scripts.push({ stdoutText: '{"error":"nope"}' });
       const bad = (await preview.execute({ repo: "/repo" }, makeExec())) as string;
       expect(bad).toMatch(/preview 输出解析失败/u);
+    });
+
+    it("preview：merge_base 缺席（omitempty）⇒ null，而不是缺字段", async () => {
+      const preview = toolOf(host, "ocr_delegate_preview");
+      host.shell.scripts.push({
+        stdoutText: JSON.stringify({
+          mode: "workspace",
+          repository: "/repo",
+          total_files: 0,
+          reviewable_files: [],
+        }),
+      });
+      const result = (await preview.execute({ repo: "/repo" }, makeExec())) as {
+        mergeBase: string | null;
+      };
+      expect(result.mergeBase).toBeNull();
     });
 
     it("rule：分组结果与不合契约的 JSON 两路", async () => {
@@ -2234,8 +2317,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       expect(String(source["message"])).toMatch(/已不可用/u);
     });
 
-    it("设置项 ocrConfigPath 覆盖默认位置：卡片读写的就是那个文件", async () => {
-      const custom = path.join(HOME, "elsewhere", "ocr.json");
+    it("设置项 ocrConfigPath 覆盖默认位置：布局内的自定义路径卡片读写的就是那个文件", async () => {
+      // 布局必须是 <X>/.opencodereview/config.json（OCR 端只认这个形状，插件经
+      // HOME 注入让它生效）。
+      const custom = path.join(HOME, "elsewhere", OCR_DIR_NAME, "config.json");
       mkdirSync(path.dirname(custom), { recursive: true });
       writeFileSync(custom, '{"provider":"fromcustom","custom_providers":{}}');
       const host = makeHost();
@@ -2246,6 +2331,15 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
         "fromcustom",
       );
       expect(existsSync(OCR_CONFIG)).toBe(false);
+    });
+
+    it("ocrConfigPath 布局外的绝对路径 ⇒ 500 + 可读原因（写下去 OCR 也不会读，绝不静默失配）", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      host.settingsValue["ocrConfigPath"] = path.join(HOME, "elsewhere", "ocr.json");
+      const res = await get(host, PROVIDERS_PATH);
+      expect(res.statusCode).toBe(500);
+      expect(String(bodyOf(res)["error"])).toMatch(/布局/u);
     });
 
     it("ocrConfigPath 留空白 ⇒ 仍按 os.homedir() 派生默认位置", async () => {
@@ -2585,7 +2679,8 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       expect(bodyOf(res)["ok"]).toBe(true);
       expect(String(bodyOf(res)["output"])).toContain("provider=sensenova");
       expect(res.body).not.toContain(PLAIN_KEY);
-      expect(host.shell.resolveCalls[0]?.command).toBe("ocr llm test --color never");
+      // 与五个工具同一命令词解析源（buildLlmTestCommand）：随包装法下 PATH 上没有裸 ocr。
+      expect(host.shell.resolveCalls[0]?.command).toBe(buildLlmTestCommand());
       expect(host.shell.resolveCalls[0]?.workdir).toBe(HOME);
     });
 

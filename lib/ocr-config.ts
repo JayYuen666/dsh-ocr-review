@@ -41,10 +41,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 // 本模块产出的错误与降级原因全进消息表（lib/messages.ts），由 host.ts 按官方 locale
-// 偏好取一份注入——纯函数不读设置，所以 messages 是入参。
+// 偏好取一份注入——纯函数不读设置，所以 messages 是入参而不是模块常量。
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+// resolveDshHome：宿主数据目录的官方定位（$DSH_HOME > ~/.dsh，或显式 configured）。
+// 写 api_key_cmd 时钉成 get-cred 的第一档显式参数——ocrConfigPath 重定向 HOME 后，
+// get-cred 自己的 homedir() 兜底会跟着跑偏，只有宿主侧此刻的解析值是准的。
+import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { PI_AI_NAMESPACE, markKeyFlags, readProviders } from "./provider-source.ts";
 import type { DshConfigGateway, DshProviderWithKey, ProviderSource } from "./provider-source.ts";
 import type { DshProvider } from "./provider-projection.ts";
@@ -71,10 +75,26 @@ function withoutKeyFlags(providers: DshProvider[]): DshProviderWithKey[] {
 }
 
 /**
+ * 自定义路径必须呈 `<X>/.opencodereview/config.json` 布局时返回 X（= 重定向给
+ * ocr 子进程的 HOME），否则 null。OCR 端定位 config 只有一条路
+ * `<HOME>/.opencodereview/config.json`（config_cmd.go:92-99，无 env/flag），本包
+ * 让自定义值生效的唯一通道是 HOME 注入（lib/cli.ts withHomeEnv）——任意形状的
+ * 文件路径写下去 OCR 也读不到，只会静默失配，必须在设置层就拒绝。
+ */
+function layoutHomeOf(configPath: string): string | null {
+  const parent = path.dirname(configPath);
+  if (path.basename(configPath) !== OCR_CONFIG_FILE || path.basename(parent) !== OCR_CONFIG_DIR) {
+    return null;
+  }
+  return path.dirname(parent);
+}
+
+/**
  * OCR 配置文件路径：设置项 ocrConfigPath 覆盖，未覆盖时按 os.homedir() 派生。
  * 家目录展开交官方 `expandHomePath`，但本地保留两条它没有的判据（见
  * `expandHomeForSeparator` 与下面的绝对性闸门）：直写相对路径会把配置落到
- * 「当时的工作区」，用户找不到也修不了。
+ * 「当时的工作区」，用户找不到也修不了。自定义值还必须是
+ * `<X>/.opencodereview/config.json` 布局（见 layoutHomeOf）。
  */
 export function resolveOcrConfigPath(
   configured: string | undefined,
@@ -88,7 +108,23 @@ export function resolveOcrConfigPath(
   if (!path.isAbsolute(expanded)) {
     throw new Error(format(messages.ocrConfigPathInvalid, { path: trimmed }));
   }
+  if (layoutHomeOf(expanded) === null) {
+    throw new Error(format(messages.configPathLayoutInvalid, { path: trimmed }));
+  }
   return expanded;
+}
+
+/**
+ * ocr 子进程的 HOME 重定向值：设置项命中 `<X>/.opencodereview/config.json` 布局时
+ * 返回 X，否则 undefined（默认路径零重定向）。**绝不抛错**——布局/绝对性不合法时
+ * 返回 undefined，让工具执行不受坏设置拖累（错误由 resolveOcrConfigPath 在端点侧
+ * 报出，卡片显示原因，「工具与设置照常可用」的既有口径不变）。
+ */
+export function ocrHomeOverride(configured: string | undefined): string | undefined {
+  const trimmed = typeof configured === "string" ? configured.trim() : "";
+  const expanded = trimmed === "" ? "" : expandHomeForSeparator(trimmed, path.sep);
+  const home = path.isAbsolute(expanded) ? layoutHomeOf(expanded) : null;
+  return home ?? undefined;
 }
 
 /** 设置页数据：providers（含 hasKey）、当前 OCR 配置、get-cred 脚本存在性、降级原因。 */
@@ -167,7 +203,9 @@ export async function applyProviderSelection(
   if (!existsSync(scriptPath)) {
     throw new Error(format(messages.credScriptMissing, { path: scriptPath }));
   }
-  const apiKeyCmd = buildApiKeyCmd(scriptPath, target.apiKeyEnv, messages);
+  // 宿主侧此刻解析出的数据目录钉成 get-cred 的第一档显式参数：HOME 重定向（或
+  // 部署以非 env 方式指定 dsh home）时，get-cred 自己的 homedir()/env 兜底都不可靠。
+  const apiKeyCmd = buildApiKeyCmd(scriptPath, target.apiKeyEnv, resolveDshHome(), messages);
   // 读—渲染—写整段进官方 withFileLock：落盘改成异步之前，这三次动作同在一个
   // event-loop tick 里做完，等于免费拿到了"并发不互相覆盖整份文档"的性质；
   // 异步化后读与写之间出现了让出点，不加锁就可能把对方刚写好的 provider 选择
@@ -201,6 +239,7 @@ function migrateEntry(
   entry: Record<string, unknown>,
   envKey: string | undefined,
   scriptPath: string,
+  dshHome: string,
   messages: OcrReviewMessages,
 ): "migrated" | "unknown" | "noPlain" {
   if (typeof entry["api_key"] !== "string" || entry["api_key"].length === 0) {
@@ -210,7 +249,7 @@ function migrateEntry(
     return "unknown";
   }
   try {
-    entry["api_key_cmd"] = buildApiKeyCmd(scriptPath, envKey, messages);
+    entry["api_key_cmd"] = buildApiKeyCmd(scriptPath, envKey, dshHome, messages);
   } catch {
     // 非法 env key 无法构造命令 → 记入 unknown。
     return "unknown";
@@ -256,6 +295,8 @@ export async function migratePlaintextKeys(
   if (!existsSync(scriptPath)) {
     return { migrated: [], skippedUnknown: [] };
   }
+  // 与 applyProviderSelection 同源：宿主侧此刻解析出的数据目录显式进 api_key_cmd。
+  const dshHome = resolveDshHome();
   // 已知 name → apiKeyEnv 映射（settings 命名空间值）。
   const envByProvider = new Map<string, string>();
   for (const providerCfg of providers) {
@@ -278,7 +319,7 @@ export async function migratePlaintextKeys(
     for (const [name, raw] of Object.entries(customs)) {
       if (isRecord(raw)) {
         const entry = raw;
-        const result = migrateEntry(entry, envByProvider.get(name), scriptPath, messages);
+        const result = migrateEntry(entry, envByProvider.get(name), scriptPath, dshHome, messages);
         if (result === "migrated") {
           migrated.push(name);
         } else if (result === "unknown") {

@@ -85,16 +85,27 @@ function shqDyn(value: string): string {
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 
-/** api_key_cmd 值构造：把脚本路径与 env key 名 shq 转义后拼成 shell 命令。 */
+/** api_key_cmd 值构造：脚本路径与 env key 名（及可选的 dsh 数据目录）shq 转义后
+ *  拼成 shell 命令。第三参数是 get-cred.mjs 数据目录定位的**第一档**（显式参数 >
+ *  $DSH_HOME > homedir()/.dsh）：ocrConfigPath 重定向 ocr 子进程的 HOME 后，
+ *  get-cred 的 homedir() 兜底会跟着跑偏，须在宿主侧把解析出的数据目录显式钉进
+ *  命令。undefined（未重定向）时省略，沿用 env/默认档。
+ *  env key 白名单维持 ^[A-Z0-9_]+$（刻意比宿主 CredentialRef 的语法紧：OCR 侧
+ *  惯例大写，且这是写进 config.json 的可信输入）。 */
 export function buildApiKeyCmd(
   scriptPath: string,
   envKey: string,
+  dshHome: string | undefined,
   messages: OcrReviewMessages,
 ): string {
   if (!/^[A-Z0-9_]+$/u.test(envKey)) {
     throw new Error(format(messages.badEnvKey, { key: envKey }));
   }
-  return `node ${shqDyn(scriptPath)} ${shqDyn(envKey)}`;
+  const parts = ["node", shqDyn(scriptPath), shqDyn(envKey)];
+  if (dshHome !== undefined) {
+    parts.push(shqDyn(dshHome));
+  }
+  return parts.join(" ");
 }
 
 export interface SelectInput {
@@ -180,6 +191,17 @@ export async function writeConfigAtomic(targetPath: string, text: string): Promi
   await writeFileAtomic(targetPath, text, { mode: 0o600, dirMode: 0o700 });
 }
 
+/** 本包允许写进 custom_providers.<name>.protocol 的白名单（OCR config_cmd.go:796
+ *  "Protocol values: anthropic, anthropic-bedrock, openai, openai-responses"）。
+ *  本包只会经 provider-projection 的映射表产出前三种；anthropic-bedrock 无对应的
+ *  llm-pi-ai 协议、不由本包写出。表外值 = 投影透传的未知 `api`：拒绝写入，绝不落
+ *  一份 OCR 解析不了的配置（此前二值映射会把 anthropic-messages 静默写成 openai）。 */
+const WRITABLE_PROTOCOLS: ReadonlySet<string> = new Set([
+  "openai",
+  "openai-responses",
+  "anthropic",
+]);
+
 /**
  * 生成「选择 provider+model」后的 config.json 全文。
  * - provider 顶层设为目标名；custom_providers.<name> 写 url/protocol/model/
@@ -204,6 +226,14 @@ export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMess
   if (!modelOk) {
     throw new Error(
       format(messages.modelNotInList, { provider: input.provider, model: input.model }),
+    );
+  }
+  if (!WRITABLE_PROTOCOLS.has(target.protocol)) {
+    throw new Error(
+      format(messages.protocolUnsupported, {
+        provider: input.provider,
+        protocol: target.protocol,
+      }),
     );
   }
   const customsRaw = fieldOf(doc, "custom_providers");
@@ -236,6 +266,10 @@ export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMess
 export interface OcrPaths {
   /** ocr CLI 配置文件；默认按 os.homedir() 派生，可被设置项 ocrConfigPath 覆盖。 */
   ocrConfigJson: string;
+  /** ocr 子进程的 HOME 重定向值：设置项命中 `<X>/.opencodereview/config.json` 布局
+   *  时为 X，否则 undefined（默认路径零重定向）。工具执行点据此给命令加 HOME 前缀
+   *  （lib/cli.ts withHomeEnv）；undefined/坏设置一律不加前缀。 */
+  homeOverride: string | undefined;
   /** 插件所在目录（get-cred 脚本兜底位置）。 */
   pluginDir: string;
   /** api_key_cmd 脚本路径；空串 = 按 pluginDir 兜底。 */
