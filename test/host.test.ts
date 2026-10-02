@@ -19,8 +19,10 @@ import {
   statSync,
   writeFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
+import { symlink } from "node:fs/promises";
 import { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -161,10 +163,20 @@ interface FakeProc {
   observed: { stdout: FakeReader; stderr: FakeReader };
 }
 
+/** 会话根归一化那条环境查询（`git rev-parse --show-toplevel`）的命令判据。 */
+const GIT_TOPLEVEL_RE = /git\s+rev-parse\s+--show-toplevel/u;
+
 interface FakeShell {
   resolveCalls: ResolveCall[];
   scripts: RunScript[];
   procs: FakeProc[];
+  /** 模拟 settings.yaml `shell.maxTimeoutMs` 的宿主上限：resolve 按
+   *  min(请求, 上限) 收口（官方 shell 契约：resolve「apply implementation-owned
+   *  defaults and caps」）。缺省 = 不设限，替身原样回传。 */
+  maxTimeoutMs?: number;
+  /** `git rev-parse --show-toplevel` 的应答：字符串 = 顶层在别处；null = 非 git
+   *  仓库（exit 128）；缺省 = 原样回显 workdir（该目录本身就是顶层）。 */
+  gitTopLevel?: string | null;
   resolve: (spec: ResolveCall) => unknown;
   /** 0.1.7 唯一的执行入口（旧 run/start 合并）：前台取 handle.result()，后台留句柄。 */
   execute: (spec: unknown) => Promise<FakeProc>;
@@ -403,7 +415,18 @@ function makeShell(): FakeShell {
     scripts: [],
     procs: [],
     resolve: (spec) => {
-      shell.resolveCalls.push(spec);
+      // resolveCalls 的语义是「本包下发给 OCR CLI 的请求形态」，每个既有断言都按这个
+      // 读它（索引 0 = 第一个 ocr 调用）。会话根归一化那条 `git rev-parse` 是宿主环境
+      // 查询、不是 ocr 调用，另记一笔，免得所有按索引取的断言整体错位。
+      if (!GIT_TOPLEVEL_RE.test(spec.command)) {
+        shell.resolveCalls.push(spec);
+      }
+      // 宿主收口：min(请求, shell.maxTimeoutMs)。请求值原样留在 resolveCalls 里
+      // （那份断言的是「下发给宿主的请求形态」），收口只体现在回传的 spec 上。
+      const cap = shell.maxTimeoutMs;
+      if (cap !== undefined && spec.timeoutMs !== undefined && spec.timeoutMs > cap) {
+        return { ...spec, timeoutMs: cap };
+      }
       return spec;
     },
     // 0.1.7：execute 是前后台唯一入口。分流判据沿用宿主自身的分工——前台带
@@ -411,6 +434,30 @@ function makeShell(): FakeShell {
     // result() 即旧 run() 的落点：脚本队列仍按发起序 shift，抛点与输出落盘都不变。
     async execute(spec) {
       const call = spec as ResolveCall;
+      // `git rev-parse --show-toplevel` 是宿主环境查询，不是被测的 ocr 调用：
+      // 单独应答、不消费脚本队列，否则每个工具测试的脚本都会错位一格。
+      // 缺省（undefined）回显 workdir，即「这个目录本身就是顶层」——既有测试的
+      // 既有语义原样保留；给字符串表示顶层在别处；给 null 表示不是 git 仓库。
+      if (GIT_TOPLEVEL_RE.test(call.command)) {
+        const top = shell.gitTopLevel;
+        return deferredProc(async () =>
+          top === null
+            ? {
+                exitCode: 128,
+                timedOut: false,
+                aborted: false,
+                stdout: { text: "", truncated: false },
+                stderr: { text: "not a git repository", truncated: false },
+              }
+            : {
+                exitCode: 0,
+                timedOut: false,
+                aborted: false,
+                stdout: { text: top ?? call.workdir ?? "", truncated: false },
+                stderr: { text: "", truncated: false },
+              },
+        );
+      }
       const proc = deferredProc(async () => {
         const script = shell.scripts.shift() ?? {};
         if (script.throws !== undefined) {
@@ -1289,6 +1336,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       const receiptProps = (reviewBranches[0] as { properties: Record<string, unknown> })
         .properties;
       expect(Object.keys(receiptProps).toSorted()).toStrictEqual([
+        "jobId",
         "mode",
         "polling",
         "processStatus",
@@ -1332,6 +1380,64 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
   });
 
   // ── review 工具 ─────────────────────────────────────────────────────────────
+
+  describe("会话根归一化：review 与 ocr_session 必须落在同一个根", () => {
+    // 模型给的 monorepo 子目录，与它对应的 git 顶层。
+    const MONO_SUB = "/mono/pkg/foo";
+    const MONO_TOP = "/mono";
+    let host: FakeHost;
+    beforeEach(() => {
+      host = makeHost();
+      applyPlugin(host);
+    });
+
+    it("monorepo 子目录 ⇒ 两侧都提升到 git 顶层", async () => {
+      // OCR 内部把 review 的 RepoDir 锚定在 git 顶层，会话目录又由 RepoDir 编码而来。
+      // 模型给的若是子目录，不归一化就是「review 写进顶层、session 查子目录」，
+      // 查询侧命中目录不存在分支、静默返回空（缺陷 1）。
+      host.shell.gitTopLevel = MONO_TOP;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute({ repo: MONO_SUB }, makeExec());
+      const reviewWorkdir = host.shell.resolveCalls.at(-1)?.workdir;
+
+      host.shell.scripts.push({ stdoutText: "null" });
+      await toolOf(host, "ocr_session").execute({ repo: MONO_SUB }, makeExec());
+      const sessionCommand = String(host.shell.resolveCalls.at(-1)?.command);
+
+      expect(reviewWorkdir).toBe(MONO_TOP);
+      expect(sessionCommand).toContain(`--repo '${MONO_TOP}'`);
+      // 两处都不得回落到模型给的子目录。
+      expect(reviewWorkdir).not.toBe(MONO_SUB);
+      expect(sessionCommand).not.toContain(MONO_SUB);
+    });
+
+    it("ocr_scan 不提升：workdir 保留传入的子目录", async () => {
+      // scan 靠 workdir 限定扫描范围（OCR 的 scan 路径 requireGit=false，保留 CWD），
+      // 一起提升会把扫描扩到整个 monorepo；而它不落会话，无需与 review 对齐。
+      host.shell.gitTopLevel = MONO_TOP;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB }, makeExec());
+      expect(host.shell.resolveCalls.at(-1)?.workdir).toBe(MONO_SUB);
+    });
+
+    it("非 git 目录 + 符号链接前缀 ⇒ 回退 realpath（缺陷 1 的触发条件②）", async () => {
+      const real = mkdtempSync(path.join(tmpdir(), "ocr-real-"));
+      const linkParent = mkdtempSync(path.join(tmpdir(), "ocr-link-"));
+      const link = path.join(linkParent, "repo-link");
+      await symlink(real, link);
+      host.shell.gitTopLevel = null;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute({ repo: link }, makeExec());
+      expect(host.shell.resolveCalls.at(-1)?.workdir).toBe(realpathSync(real));
+    });
+
+    it("路径不存在 ⇒ 原样返回，不因 realpath 失败而让评审失败", async () => {
+      host.shell.gitTopLevel = null;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute({ repo: "/no/such/dir" }, makeExec());
+      expect(host.shell.resolveCalls.at(-1)?.workdir).toBe("/no/such/dir");
+    });
+  });
 
   describe("ocr_review 前台执行", () => {
     let host: FakeHost;
@@ -1511,6 +1617,20 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
       expect(host.shell.resolveCalls[0]?.onExpiry).toBeUndefined();
       expect(host.shell.resolveCalls[0]?.timeoutMs).toBeTypeOf("number");
+    });
+
+    it("后台回执带上官方作业 id ⇒ 模型有必有结果的 job_output 句柄", async () => {
+      const receipt = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: false },
+        makeExec(),
+      )) as { jobId: unknown; polling: string };
+      // 回执里必须有一个模型能直接喂给 job_output 的作业 id：polling 原本只把
+      // 模型导向 ocr_session(action=list)，而那条路要会话已落盘、--repo 又对得上，
+      // 启动早期两件事都可能还没成立。
+      expect(receipt.jobId).toBeTypeOf("string");
+      expect(String(receipt.jobId)).not.toBe("");
+      // 且轮询文案真的把这条路线说出来了。
+      expect(receipt.polling).toContain("job_output");
     });
   });
 
@@ -1994,6 +2114,29 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       host.shell.scripts.push({ exitCode: null, timedOut: true });
       await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
         /实际生效 3 分钟/u,
+      );
+    });
+
+    it("宿主收口后 ⇒ 报收口值，不报请求值", async () => {
+      // 请求 60 分钟，宿主按 shell.maxTimeoutMs 收口到 10 分钟：文案自称
+      // 「实际生效」，就得印收口后的那个数——请求值只会把上限说成天文数字
+      // （timeoutMinutes 留空时请求值是 2^31-1 ms，即 35791 分钟）。
+      host.settingsValue["timeoutMinutes"] = 60;
+      host.shell.maxTimeoutMs = 600_000;
+      host.shell.scripts.push({ exitCode: null, timedOut: true });
+      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+        /实际生效 10 分钟/u,
+      );
+      // 下发给宿主的仍是请求值本身（收口是宿主 resolve 的事）。
+      expect(host.shell.resolveCalls[0]?.timeoutMs).toBe(3_600_000);
+    });
+
+    it("请求值不超过上限时 ⇒ 原样报请求值", async () => {
+      host.settingsValue["timeoutMinutes"] = 10;
+      host.shell.maxTimeoutMs = 600_000;
+      host.shell.scripts.push({ exitCode: null, timedOut: true });
+      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+        /实际生效 10 分钟/u,
       );
     });
 

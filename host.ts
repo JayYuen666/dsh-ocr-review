@@ -49,7 +49,7 @@
 // ctx.credentials——服务面没有因此开口。
 
 import Schema from "@deepseek-ai/schemastery";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -604,7 +604,7 @@ const NULLABLE_STRING = {
 const BACKGROUND_RECEIPT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["started", "mode", "tool", "repo", "processStatus", "polling"],
+  required: ["started", "mode", "tool", "repo", "processStatus", "jobId", "polling"],
   properties: {
     started: { type: "boolean", const: true },
     mode: { type: "string", const: "background" },
@@ -612,6 +612,11 @@ const BACKGROUND_RECEIPT_SCHEMA = {
     repo: { type: "string" },
     // ShellProcessStatus（dsh-shell）：注册表收尾后进程的落定态只有这三种。
     processStatus: { type: "string", enum: ["running", "completed", "killed"] },
+    // 官方作业 id（ctx.jobs 发号，形如 `ocr-review-N`）。这是后台评审**一定有结果**
+    // 的句柄：`job_output` 按 id 读得到增量 stdout/stderr 与最终结局；而 polling 里
+    // 那条 `ocr_session(action=list)` 路线依赖会话已落盘且 --repo 能对上，启动早期
+    // 这两件事都可能还不成立，于是模型手里就只剩一个查不出东西的 running 回执。
+    jobId: { type: "string" },
     polling: { type: "string" },
   },
 } satisfies JsonSchemaNode;
@@ -878,7 +883,11 @@ async function runForeground(
   const failed = result.exitCode !== 0 || result.timedOut || result.aborted;
   if (failed) {
     if (result.timedOut) {
-      const minutes = Math.round(run.timeoutMs / 60_000);
+      // 报 spec.timeoutMs 而不是 run.timeoutMs：resolve 已按
+      // min(请求, shell.maxTimeoutMs) 收口，spec 里那个才是**实际生效**的值。
+      // run.timeoutMs 是请求值，timeoutMinutes 留空时为 MAX_TIMEOUT_REQUEST_MS
+      // (2^31-1)，照它算会把「实际生效 N 分钟」印成 35791 这种天文数字。
+      const minutes = Math.round(spec.timeoutMs / 60_000);
       throw new Error(format(messages.execTimedOut, { minutes: String(minutes) }));
     }
     if (result.aborted) {
@@ -992,6 +1001,7 @@ interface BackgroundReceipt {
   tool: string;
   repo: string;
   processStatus: ShellProcessStatus;
+  jobId: string;
   polling: string;
 }
 
@@ -1091,6 +1101,7 @@ async function startBackground(
     tool: job.tool,
     repo: job.repo,
     processStatus: proc.status,
+    jobId,
     polling: messages.backgroundPolling,
   };
 }
@@ -1533,6 +1544,54 @@ export function ocrRepo(
   return resolveRoot(args["repo"], sessionHeaderCwd(exec), messages);
 }
 
+/** git rev-parse 的墙钟上限：一条本地命令，失败即回退，不值得占用评审预算。 */
+const GIT_TOPLEVEL_TIMEOUT_MS = 10_000;
+
+/** realpath，失败则原样返回（路径可能已不存在：归档后的 checkout 仍要能查会话）。 */
+function realpathOrSelf(root: string): string {
+  try {
+    return realpathSync(root);
+  } catch {
+    return root;
+  }
+}
+
+/**
+ * 把审查根归一化成 **canonical 的 git 顶层**，让 review 与 ocr_session 落到同一个会话目录。
+ *
+ * 为什么插件侧要管这件事：OCR 把 review 的 RepoDir 锚定在 git 顶层（`shared.go` 的
+ * requireGit=true 分支），而会话目录正是由 RepoDir 编码而来。插件若把模型给的子目录
+ * 原样喂给 `--repo`，`ocr review` 写进顶层、`ocr_session` 查子目录 —— 两个不同的
+ * `~/.opencodereview/sessions/<encoded>` 目录，查询侧命中「目录不存在」分支静默返回
+ * 空，表现为「写得出会话却永远列不出来」。符号链接前缀同理：git 报的是 realpath，
+ * 而 filepath.Abs 保留 `/tmp` 这类前缀。
+ *
+ * 为什么不统一提升所有工具：scan 靠 workdir 限定子目录（OCR 的 scan 路径
+ * requireGit=false，保留 CWD 以免 `git ls-files` 走遍整个仓库），一并提升会把扫描
+ * 范围扩到整个 monorepo。scan 又不落会话（只有 review 经 agent.New → session.New
+ * 建会话），所以它保持原样即可，两侧口径本来就一致。
+ *
+ * 非 git 目录（归档后的 checkout 等）回退到 realpath：会话仍按同一路径寻址。
+ *
+ * 刻意不缓存：一次本地 git 命令相对一次评审（分钟级）可忽略，换来的是没有陈旧值，
+ * 也不会让「仓库被 git init / 顶层变动」后读到旧结果。
+ */
+async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string> {
+  try {
+    const { exitCode, output } = await runCollect(host, "git rev-parse --show-toplevel", root, {
+      timeoutMs: GIT_TOPLEVEL_TIMEOUT_MS,
+      stdoutMaxBytes: 4096,
+    });
+    const top = exitCode === 0 ? output.trim() : "";
+    if (top.startsWith("/")) {
+      return top;
+    }
+  } catch {
+    // 落到下面的 realpath 回退：git 缺席 / 非仓库 / 进程被杀，都不该让评审失败。
+  }
+  return realpathOrSelf(root);
+}
+
 /** select 端点过了 trust 闸门与 guardPost 之后那一段的依赖（对象化以受 max-params 约束）。 */
 interface SelectEndpointDeps {
   config: Config;
@@ -1759,7 +1818,9 @@ function registerReviewTool(host: HostCtx, config: Config): void {
     schema: REVIEW_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
-      const repo = ocrRepo(args, exec, runMsgs);
+      // 归一化到 git 顶层：OCR 内部本就如此锚定（审查范围不变），但会话目录由
+      // RepoDir 编码而来——不归一化，ocr_session 就查不到（见 canonicalReviewRoot）。
+      const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
       // effort 未显式传入时取设置卡默认（effortOf 内做类型闸与白名单钳制）。
       const eff = effortOf(args["effort"], config, runMsgs);
       // wait=false = 后台：无 tmp、无 --output，结果以会话记录为准（ocr_session 轮询）。
@@ -2047,7 +2108,9 @@ function registerSessionTool(host: HostCtx, config: Config): void {
     schema: SESSION_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
-      const repo = ocrRepo(args, exec, runMsgs);
+      // 与 ocr_review 同一个归一化：两侧必须落在同一个会话目录，否则 review 写进去、
+      // 这里查的是另一个目录（缺陷 1）。
+      const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
       const { command, workdir } = buildSessionCommand({ ...args, repo }, runMsgs);
       // session 也读 OCR 家目录（sessions 清单），随 ocrConfigPath 一并重定向。
       const text = await runForeground(

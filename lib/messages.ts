@@ -206,7 +206,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     stdoutTruncated: "[ocr-review] 注意：输出超过 {limit} 字节上限已截断{spill}",
     outputSpill: "（完整输出已落盘：{path}）",
     backgroundPolling:
-      "稍候用 ocr_session(action=list) 找本仓库最新会话（启动几秒后出现，按 scanPaths/时间匹配）；" +
+      "先 job_output(job_id=<本回执的 jobId>) 读这条后台评审的实时输出与最终结局——按 id 走，" +
+      "启动即可读，一定有结果；要停它就 job_kill(job_id=<同一 id>)。会话落盘后再走 ocr_session：" +
+      "ocr_session(action=list) 找本仓库最新会话（启动几秒后出现，按 scanPaths/时间匹配）；" +
       "completed_files == selected_files 即已完成；再 ocr_session(action=comments, id) 取全部评论、" +
       "ocr_session(action=show, id) 看元数据与逐文件检查点。后台运行不设宿主超时，只在 2 小时" +
       "后兜底回收（挂死不动会一直占着官方作业桶），取消本工具调用即终止该后台 OCR" +
@@ -380,9 +382,13 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "[ocr-review] note: output exceeded the {limit}-byte cap and was truncated{spill}",
     outputSpill: " (full output spilled to {path})",
     backgroundPolling:
-      "Look up this repository's newest session shortly with ocr_session(action=list) (it appears a few " +
-      "seconds after start; match by scanPaths/time); completed_files == selected_files means it is done. " +
-      "Then ocr_session(action=comments, id) for all comments and ocr_session(action=show, id) for metadata " +
+      "First read this background review's live output and final outcome with " +
+      "job_output(job_id=<the jobId in this receipt>) — that path goes by id, so it is readable " +
+      "immediately after start and always has a result; job_kill(job_id=<the same id>) stops it. " +
+      "Once the session has landed, use ocr_session: ocr_session(action=list) finds this " +
+      "repository's newest session (it appears a few seconds after start; match by scanPaths/time); " +
+      "completed_files == selected_files means it is done. Then ocr_session(action=comments, id) for " +
+      "all comments and ocr_session(action=show, id) for metadata " +
       "and per-file checkpoints. Background runs get reclaimed by a 2-hour backstop (a wedged one would " +
       "otherwise keep occupying the official job bucket); cancelling this tool call terminates " +
       "the background OCR (host kill + the reaper guard inside the command).",
