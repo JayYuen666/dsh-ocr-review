@@ -68,7 +68,8 @@ describe("ocr-review host 构建", () => {
   it("除宿主 fork 的 schemastery 与凭据 branded-string 构造器外，@deepseek-ai/* 只有类型面", async () => {
     // 文件形态插件的运行时值导入只留两样：Config schema 用的 @deepseek-ai/schemastery，
     // 和 credentialRef / isCredentialRefName 所在的 @deepseek-ai/dsh-credentials
-    // （值导入必须落 dependencies，见 plugins/README.md 的跨包依赖纪律）。
+    // （值导入落 **peerDependencies**，绝不落 dependencies——后者会被消费方的 profile 装成
+    // 真实目录、在宿主进程里物化出第二份，判据见 test/publish-manifest.test.ts 那条门禁）。
     // cordis / dsh-settings / dsh-tools / dsh-shell / dsh-host-webserver / dsh-system-prompt
     // 仍必须 type-only——它们的运行时面由 ctx 注入（服务走 ctx.credentials，不是这个包），
     // 漏一个值导入就会让本包在源码态装载失败或把宿主的服务单例复制成第二份。dsh-tools 与

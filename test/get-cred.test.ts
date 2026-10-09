@@ -86,6 +86,22 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     rmSync(ROOT, { recursive: true, force: true });
   });
 
+  it("托管文档 YAML 非法 ⇒ stderr 只有 reason + 行列，不带出原文里的明文 key", async () => {
+    // js-yaml 的 YAMLException 有两条路会把 mark.snippet（出错点邻域的**原文**）附在
+    // 文本后面：构造函数里的 this.message，以及 compact 为假时的 toString()。而
+    // refs.<REF> 里放的就是明文 key——修复前一处缩进笔误就把邻近行的真实 key 写进了
+    // stderr（OCR 会记录 api_key_cmd 的 stderr，也可能进宿主日志）。
+    const secret = "sk-FAKE-SECRET-ABC123";
+    const broken = `version: 1\nrefs:\n  OCR_TEST_KEY: ${secret}\n   OCR_OTHER: oops\n`;
+    const home = homeWith({ credentialsYaml: broken });
+    const res = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.code).toBe(1);
+    expect(res.stderr).toMatch(/不是合法 YAML/u);
+    expect(res.stderr).not.toContain(secret);
+    // 定位信息不能跟着一起丢：紧凑形态仍带 line:column
+    expect(res.stderr).toMatch(/\(\d+:\d+\)/u);
+  });
+
   it("非法 ref 名直接拒绝，不读任何文件", async () => {
     const res = await runCred(["bad;rm -rf"], { HOME: ROOT, DSH_HOME: undefined });
     expect(res.code).toBe(1);

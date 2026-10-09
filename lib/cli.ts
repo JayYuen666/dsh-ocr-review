@@ -255,9 +255,15 @@ function optionalFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): stri
  *  - 组长场景（detached 复刻 runner）dsh 硬退出后 +2s：stub 走 trap 优雅收尾、
  *    孙进程随组消亡——只杀 $ocr 与其直接子级会漏孙进程（实测泄漏被收养）；
  *  - 非组长场景守护收 TERM：stub/stub 包装层/孙进程全部消亡。
+ * 降级口径：宿主文件沙箱围栏会把进程信息类命令一并 EPERM 拒绝（实测 /bin/ps），于是
+ * 一次性探测 ps 与 pgrep 两个可用性（HAVEPS / HAVEPG）。**任一不可用就不挂守护**：原样
+ * 跑命令、把进程树交回宿主，并向 stderr 报一次（不是每 2 秒刷屏）。为什么是「整条不挂」
+ * 而不是「挂个残缺版」——pgrep 只出现在后代快照 desc() 里，它不可用时 cs 恒空，reap
+ * 于是只杀得掉中间 bash 壳，真 ocr 命令与其孙进程全部存活：那不是「少一条看护」，而是
+ * 伪装成看护在位却放任进程持续烧 token。
  * 只包 review/scan（分钟级任务）；delegate/session/llm-test 秒级命令不包。
  */
-export function wrapWithHostReaper(command: string): string {
+export function wrapWithHostReaper(command: string, messages: OcrReviewMessages): string {
   // reaper 整条链是 POSIX shell：bash 的 trap/作业控制，加上 ps / pgrep / kill 的
   // 进程组语义。Windows 上这三样都不成立（没有 `bash -c` 可言、kill 不认 -TERM
   // 进程组），硬包只会得到 execNotFound 而**不是**任何降级——所以这里按平台闸直接
@@ -267,7 +273,19 @@ export function wrapWithHostReaper(command: string): string {
     return command;
   }
   const inner = [
-    `p0=$(ps -o ppid= -p $$ | tr -d ' ')`,
+    // ps 可用性**一次性**探测（实测：宿主文件沙箱围栏下 /bin/ps 被 EPERM 拒绝）。
+    // 不探测的代价有两层，且都是静默的：监视循环每 2 秒 fork 一次注定失败的 ps，整场评审
+    // 刷满 "Operation not permitted"；更要紧的是 ppid 比对两边都拿到空串、恒成立，于是
+    // 「dsh 硬退出 → 守护自杀」这条**本守护的主要目的**其实一直没生效。探测一次把两条路
+    // 分开：可用走原口径；不可用退化为纯 kill -0 监视（见下面 while 判据）——少一条看护
+    // 好过让恒真判据蒙混过去，两种失效都是静默的，显式分叉才诚实。
+    `p0=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' '); [ -n "$p0" ] && HAVEPS=1 || HAVEPS=0`,
+    // pgrep 必须单独探：它只出现在后代快照 desc() 里，探不到时 cs 恒空 ⇒ reap 只杀得掉
+    // 中间 bash 壳，真命令与孙进程全部存活。探针取 `pgrep -P 1`：PID 1 必然存在，被
+    // 沙箱拒绝时退出码非 0，且不受「当前进程恰好没有子进程」干扰。
+    `pgrep -P 1 >/dev/null 2>&1 && HAVEPG=1 || HAVEPG=0`,
+    // 两者齐备才挂守护；任一不可用就走降级分支：报一次说明后原样跑，把进程树交回宿主。
+    `[ "$HAVEPS" = 1 ] && [ "$HAVEPG" = 1 ] || { printf '%s\\n' ${shq(messages.reaperDegraded)} >&2; { ${command} ; }; exit $?; }`,
     `{ ${command} ; } & ocr=$!`,
     // 关键坑（实测）：bash 的 trap/多语句模式下 `bash -c` 对后台 brace group 不做
     // exec 优化——$ocr 是中间 bash 壳，真命令在其子级。只杀 $ocr 会把真命令变成
@@ -275,13 +293,16 @@ export function wrapWithHostReaper(command: string): string {
     `desc() { for k in $(pgrep -P "$1" 2>/dev/null); do desc "$k"; printf '%s ' "$k"; done; }`,
     // 组长判定：生产 detached:true(setsid) 恒为组长，组杀精确覆盖本命令树；
     // 非组长（手测/异常）绝不组杀——否则会误伤宿主组，改用递归后代回退。
-    `isl() { [ "$(ps -o pgid= -p $$ | tr -d ' ')" = "$$" ]; }`,
+    // HAVEPS=0 时 isl 恒假：拿不到 pgid 就不组杀，只走后代回退那一档（宁可漏杀不可误伤）。
+    `isl() { [ "$HAVEPS" = 1 ] && [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" = "$$" ]; }`,
     // 快照 cs 必须在 TERM 之前（后代被收养后 pgrep 断链）。KILL 单遍：KILL 不可
     // 捕获；僵尸是 kill -0 假阳性，循环补杀会死等。自毙（组 KILL）排最后一步：
     // trap 执行中同信号被 POSIX 丢弃，链必须先确保目标全部死亡再自我清场。
     `reap() { cs=$(desc "$ocr"); isl && kill -TERM -- -$$ 2>/dev/null; kill -TERM "$ocr" 2>/dev/null; for c in $cs; do kill -TERM "$c" 2>/dev/null; done; sleep 1; killmPid(){ kill -0 "$1" 2>/dev/null && kill -KILL "$1" 2>/dev/null; }; killmPid "$ocr"; for c in $cs; do killmPid "$c"; done; isl && kill -KILL -- -$$ 2>/dev/null; }`,
     `trap 'reap; exit 143' TERM INT`,
-    `while kill -0 "$ocr" 2>/dev/null && [ "$(ps -o ppid= -p $$ | tr -d ' ')" = "$p0" ]; do sleep 2; done`,
+    // HAVEPS=0 时退化为纯 kill -0 监视：判据里的 ps 短路掉，不再每 2 秒 fork 一个注定
+    // 失败的 ps。代价是硬退出看护失效（收不到 ppid 变化），换取零噪音与零无谓 fork。
+    `while kill -0 "$ocr" 2>/dev/null && { [ "$HAVEPS" = 0 ] || [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "$p0" ]; }; do sleep 2; done`,
     `kill -0 "$ocr" 2>/dev/null && reap`,
     `wait "$ocr"; exit $?`,
   ].join("; ");

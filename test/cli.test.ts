@@ -10,7 +10,6 @@ import {
   shq,
   assertAbsoluteRoot,
   clampEffort,
-  clampPositiveInt,
   commaList,
   resolveOutputFormat,
 } from "../lib/argv-guard.ts";
@@ -38,6 +37,8 @@ import { MESSAGES } from "../lib/messages.ts";
 import type { OcrReviewMessages } from "../lib/messages.ts";
 
 const { zh } = MESSAGES;
+
+const REPO_ABS = "/Users/me/repo";
 
 /** 降级回落的目标子命令（action=show/comments 缺 id 时命令必须落回这一条）。 */
 /** 解析出的命令词：随包入口的绝对路径，或 PATH 上的裸 `ocr`。测试与生产同源。 */
@@ -113,6 +114,26 @@ function unwrapReaper(wrapped: string): string {
   return shqUnwrap(wrapped.slice(prefix.length));
 }
 
+describe("commaList 的边界闸", () => {
+  it("数组项自身含逗号 ⇒ 拒绝（join 后与「两项数组」无法区分）", () => {
+    // ["a,b"] 与 ["a","b"] join 后都是 "a,b"，而 glob 花括号（{ts,tsx}）恰好含逗号：
+    // 静默拆开就把一个模式变成两个，审查/过滤范围被无声改变。
+    expect(() => listOf(["src/**/*.{ts,tsx}"], "exclude", 50)).toThrow(/含逗号/u);
+    expect(listOf(["a", "b"], "exclude", 50)).toStrictEqual(["a", "b"]);
+    // 字符串形态仍按逗号拆——那是唯一能表达多个模式的形式。
+    expect(listOf("a,b", "exclude", 50)).toStrictEqual(["a", "b"]);
+  });
+
+  it("limit 非法（NaN / ≤0）回落到保守默认，而不是静默放开上限", () => {
+    const many = [...Array.from({ length: 260 }).keys()].map((index) => `f${index}.ts`);
+    // out.length >= NaN 恒为 false ⇒ 修复前上限完全失效。
+    expect(listOf(many, "paths", Number.NaN)).toHaveLength(200);
+    expect(listOf(many, "paths", 0)).toHaveLength(200);
+    expect(listOf(many, "paths", -1)).toHaveLength(200);
+    expect(listOf(many, "paths", 5)).toHaveLength(5);
+  });
+});
+
 describe("shq", () => {
   it("普通字符串原样进入单引号", () => {
     expect(shq("main")).toBe("'main'");
@@ -126,6 +147,12 @@ describe("shq", () => {
     expect(shq("$(rm -rf /)")).toBe("'$(rm -rf /)'");
     expect(shq("`id`; echo hi")).toBe("'`id`; echo hi'");
   });
+
+  it("含 NUL 字节直接拒绝：POSIX 命令串无法表示它，放行会静默截断 argv", () => {
+    // 此前这条不变量靠各调用点先做 NUL 检查维持；下沉到 shq 自身后，
+    // 「转义后的串一定能被 shell 完整读回」由实现保证，而不是靠调用顺序。
+    expect(() => shq("a\u0000b")).toThrow(/NUL/u);
+  });
 });
 
 describe("assertAbsoluteRoot / resolveRoot", () => {
@@ -133,10 +160,19 @@ describe("assertAbsoluteRoot / resolveRoot", () => {
     expect(() => rootOf("relative/path")).toThrow(/绝对路径/u);
     expect(() => rootOf("")).toThrow(/必填/u);
     expect(() => rootOf("a\u0000b")).toThrow(/NUL/u);
+    // 非字符串入参（模型传参经 PTC 可到任何类型）：与空串同义，报「必填」而不是
+    // 让它掉进「必须是绝对路径」那条误导性文案。
+    expect(() => rootOf(123)).toThrow(/必填/u);
+    expect(() => rootOf(null)).toThrow(/必填/u);
+    expect(() => rootOf(undefined)).toThrow(/必填/u);
+    // 全空白同样按未提供处理
+    expect(() => rootOf("   ")).toThrow(/必填/u);
   });
 
-  it("接受绝对路径", () => {
-    expect(rootOf("/Users/me/repo")).toBe("/Users/me/repo");
+  it("接受绝对路径（含首尾空白，trim 后判定）", () => {
+    expect(rootOf(REPO_ABS)).toBe(REPO_ABS);
+    // 带首尾空白：此前会被「必须是绝对路径」拦下，读起来像路径格式写错，实际只是多了空格
+    expect(rootOf(`  ${REPO_ABS}  `)).toBe(REPO_ABS);
   });
 
   it("显式值优先，空串回退 fallback，都没有时报错", () => {
@@ -200,17 +236,32 @@ describe("ocrCommand：命令词解析", () => {
 });
 
 describe("wrapWithHostReaper", () => {
-  it("外层 bash -c，内部命令完整保留且 ppid 监视在位", () => {
-    const wrapped = wrapWithHostReaper(REVIEW_CMD);
+  it("外层 bash -c，内部命令完整保留且 ppid 监视带可用性探测", () => {
+    const wrapped = wrapWithHostReaper(REVIEW_CMD, zh);
     expect(wrapped.startsWith("bash -c '")).toBe(true);
     const inner = unwrapReaper(wrapped);
     expect(inner).toContain(REVIEW_CMD);
     expect(inner).toContain(`{ ${REVIEW_CMD} ; } & ocr=$!`);
-    expect(inner).toContain("p0=$(ps -o ppid= -p $$ | tr -d ' ')");
+    expect(inner).toContain(
+      `p0=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' '); [ -n "$p0" ] && HAVEPS=1 || HAVEPS=0`,
+    );
     expect(inner).toContain("trap 'reap; exit 143' TERM INT");
     expect(inner).toContain('killmPid "$ocr"');
     expect(inner).toContain("isl && kill -KILL -- -$$");
     expect(inner).toContain('wait "$ocr"; exit $?');
+  });
+
+  it("ps 不可用时监视判据短路：不再每轮 fork ps，且 ppid 比对有显式旁路", () => {
+    // 回归钉的是两件事：HAVEPS=0 分支真的存在（否则恒真判据会冒充看护在位），
+    // 以及 ps 在该分支下不被调用（否则围栏里每 2 秒刷一次 EPERM）。
+    const inner = unwrapReaper(wrapWithHostReaper(REVIEW_CMD, zh));
+    expect(inner).toContain(`[ "$HAVEPS" = 0 ] ||`);
+    expect(inner).toContain(`isl() { [ "$HAVEPS" = 1 ] &&`);
+    expect(inner).toContain(
+      `while kill -0 "$ocr" 2>/dev/null && { [ "$HAVEPS" = 0 ] || [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "$p0" ]; }; do sleep 2; done`,
+    );
+    // 探测只发生一次（起始行），另一处是监视循环里的短路求值点——两处，别更多。
+    expect(inner.match(/ps -o ppid=/gu)).toHaveLength(2);
   });
 
   it("进程平台为 win32 时不套守护：POSIX 工具链缺席就放行裸命令（否则 execNotFound）", () => {
@@ -220,8 +271,8 @@ describe("wrapWithHostReaper", () => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
       const command = REVIEW_CMD;
-      expect(wrapWithHostReaper(command)).toBe(command);
-      expect(wrapWithHostReaper(command)).not.toContain("bash -c");
+      expect(wrapWithHostReaper(command, zh)).toBe(command);
+      expect(wrapWithHostReaper(command, zh)).not.toContain("bash -c");
     } finally {
       if (real === undefined) {
         Reflect.deleteProperty(process, "platform");
@@ -231,9 +282,33 @@ describe("wrapWithHostReaper", () => {
     }
   });
 
+  it("ps 与 pgrep 都探测；任一不可用就整条不挂守护（残缺 reap 只会杀中间 bash 壳）", () => {
+    const inner = unwrapReaper(wrapWithHostReaper(REVIEW_CMD, zh));
+    // ps 探测：恒真的 ppid 比对会把「硬退出看护没生效」伪装成在位
+    expect(inner).toContain("HAVEPS");
+    // pgrep 探测：它只出现在后代快照 desc() 里，漏探时 cs 恒空 ⇒ 真 ocr 进程全部泄漏
+    expect(inner).toContain("HAVEPG");
+    expect(inner).toContain("pgrep -P 1");
+    // 降级分支在两个探针之后、启动子进程之前，不可用时直接原样跑并退出
+    expect(inner).toContain("exit $?");
+    expect(inner.indexOf("HAVEPG")).toBeLessThan(inner.indexOf("ocr=$!"));
+  });
+
+  it("降级说明走 messages 注入：换语言只换文案，两个探针不变", () => {
+    const zhInner = unwrapReaper(wrapWithHostReaper(REVIEW_CMD, zh));
+    const enInner = unwrapReaper(wrapWithHostReaper(REVIEW_CMD, MESSAGES.en));
+    expect(zhInner).not.toBe(enInner);
+    expect(zhInner).toContain("宿主回收守护已降级");
+    expect(enInner).toContain("host reaper degraded");
+    for (const probe of ["HAVEPS", "HAVEPG", "pgrep -P 1"]) {
+      expect(zhInner).toContain(probe);
+      expect(enInner).toContain(probe);
+    }
+  });
+
   it("原命令含单引号时二次转义，可精确还原（注入防护）", () => {
     const cmd = "ocr review --exclude 'a; rm -rf /' --background 'it''s ok'";
-    const wrapped = wrapWithHostReaper(cmd);
+    const wrapped = wrapWithHostReaper(cmd, zh);
     const inner = unwrapReaper(wrapped);
     expect(inner).toContain("{ ocr review --exclude 'a; rm -rf /' --background 'it''s ok' ; }");
   });
@@ -599,7 +674,7 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
   it("wrapWithHostReaper 后仍然是「一段 bash -c 参数」：二次转义不破功", () => {
     for (const payload of PAYLOADS) {
       const { command } = reviewCmd({ repo: "/r", commit: payload }, "/o");
-      const wrapped = wrapWithHostReaper(command);
+      const wrapped = wrapWithHostReaper(command, zh);
       expect(wrapped.startsWith("bash -c '")).toBe(true);
       expect(unwrapReaper(wrapped)).toContain(command);
       // 整段 inner 必须只算「一个」shq 参数：骨架里除 ⟦Q⟧ 外什么都不剩，
@@ -644,19 +719,8 @@ describe("错类型参数：静默回落会扩大审查范围，一律抛错", (
   });
 });
 
-describe("clampPositiveInt（argv-guard 数值闸，session --limit 已改走严格校验）", () => {
-  it("非数/非安全整数回退，越界钳到区间端点", () => {
-    expect(clampPositiveInt(undefined, 10, 1, 100)).toBe(10);
-    expect(clampPositiveInt(null, 10, 1, 100)).toBe(10);
-    expect(clampPositiveInt("abc", 10, 1, 100)).toBe(10);
-    expect(clampPositiveInt(1.5, 10, 1, 100)).toBe(10);
-    expect(clampPositiveInt(2 ** 53, 10, 1, 100)).toBe(10);
-    expect(clampPositiveInt("50", 10, 1, 100)).toBe(50);
-    expect(clampPositiveInt(0, 10, 1, 100)).toBe(1);
-    expect(clampPositiveInt(500, 10, 1, 100)).toBe(100);
-  });
-
-  it("session limit 越界/错类型抛错而非静默钳制（0=「想看全部」钳成 1 是最坏读法）", () => {
+describe("session --limit 的数值闸", () => {
+  it("越界/错类型抛错而非静默钳制（0=「想看全部」钳成 1 是最坏读法）", () => {
     expect(() => sessionCmd({ repo: "/r", limit: 500 })).toThrow(/1-100/u);
     expect(() => sessionCmd({ repo: "/r", limit: true })).toThrow(/1-100/u);
   });

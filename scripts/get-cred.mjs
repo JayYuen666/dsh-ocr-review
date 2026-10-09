@@ -97,6 +97,35 @@ function isNotFound(error) {
  * @param {string} refName
  * @returns {string | undefined}
  */
+/**
+ * YAML 解析错误的**脱敏**描述：只留 reason + 行列定位，不带出错位置前后若干行的原文。
+ *
+ * 为什么必须自己拼：js-yaml 的 YAMLException 有两处会把 mark.snippet（出错点邻域的
+ * **原文**）附在文本后面——构造函数里的 `this.message = formatError(this, false)`，以及
+ * `toString()` 在 compact 为假时的分支。而 .credentials.yaml 的 refs.<REF> 里放的就是
+ * 明文 key，于是一处缩进/引号笔误就会把邻近行的真实 key 写进 stderr（OCR 会记录
+ * api_key_cmd 的 stderr，也可能进宿主日志），直接违反「明文只在取用时出现一次」。
+ * 实测 `String(err)` 与 `err.message` 两条路都会带出 snippet，只有 toString(true)
+ * （紧凑格式）是干净的。
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+function yamlErrorDetail(error) {
+  if (error instanceof Error) {
+    // js-yaml 的 YAMLException 覆盖了 toString(compact)：传 true 走紧凑分支。
+    // 别的 Error 会忽略这个参数，返回普通的 "Name: message"，同样不含 snippet。
+    const compact = error.toString(true);
+    if (typeof compact === "string" && compact !== "") {
+      return compact;
+    }
+    return error.message;
+  }
+  // 兜底也不能用 String(error)：error 是 unknown，非字符串时会被隐式走
+  // Object.prototype.toString，产出 "[object Object]" 这种毫无信息量的文本。
+  return error instanceof Error ? error.message : "";
+}
+
 function fromCredentialsDoc(credPath, refName) {
   let text;
   try {
@@ -113,7 +142,7 @@ function fromCredentialsDoc(credPath, refName) {
     try {
       doc = load(text);
     } catch (error) {
-      problems.push(`凭证文件不是合法 YAML：${credPath} ${String(error)}`);
+      problems.push(`凭证文件不是合法 YAML：${credPath} ${yamlErrorDetail(error)}`);
     }
   }
   const refs = isRecord(doc) ? doc.refs : undefined;

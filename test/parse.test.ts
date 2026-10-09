@@ -105,6 +105,41 @@ describe("parseReviewOutput — 真实评审（complete）", () => {
   });
 });
 
+// 下面几个键都在 Object.prototype 上：一律走变量取值，方括号字面量会被 lint 的
+// dot-notation / no-proto 改写掉——而这里要验的恰恰是「方括号取值不命中继承属性」。
+const ctorKey = "constructor";
+const toStringKey = "toString";
+const protoKey = "__proto__";
+
+/** 造一条最小评论；category 是这组用例唯一关心的字段。 */
+const mk = (category: string): OcrComment => ({
+  path: "a.ts",
+  content: "x",
+  startLine: 1,
+  endLine: 2,
+  existingCode: "",
+  suggestionCode: "",
+  category,
+  severity: "medium",
+});
+
+describe("aggregateComments 的 category 计数不被原型链污染", () => {
+  it("constructor / toString 按普通键计数，不被写成函数字符串", () => {
+    const agg = aggregateComments([mk(ctorKey), mk(toStringKey), mk(ctorKey)]);
+    expect(agg.byCategory[ctorKey]).toBe(2);
+    expect(agg.byCategory[toStringKey]).toBe(1);
+  });
+
+  it("__proto__ 是普通自有键：计数不消失，克隆后仍在", () => {
+    const agg = aggregateComments([mk(protoKey), mk(protoKey)]);
+    expect(agg.byCategory[protoKey]).toBe(2);
+    // 修复前 __proto__ 是 setter，赋值被静默忽略、这条评论的计数直接消失；
+    // 这里断它是一个真·自有属性（getOwnPropertyDescriptor 取得到值）。
+    const cloned = structuredClone(agg.byCategory);
+    expect(Object.getOwnPropertyDescriptor(cloned, protoKey)?.value).toBe(2);
+  });
+});
+
 describe("parseReviewOutput — skipped 外壳（无变更可审）", () => {
   const parsed = parseOcr(read("ocr-review-skipped.json"));
 
@@ -359,21 +394,43 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
 });
 
 describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
-  it("warnings 兼容字符串条目、{file,error} 对象条目，其它形态丢弃", () => {
+  it("warnings 兼容字符串与 {file,error} 条目；读不出的条目留占位而非静默丢弃", () => {
+    // 修复前 42 / null 被 filter(Boolean) 丢掉，而 completed_with_errors 这类状态的
+    // 失败细节**只**走 warnings 字段：丢掉等于把「出了错」显示成「一切正常」。
     const parsed = parseOcr(
       JSON.stringify({
         status: "completed_with_warnings",
-        warnings: ["纯文本告警", { file: "a.ts", error: "timeout" }, { error: "仅错误" }, 42, null],
+        warnings: [
+          "纯文本告警",
+          { file: "a.ts", error: "timeout" },
+          { error: "仅错误" },
+          42,
+          null,
+          {},
+        ],
       }),
     );
     expect(parsed.ok).toBe(true);
     expect(parsed.status).toBe("completed_with_warnings");
-    expect(parsed.warnings).toStrictEqual(["纯文本告警", "a.ts：timeout", "仅错误"]);
+    expect(parsed.warnings).toStrictEqual([
+      "纯文本告警",
+      "a.ts：timeout",
+      "仅错误",
+      zh.warningUnreadable,
+      zh.warningUnreadable,
+      // 对象但既无 file 也无 error：进 isRecord 分支却拼不出文案，同样落占位
+      zh.warningUnreadable,
+    ]);
   });
 
-  it("无 warnings 字段 ⇒ 空数组（与「有字段但全被丢弃」两条分支都走）", () => {
+  it("无 warnings 字段 ⇒ 空数组；字段存在但不是数组 ⇒ 一条占位", () => {
     expect(parseOcr('{"status":"success"}').warnings).toStrictEqual([]);
-    expect(parseOcr('{"status":"success","warnings":[42]}').warnings).toStrictEqual([]);
+    expect(parseOcr('{"status":"success","warnings":[42]}').warnings).toStrictEqual([
+      zh.warningUnreadable,
+    ]);
+    expect(parseOcr('{"status":"partial","warnings":"nope"}').warnings).toStrictEqual([
+      zh.warningUnreadable,
+    ]);
   });
 
   it("数值字段：数字字符串、带空格、1e999（JSON 里的非有限数）、布尔与对象各自的落点", () => {
@@ -423,17 +480,44 @@ describe("delegate 解析的失败与降级分支", () => {
     expect(parseDelegatePreview('{"mode":"commit"}').reviewable).toStrictEqual([]);
   });
 
+  it("preview：契约键在但类型不对（null / 字符串 / 对象）⇒ 判失败，不报「0 个文件可审」", () => {
+    // 此前 hitsContract 只查「键在不在」，{"reviewable_files": null} 这种上游半截产出
+    // 被当成合法文档 ⇒ ok:true + 空清单 = 假阴性的范围结论，比解析失败更难察觉。
+    for (const value of ["null", '"oops"', "{}", "42"]) {
+      expect(parseDelegatePreview(`{"mode":"commit","reviewable_files":${value}}`).ok).toBe(false);
+      expect(parseDelegatePreview(`{"mode":"commit","excluded_files":${value}}`).ok).toBe(false);
+    }
+    // 合法的空数组仍然放行
+    expect(parseDelegatePreview('{"mode":"commit","reviewable_files":[]}').ok).toBe(true);
+  });
+
   it("rule：坏 JSON / 非对象 / 无契约键 三种失败形态", () => {
     expect(parseDelegateRules("nope").ok).toBe(false);
     expect(parseDelegateRules('[{"files":[]}]').ok).toBe(false);
     expect(parseDelegateRules('{"error":"no rules"}')).toStrictEqual({ ok: false, groups: [] });
   });
 
-  it("rule：groups 非数组、files 非数组与 files 内非字符串都安全降级", () => {
-    expect(parseDelegateRules('{"schema_version":1,"groups":"none"}').groups).toStrictEqual([]);
+  it("rule：groups 非数组、组内 files 非数组都判失败（不再静默丢组）", () => {
+    // groups 是字符串：那不是「0 个分组」，是契约破损，报 ok:false 才对。
+    expect(parseDelegateRules('{"schema_version":1,"groups":"none"}')).toStrictEqual({
+      ok: false,
+      groups: [],
+    });
+    // 组内 files 非字符串：此前该组被 files.length > 0 过滤掉，一组规则凭空消失
+    // 而 ok 仍是 true——调用方无从知道自己拿到的是残缺清单。
+    expect(
+      parseDelegateRules('{"groups":[{"group_id":3,"files":"不是数组","rule":"r3"}]}'),
+    ).toStrictEqual({ ok: false, groups: [] });
+  });
+
+  it("rule：只有 schema_version、groups 缺失 ⇒ 空分组且 ok:true（不是破损）", () => {
+    // groups 缺失是「这个文件里没有规则」的正常形态，与「groups 在但形状坏了」要分得开。
+    expect(parseDelegateRules('{"schema_version":1}')).toStrictEqual({ ok: true, groups: [] });
+  });
+
+  it("rule：files 内非字符串项被丢弃，其余组照常返回", () => {
     const parsed = parseDelegateRules(
-      '{"groups":[{"group_id":"2","files":["a.ts",null,{"a":1}],"rule":"r"},' +
-        '{"files":[]},{"group_id":3,"files":"不是数组","rule":"r3"}]}',
+      '{"groups":[{"group_id":"2","files":["a.ts",null,{"a":1}],"rule":"r"},{"files":[]}]}',
     );
     expect(parsed.ok).toBe(true);
     expect(parsed.groups).toStrictEqual([

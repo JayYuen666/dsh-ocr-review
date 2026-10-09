@@ -20,7 +20,7 @@ English · [中文](README.zh-CN.md)
 - Platforms: macOS and Linux are the targets. Process reaping (the reaper guard around `ocr_review` / `ocr_scan`) depends on a POSIX toolchain - bash traps and job control plus the process-group semantics of `ps` / `pgrep` / `kill`. None of that exists on Windows, so the package runs the bare command there (guarded by `process.platform`): no reaping, but it still works. The cost is that a hard host exit can leave an orphaned OCR process.
 - The provider list and the key status come from the official host channels `ctx.settings.describe()` (the `value.providers` of the `llm-pi-ai` entry) and `ctx.credentials`.
 - When either is missing the card shows the degradation reason while tools and settings keep working.
-- The host must be `>=0.2.0-rc.2`: declared in `peerDependencies` (the host checks it on plugin install from 0.1.7-rc; alpha.1 has no such gate yet) and in `engines.dsh` (same value, read by nothing).
+- The host must be `>= 0.2.1-alpha.1`: declared in `peerDependencies` (the host checks it on plugin install from 0.1.7-rc; alpha.1 has no such gate yet) and in `engines.dsh` (same value, read by nothing).
 
 ## Installation
 
@@ -30,7 +30,10 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 - The packages are on the public npm registry, so installation needs no credentials.
 - The published files are only `host.js`, `client.js`, `cordis.patch.yml` and `scripts` (`prepack` rebuilds both bundles); source repository: see `repository.url` in package.json.
-- Runtime value dependencies are `@jayyuen66/dsh-plugin-shared`, `@deepseek-ai/schemastery` (the host's fork of schemastery — only it implements the 0.1.7 `.volatile()` resolution) and `js-yaml` (the last one used only by `scripts/get-cred.mjs`).
+- No `@deepseek-ai/*` goes in `dependencies`, and that is not a style preference. Consumers of this package are dsh plugins installed into a profile (`nodeLinker: hoisted`, `autoInstallPeers: false`), so any host package listed under `dependencies` is written into that profile as a **real directory**, coexisting with the copy the host process already loaded. `@deepseek-ai/dsh-tools` keys its `TOOL_RUNTIME_SCHEDULER` with a plain `Symbol` (not `Symbol.for`), so symbol identity is per module instance: the host's `dsh-agent-loop` reads a `ToolRuntime` mounted from the duplicate using its own copy's symbol, gets `undefined`, and **every native tool call throws** `Cannot read properties of undefined (reading 'prepare')` — the whole profile loses its tools. This package's build, typecheck and tests all stay green right up to that point, so `test/publish-manifest.test.ts` pins the invariant in the manifest instead.
+- The four host packages this bundle imports as **values** are required (non-optional) `peerDependencies`: `@deepseek-ai/schemastery` (the host's fork of schemastery — only it implements the 0.1.7 `.volatile()` resolution), `@deepseek-ai/dsh-credentials`, `@deepseek-ai/dsh-home-paths` and `@deepseek-ai/dsh-atomic-write`. The host provides them at runtime, and a profile installs no peers, so no duplicate appears. `build-host.mjs` externalizes `dependencies` *and* `peerDependencies`, so `host.js` keeps the bare specifiers unchanged.
+- Those four are repeated in `devDependencies` — that is what lets this repository's own typecheck, build and tests resolve them. Every other `@deepseek-ai/*` is type-only (erased at build, no specifier left in `host.js`) and stays in `devDependencies` alone.
+- What is left in `dependencies` is genuinely this package's own runtime code: `@jayyuen66/dsh-plugin-shared` and `js-yaml` (the last one used only by `scripts/get-cred.mjs`).
 
 ## pnpm blocks the dependency script on install (ERR_PNPM_IGNORED_BUILDS)
 

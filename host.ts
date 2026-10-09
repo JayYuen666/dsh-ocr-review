@@ -41,11 +41,11 @@
 // 运行时值导入只有 @deepseek-ai/schemastery（Config schema：`.volatile()` 与
 // volatile 字段的引用化只在这个宿主 fork 里有实现，公共 schemastery@3.18 没有，
 // 用它的产物在 0.1.7 上设置卡写得进、读不到）、@deepseek-ai/dsh-credentials（在
-// dependencies，只取两枚纯语法件，见下面的 import 注释）与 @jayyuen66/dsh-plugin-shared；
+// peerDependencies，只取两枚纯语法件，见下面的 import 注释）与 @jayyuen66/dsh-plugin-shared；
 // cordis / dsh-settings / dsh-tools / dsh-shell / dsh-host-webserver / dsh-system-prompt
 // 一律 type-only（运行时服务由 ctx 注入，见 plugins/README.md 的解耦原则；工具面与
 // shell/webServer/systemPrompt 三面的类型绑官方见下面 import 段）。dsh-credentials 是
-// **值导入且在 dependencies**，但只取它两枚纯语法件（见下面的 import 注释），凭据读写仍走
+// **值导入且在 peerDependencies**，但只取它两枚纯语法件（见下面的 import 注释），凭据读写仍走
 // ctx.credentials——服务面没有因此开口。
 
 import Schema from "@deepseek-ai/schemastery";
@@ -62,7 +62,9 @@ import type { SettingsDescriptor, SettingsForms } from "@deepseek-ai/dsh-setting
 // 品牌构造（installed lib/index.js:13 `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`、
 // :21-36），本包原先自己抄了同一条正则当 ref 语法——抄一条规则就多一处会跟着宿主漂移的
 // 判据。两者都是纯字符串函数；官方品牌没有 type-only 的构造方式，故落
-// `dependencies`、产物留裸说明符（`test/build-host.test.ts` 同时钉"说明符在"与"函数体不在"，
+// `peerDependencies`（值导入必须由宿主在场提供，而 profile 不装 peer，所以不产生第二份；
+// `dependencies` 是禁区，理由见 `test/publish-manifest.test.ts`）、产物留裸说明符
+// （`test/build-host.test.ts` 同时钉"说明符在"与"函数体不在"，
 // 并钉 `dsh-brand` 不得出现在本包产物里——brand 是 credentials 自己的依赖）。
 import { credentialRef, isCredentialRefName } from "@deepseek-ai/dsh-credentials";
 import type { CredentialProvider } from "@deepseek-ai/dsh-credentials";
@@ -89,6 +91,10 @@ import type {
   ShellProcessStatus,
   ShellRunResult,
 } from "@deepseek-ai/dsh-shell";
+// 沙箱策略按调用携带（官方 `SandboxExecutionPolicy` 定义在 dsh-sandbox，dsh-shell 自己
+// 只内部 import、并不再导出，所以取类型必须直引）。同样是 type-only，产物里不得出现该
+// 说明符（锁见 test/build-host.test.ts）；包本身已在 devDependencies 声明，不需要进运行时。
+import type { SandboxExecutionPolicy } from "@deepseek-ai/dsh-sandbox";
 // 后台评审的子进程登记为官方作业（ctx.jobs）。口径与上面三件套一致——type-only +
 // `Pick<官方类, 方法>` 投影，注册表实例由宿主注入（dsh-base 默认装载 dsh-jobs-local），
 // 产物里不得出现这两个说明符（针在 test/build-host.test.ts）。
@@ -146,6 +152,7 @@ import { ROUTING_NAME, ROUTING_ORDER } from "./lib/routing.ts";
 import {
   providersForCard,
   applyProviderSelection,
+  ensureKeyScriptPointer,
   migratePlaintextKeys,
   resolveOcrConfigPath,
   ocrHomeOverride,
@@ -685,9 +692,12 @@ const REVIEW_SUMMARY_SCHEMA = {
     aggregation: {
       type: "object",
       additionalProperties: false,
-      required: ["total", "bySeverity", "byCategory"],
+      required: ["total", "bySeverity", "byCategory", "unknownSeverityCount"],
       properties: {
         total: { type: "integer" },
+        // 未知等级（OCR 自造 blocker / 严重 / 带空白的 "critical "）一律按 medium 归一，
+        // 降级必须发生但不该无痕：这个数让契约异常在聚合里看得见，而不是悄悄混进 medium。
+        unknownSeverityCount: { type: "integer" },
         bySeverity: {
           type: "object",
           additionalProperties: false,
@@ -837,6 +847,34 @@ const SESSION_OUTPUT_SCHEMA = {
 
 // ── shell 执行与错误映射 ────────────────────────────────────────────────────
 
+/**
+ * ocr 子进程一律按 `danger-full-access` 请求（官方按调用携带的 `SandboxExecutionPolicy`）。
+ *
+ * 为什么必须显式要：ocr CLI 的状态目录是 `$HOME/.opencodereview`（Go 侧 `os.UserHomeDir()`，
+ * 无 `--config` 可改），落在 workspace 之外，而宿主沙箱的 `workspace-write` 只放行
+ * workspaceRoot 与后端临时区——于是每次会话写入被 EPERM 拒绝。后果不是"少个功能"而是
+ * **跑完的评审被丢掉**：同步调用在最后一步 `finalize session` 失败、对外整体报错；
+ * 后台调用则落不了盘，作业列表、`--resume` 与进度可观测性同时失效。
+ *
+ * 为什么不给 `workspace-write` + 重定向 HOME 兜着：那样得把 `config.json` 搬进 workspace，
+ * 密钥与状态管理跟着进仓，且换发布形态就要再搬一次——为绕开一条策略把用户目录写进用户仓。
+ * owner 口径是「状态归 ocr 自己，围栏由本包显式放开」，故直接要 `danger-full-access`。
+ *
+ * **「能不能只放开需要写的那一条路径」：不能。** 官方按调用携带的 `SandboxPolicyRequest`
+ * 只有 `session` 与 `mode` 两个字段（dsh-sandbox-policy 0.2.1-alpha.1 的
+ * lib/types/index.d.ts:50），**没有**附加可写路径、没有自定义 HOME、没有目录级豁免。
+ * 可选的收紧路径只有「改 ocr 自己的状态落点」或「等上游加字段」，两者都不是本包能在
+ * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
+ * 文件系统写权限，不是宿主其它能力；且 ocr 读什么、写什么仍由上面那条 argv 闸与
+ * 凭据链约束。
+ *
+ * `workspaceRoot` 在这个模式下不被消费，但官方要求「即使不消费也照样携带」（让调用方
+ * 先解析一次策略、再选执行路径），故传 workdir 而不是编一个占位根。
+ */
+function ocrSandboxPolicy(workspaceRoot: string): SandboxExecutionPolicy {
+  return { mode: "danger-full-access", workspaceRoot };
+}
+
 /** 失败详情：stderr 优先、空则退 stdout；先脱敏再截断（明文 key 绝不进工具错误
  *  ——错误文本会被持久化进会话日志）。省略标记是文案，故脱敏与截断的位置不变，
  *  只把中间的连接标记换成当前语言的那一份。两半各用一个函数，因为它们是两种缺陷：
@@ -877,6 +915,7 @@ async function runForeground(
     timeoutMs: run.timeoutMs,
     stdoutMaxBytes: run.stdoutMaxBytes,
     signal,
+    sandboxPolicy: ocrSandboxPolicy(workdir),
   });
   const exec = await host.shell.execute(spec);
   const result = await exec.result();
@@ -1050,6 +1089,7 @@ async function startBackground(
     onExpiry: "none",
     stdoutMaxBytes: job.stdoutMaxBytes,
     signal,
+    sandboxPolicy: ocrSandboxPolicy(job.workdir),
   });
   const proc = await host.shell.execute(spec);
   // 先剪窗口再起：注册表的容量闸只管"活的"，已落定的旧记录只有我们 remove 才会消失。
@@ -1118,6 +1158,7 @@ async function runCollect(
     workdir,
     timeoutMs: run.timeoutMs,
     stdoutMaxBytes: run.stdoutMaxBytes,
+    sandboxPolicy: ocrSandboxPolicy(workdir),
   });
   const exec = await host.shell.execute(spec);
   const result = await exec.result();
@@ -1427,6 +1468,29 @@ function pluginPaths(config: Config, messages: OcrReviewMessages): OcrPaths {
  */
 function ocrHome(config: Config): string | undefined {
   return ocrHomeOverride(readOcrConfigPath(config));
+}
+
+/**
+ * 调用 ocr 之前的一次性 api_key_cmd 指针自愈（lib/ocr-config.ts 的
+ * ensureKeyScriptPointer）。
+ *
+ * 为什么必须在这一层而不是启动时：config.json 里的脚本路径是**写那一刻**的插件安装
+ * 目录，而插件会被重装、换 profile（desktop / browser / 任意自定义名）、换发布形态。
+ * 目录一变那条命令就悬空，ocr 侧报的是「resolve LLM endpoint 失败」，与真因毫无
+ * 关系——五个工具一次性全挂，而配置文件里没有任何线索指向「本包被挪了地方」。
+ * 当前路径一律取自 PLUGIN_DIR（import.meta.dirname，host.ts:181），与 profile 命名
+ * 无关，故 desktop / browser / 自定义名走的是同一条路径。
+ *
+ * 与 ocrHome 同一口径：**不抛错**。pluginPaths 在坏设置下会抛，而那正是「工具照常
+ * 可用、错误由端点侧报给卡片」的分工，不能因为一次自愈把工具拖死。
+ */
+async function healKeyScriptPointer(host: HostCtx, config: Config): Promise<void> {
+  const messages = localeMessages(host);
+  try {
+    await ensureKeyScriptPointer(pluginPaths(config, messages), messages);
+  } catch {
+    // 坏设置/读不动配置：一律放过，让 ocr 报它自己的原始错误。
+  }
 }
 
 /** 运行 ocr llm test 校验当前配置（select 后自动验证 / 手动测试共用）。
@@ -1830,6 +1894,9 @@ function registerReviewTool(host: HostCtx, config: Config): void {
       const outPath = tmp === undefined ? undefined : path.join(tmp, "out.json");
       // ocrConfigPath 自定义时的 HOME 重定向（withHomeEnv 内部对 undefined/win32
       // 原样放行）。先注环境再套回收守护：守护把整条命令 shq 进 bash -c，前缀必须在最内层。
+      // 指针自愈先行：api_key_cmd 指向已不存在的安装目录时，ocr 会在解析 LLM 端点
+      // 那一步就失败，五个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
+      await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       try {
         const { command, workdir } = buildReviewCommand(
@@ -1839,7 +1906,7 @@ function registerReviewTool(host: HostCtx, config: Config): void {
         );
         // 分钟级长任务：套宿主回收守护，dsh 任何方式退出（含 kill -9 后 launchd
         // 收养）OCR 进程都会被 TERM→1s→KILL，不留孤儿烧 token（lib/cli.ts）。
-        const guarded = wrapWithHostReaper(withHomeEnv(command, homeOverride));
+        const guarded = wrapWithHostReaper(withHomeEnv(command, homeOverride), runMsgs);
         if (outPath === undefined) {
           return await startBackground(
             host,
@@ -1923,11 +1990,14 @@ function registerScanTool(host: HostCtx, config: Config): void {
       const tmp = wait ? mkdtempSync(path.join(tmpdir(), "ocr-scan-")) : undefined;
       const outPath = tmp === undefined ? undefined : path.join(tmp, "out.json");
       // 同 ocr_review：先注 HOME 重定向再套守护（前缀必须在最内层）。
+      // 指针自愈先行：api_key_cmd 指向已不存在的安装目录时，ocr 会在解析 LLM 端点
+      // 那一步就失败，五个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
+      await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       try {
         const { command, workdir } = buildScanCommand({ ...args, repo }, outPath, runMsgs);
         // 同 ocr_review：宿主回收守护（lib/cli.ts wrapWithHostReaper）。
-        const guarded = wrapWithHostReaper(withHomeEnv(command, homeOverride));
+        const guarded = wrapWithHostReaper(withHomeEnv(command, homeOverride), runMsgs);
         if (outPath === undefined) {
           return await startBackground(
             host,
@@ -1992,6 +2062,9 @@ function registerDelegatePreviewTool(host: HostCtx, config: Config): void {
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
       const repo = ocrRepo(args, exec, runMsgs);
+      // 指针自愈先行：api_key_cmd 指向已不存在的安装目录时，ocr 会在解析 LLM 端点
+      // 那一步就失败，五个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
+      await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       const { command, workdir } = buildDelegatePreviewCommand({ ...args, repo }, runMsgs);
       const text = await runForeground(

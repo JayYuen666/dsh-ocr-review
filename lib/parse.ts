@@ -102,17 +102,31 @@ function str(value: unknown): string {
  * start_line 输出成 "42"，一律当 0 会把真实评论判成「未锚定」而被摘要丢掉），
  * 空串/NaN/Infinity/其它类型回 0。
  */
+/**
+ * 行号与增删统计的有效域：有限、非负、整数。
+ *
+ * 为什么把负数和小数一起挡掉：行号出现 "-3" 会被下游当成「未锚定的评论」而丢弃
+ * （分类错了——它是畸形值不是缺锚点），而 insertions: -5 会原样传播进给模型看的
+ * diff 统计。两者都是上游畸形值被当合法值透传。0 在下游有既定语义（未锚定 / 无统计），
+ * 故作兜底值。
+ */
+function nonNegativeInt(value: number): number {
+  if (!Number.isFinite(value) || value < 0) {
+    return 0;
+  }
+  return Math.trunc(value);
+}
+
 function num(value: unknown): number {
   if (typeof value === "number") {
-    return Number.isFinite(value) ? value : 0;
+    return nonNegativeInt(value);
   }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (trimmed === "") {
       return 0;
     }
-    const parsed = Number(trimmed);
-    return Number.isFinite(parsed) ? parsed : 0;
+    return nonNegativeInt(Number(trimmed));
   }
   return 0;
 }
@@ -197,21 +211,33 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
   const skipped = status === "skipped";
   const sumRaw = root["summary"];
   const sum = isRecord(sumRaw) ? sumRaw : undefined;
-  const warningsArr = Array.isArray(root["warnings"])
-    ? root["warnings"]
-        .map((warn) => {
-          if (typeof warn === "string") {
-            return warn;
+  // warnings 存在却不是数组、或条目既不是字符串也读不出 file/error ⇒ 保留一条明确的
+  // 「格式无法解析」占位，而不是静默清空。对 partial / completed_with_errors 来说这是
+  // **唯一**的失败细节来源，静默丢弃等于把「出了错」显示成「一切正常」。
+  const warningsRaw = root["warnings"];
+  let warningsArr: string[];
+  if (warningsRaw === undefined) {
+    warningsArr = [];
+  } else if (Array.isArray(warningsRaw)) {
+    warningsArr = warningsRaw
+      .map((warn) => {
+        if (typeof warn === "string") {
+          return warn;
+        }
+        if (isRecord(warn)) {
+          const joined = [str(warn["file"]), str(warn["error"])]
+            .filter(Boolean)
+            .join(messages.warningSeparator);
+          if (joined !== "") {
+            return joined;
           }
-          if (isRecord(warn)) {
-            return [str(warn["file"]), str(warn["error"])]
-              .filter(Boolean)
-              .join(messages.warningSeparator);
-          }
-          return "";
-        })
-        .filter(Boolean)
-    : [];
+        }
+        return messages.warningUnreadable;
+      })
+      .filter(Boolean);
+  } else {
+    warningsArr = [messages.warningUnreadable];
+  }
   return {
     ok: true,
     status,
@@ -400,6 +426,16 @@ export function parseDelegatePreview(text: string): ParsedDelegatePreview {
   if (!hitsContract(root, DELEGATE_PREVIEW_KEYS)) {
     return delegatePreviewFailure();
   }
+  // 契约键在、但值类型不对（null / 字符串 / 对象）⇒ 同样判失败。此前只查「键在不在」，
+  // 于是 {"reviewable_files": null} 这种上游半截产出被当成「0 个文件可审」——
+  // 假阴性的范围结论，比解析失败更难察觉。同层的 review 解析对 comments 非数组是
+  // 硬失败，两条口径必须一致。
+  for (const key of ["reviewable_files", "excluded_files"]) {
+    const value = root[key];
+    if (value !== undefined && !Array.isArray(value)) {
+      return delegatePreviewFailure();
+    }
+  }
   const reviewable: DelegateFile[] = Array.isArray(root["reviewable_files"])
     ? root["reviewable_files"]
         .map((fileRaw) => {
@@ -466,23 +502,36 @@ export function parseDelegateRules(text: string): { ok: boolean; groups: RuleGro
   if (!hitsContract(root, DELEGATE_RULE_KEYS)) {
     return { ok: false, groups: [] };
   }
-  const groups: RuleGroup[] = Array.isArray(root["groups"])
-    ? root["groups"]
-        .map((groupRaw) => {
-          if (!isRecord(groupRaw)) {
-            return null;
-          }
-          return {
-            groupId: num(groupRaw["group_id"]),
-            source: str(groupRaw["source"]),
-            pattern: str(groupRaw["pattern"]),
-            files: Array.isArray(groupRaw["files"])
-              ? groupRaw["files"].map(str).filter(Boolean)
-              : [],
-            rule: str(groupRaw["rule"]),
-          };
-        })
-        .filter((group): group is RuleGroup => group !== null && group.files.length > 0)
-    : [];
+  // 与 preview 同款类型闸：groups 在但不是数组（null / 字符串 / 对象）⇒ 判失败，
+  // 否则报出去的是「0 个规则分组」这种看不出异常的结论。
+  if (root["groups"] !== undefined && !Array.isArray(root["groups"])) {
+    return { ok: false, groups: [] };
+  }
+  // 组内 files 的形状同样要闸：files 缺失或非数组时该组会被 files.length > 0 过滤掉，
+  // 于是一组规则凭空消失而 ok 仍是 true。契约破损必须显式失败。
+  const groupsRaw: unknown[] = Array.isArray(root["groups"]) ? root["groups"] : [];
+  const hasBadGroupShape = groupsRaw.some(
+    (groupRaw) =>
+      isRecord(groupRaw) && groupRaw["files"] !== undefined && !Array.isArray(groupRaw["files"]),
+  );
+  if (hasBadGroupShape) {
+    return { ok: false, groups: [] };
+  }
+  // 到这里的组必带**数组** files：files 存在却非数组的已在上面整体判失败，
+  // 不存在 files 的组会在下面被 files.length > 0 滤掉。故守卫式收窄一次即可，
+  // 不必在映射里再写一遍不可能走到的 : [] 兜底。
+  const groupsWithFiles = groupsRaw.filter(
+    (groupRaw): groupRaw is { files: unknown[] } & Record<string, unknown> =>
+      isRecord(groupRaw) && Array.isArray(groupRaw["files"]),
+  );
+  const groups: RuleGroup[] = groupsWithFiles
+    .map((groupRaw) => ({
+      groupId: num(groupRaw["group_id"]),
+      source: str(groupRaw["source"]),
+      pattern: str(groupRaw["pattern"]),
+      files: groupRaw.files.map((file) => str(file)).filter(Boolean),
+      rule: str(groupRaw["rule"]),
+    }))
+    .filter((group) => group.files.length > 0);
   return { ok: true, groups };
 }

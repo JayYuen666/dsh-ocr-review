@@ -108,6 +108,97 @@ export function buildApiKeyCmd(
   return parts.join(" ");
 }
 
+// ── api_key_cmd 反解（指针自愈的前置判据） ─────────────────────────────────
+
+/** api_key_cmd 反解出的三个槽位。 */
+export interface ParsedApiKeyCmd {
+  /** 脚本绝对路径（写那一刻的插件安装目录）。 */
+  script: string;
+  /** 宿主凭据 ref 名（与 buildApiKeyCmd 同一白名单）。 */
+  envKey: string;
+  /** get-cred 的数据目录第一档显式参数；原命令没带时为 undefined。 */
+  dshHome: string | undefined;
+}
+
+/**
+ * 读一个 shq 单引号串：解出它的值与结束位置。
+ *
+ * 认的是 shqDyn 自己写出的转义形态——值里的单引号被写成四字符的 '\''。所以遇到
+ * 单引号时，只有后面紧跟这四字符才算转义，否则是真闭合。未闭合（串被截断）返回
+ * undefined：宁可判「读不懂」，也不要把半截命令当成可信输入。
+ */
+function readShqToken(text: string, start: number): { value: string; next: number } | null {
+  let value = "";
+  let i = start + 1;
+  let closed = false;
+  while (i < text.length && !closed) {
+    const ch = text[i];
+    if (ch === "'" && text.startsWith(String.raw`'\''`, i)) {
+      value += "'";
+      i += 4;
+    } else if (ch === "'") {
+      closed = true;
+      i += 1;
+    } else {
+      value += ch;
+      i += 1;
+    }
+  }
+  return closed ? { value, next: i } : null;
+}
+
+/** shq 串 → token 列表；形态不符（未闭合 / 出现裸词）返回 null。 */
+function readShqTokens(body: string): string[] | null {
+  const tokens: string[] = [];
+  let i = 0;
+  let malformed = false;
+  while (i < body.length && !malformed) {
+    while (i < body.length && (body[i] === " " || body[i] === "\t")) {
+      i += 1;
+    }
+    if (i >= body.length) {
+      break;
+    }
+    if (body[i] === "'") {
+      const token = readShqToken(body, i);
+      if (token === null) {
+        malformed = true;
+      } else {
+        tokens.push(token.value);
+        i = token.next;
+      }
+    } else {
+      malformed = true;
+    }
+  }
+  return malformed ? null : tokens;
+}
+
+/**
+ * api_key_cmd → 三个槽位；只认本包写出的那一种形态。
+ *
+ * 为什么需要反解：写进 config.json 的脚本路径是**写那一刻**的插件安装目录（绝对
+ * 路径），而插件会被重装、换 profile、换发布形态——目录一变，ocr 执行 api_key_cmd
+ * 就是 MODULE_NOT_FOUND，而它把这件事报成「resolve LLM endpoint 失败」，错误完全
+ * 指不到「本包被挪了地方」这个真因。没有反解就无从判断一条 api_key_cmd 是否还活着。
+ *
+ * 为什么只认一种形态：认不出来的一律给 undefined，由调用方原样保留。改写一条读不
+ * 懂的命令串，可能把用户手写的凭据取用方式弄坏，而那正是本包明令不该插手的部分。
+ */
+export function parseApiKeyCmd(command: string): ParsedApiKeyCmd | null {
+  const body = command.replace(/^node[ \t]+/u, "");
+  const tokens = body === command ? null : readShqTokens(body);
+  if (tokens === null) {
+    return null;
+  }
+  const script = tokens[0] ?? "";
+  const envKey = tokens[1] ?? "";
+  if (script === "" || tokens.length < 2 || tokens.length > 3 || !/^[A-Z0-9_]+$/u.test(envKey)) {
+    return null;
+  }
+  return { script, envKey, dshHome: tokens[2] };
+}
+
 export interface SelectInput {
   /** 目标 config.json 的完整盘面（用于保留未知键）。 */
   existingText: string;
@@ -300,4 +391,72 @@ export function defaultCredScriptPath(pluginDir: string): string {
 /** api_key_cmd 脚本落点：显式路径优先，否则按 pluginDir 兜底。 */
 export function credentialScriptPath(paths: OcrPaths): string {
   return paths.getCredScript === "" ? defaultCredScriptPath(paths.pluginDir) : paths.getCredScript;
+}
+
+/** config.json 的全文渲染（与 renderSelectedConfig 末尾同一形态：两空格缩进 + 结尾换行）。 */
+export function renderConfigDoc(doc: Record<string, unknown>): string {
+  return `${JSON.stringify(doc, null, 2)}\n`;
+}
+
+/** api_key_cmd 指针自愈的结果。 */
+export interface KeyScriptRepoint {
+  /** 被重指向的 custom_providers 条目名；空数组 = 本次没动过任何配置。 */
+  repointed: string[];
+}
+
+/**
+ * 把 custom_providers 里「脚本已不在」的 api_key_cmd 重指向当前安装目录。
+ *
+ * 为什么必须有这一步：api_key_cmd 里烤的是**写那一刻**的插件安装绝对路径。插件会被
+ * 重装、换 profile（desktop / browser / 任意自定义名）、换发布形态，目录一变就悬空
+ * ——而 ocr 侧的报错是「resolve LLM endpoint: api_key_cmd ... MODULE_NOT_FOUND」，完全
+ * 指不到真因。没有自愈，用户只能手改一个自己都不知道错在哪的配置文件。
+ *
+ * 三条不越界的判据（宁可漏修也不猜）：
+ *   1. 当前脚本自己都不在（包没装全）⇒ 一律不动，把「get-cred 脚本缺失」留给 apply 侧报；
+ *   2. 旧脚本**还活着** ⇒ 不动。显式指定优先于 pluginDir 兜底，用户有意指到别处
+ *      （自制脚本、共享副本）时不该被本包拽回来；
+ *   3. 命令串读不懂（不是本包写出的形态）⇒ 不动。那多半是用户手写的，改写它就是在
+ *      插手本包明令不碰的部分。
+ *
+ * dshHome 同样可能被搬：原值已不存在时换成宿主此刻解析出的那个。
+ */
+export function repointDanglingKeyScripts(
+  doc: Record<string, unknown>,
+  current: { script: string; dshHome: string | undefined },
+  messages: OcrReviewMessages,
+): KeyScriptRepoint {
+  if (!existsSync(current.script)) {
+    return { repointed: [] };
+  }
+  const custom = fieldOf(doc, "custom_providers");
+  if (!isRecord(custom)) {
+    return { repointed: [] };
+  }
+  // flatMap 而非 for + continue：本仓 lint 禁用 continue，而四条跳过判据用 flatMap 的
+  // 「命中就产出名字、否则产出空数组」写起来比嵌套 if 短，也更容易一眼看全。
+  const repointed = Object.entries(custom).flatMap(([name, entry]) => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+    const raw = fieldOf(entry, "api_key_cmd");
+    if (typeof raw !== "string" || raw === "") {
+      return [];
+    }
+    const parsed = parseApiKeyCmd(raw);
+    if (parsed === null || parsed.script === current.script) {
+      return [];
+    }
+    if (existsSync(parsed.script)) {
+      return [];
+    }
+    const dshHome =
+      parsed.dshHome !== undefined && !existsSync(parsed.dshHome)
+        ? current.dshHome
+        : parsed.dshHome;
+    // envKey 已由 parseApiKeyCmd 按 buildApiKeyCmd 的同一白名单校验过，这里不会抛。
+    entry["api_key_cmd"] = buildApiKeyCmd(current.script, parsed.envKey, dshHome, messages);
+    return [name];
+  });
+  return { repointed };
 }

@@ -24,20 +24,23 @@ import { makeGateway, NonErrorFault } from "./fixtures/gateway-fixture.ts";
 import type { GatewayFixture } from "./fixtures/gateway-fixture.ts";
 import {
   applyProviderSelection,
+  ensureKeyScriptPointer,
   migratePlaintextKeys,
   ocrHomeOverride,
   providersForCard,
   resolveOcrConfigPath,
 } from "../lib/ocr-config.ts";
 import { providersFromSettingsValue } from "../lib/provider-projection.ts";
-import { markKeyFlags, readProviders } from "../lib/provider-source.ts";
+import { markKeyFlags, PI_AI_NAMESPACE, readProviders } from "../lib/provider-source.ts";
 import {
   buildApiKeyCmd,
   credentialScriptPath,
   defaultCredScriptPath,
   expandHomeForSeparator,
   loadOcrConfig,
+  parseApiKeyCmd,
   renderSelectedConfig,
+  repointDanglingKeyScripts,
 } from "../lib/config-store.ts";
 import type { AppliedConfig, CardPayload } from "../lib/ocr-config.ts";
 import type { DshProvider } from "../lib/provider-projection.ts";
@@ -83,6 +86,9 @@ interface ProvidersRead {
   providers: DshProvider[];
   source: ProviderSource;
 }
+/** settings 通道抛错时的 source 状态（本文件多处断言同一个值）。 */
+const SETTINGS_FAILED = "settings-failed";
+
 /** migratePlaintextKeys 的回执形态。 */
 interface MigrateResult {
   migrated: string[];
@@ -275,7 +281,7 @@ describe("readProviders：官方通道的四种降级", () => {
 
   it("describe() 抛错（含非 Error 值）⇒ settings-failed，不抛穿", () => {
     const thrown = readOf(makeGateway({ describeThrows: new Error("boom") }));
-    expect(thrown.source.status).toBe("settings-failed");
+    expect(thrown.source.status).toBe(SETTINGS_FAILED);
     expect(thrown.source.message).toContain("boom");
     const weird = readOf(makeGateway({ describeThrows: new NonErrorFault("not-an-error") }));
     expect(weird.source.message).toContain("not-an-error");
@@ -294,12 +300,47 @@ describe("readProviders：官方通道的四种降级", () => {
     expect(source.message).toMatch(/ctx\.credentials/u);
   });
 
-  it("providers 形状异常（值里没有 providers）⇒ ready 但清单为空", () => {
+  it("providers 形状异常（值里没有 providers 表）⇒ 不报 ready，理由点名命名空间", () => {
+    // 此前这条固化的是「ready + 空清单」：卡片只显示一个空的 provider 选择器且没有任何
+    // 原因，apply 侧闸门放行后报 providerNotInList，把「配置形状坏了」说成
+    // 「你没配这个 provider」，排查方向直接跑偏。
     const { providers, source } = readOf(
       makeGateway({ descriptors: descriptorsWithValue({ defaultProvider: "x" }) }),
     );
     expect(providers).toStrictEqual([]);
-    expect(source.status).toBe("ready");
+    expect(source.status).toBe("namespace-unavailable");
+    expect(source.message).toContain(PI_AI_NAMESPACE);
+  });
+
+  it("health() 抛错 ⇒ 折进 settings-failed，不穿破 readProviders 的不抛契约", () => {
+    const faulted = makeGateway({});
+    faulted.health = () => {
+      throw new Error("probe blew up");
+    };
+    const { providers, source } = readOf(faulted);
+    expect(providers).toStrictEqual([]);
+    expect(source.status).toBe(SETTINGS_FAILED);
+    expect(source.message).toMatch(/probe blew up/u);
+  });
+
+  it("投影读命名空间值时抛错 ⇒ 同样折进 settings-failed，不穿破不抛契约", () => {
+    // 投影会对该值做 Object.entries + 逐字段读取；宿主给的是 settings 解析值，
+    // 带 getter 的对象完全可能在这里抛，而调用方（apply / migrate）依赖永不抛。
+    // providers 表本身是合法对象（能过形状闸），但其中一个条目的字段读取会抛：
+    // 这正是投影阶段才会发生、health / descriptors 阶段看不到的故障形态。
+    const hostileEntry = Object.defineProperty({}, "baseURL", {
+      get() {
+        throw new Error("provider field blew up");
+      },
+    });
+    // descriptorsWithValue 收的是**命名空间的解析值本身**（不再套一层命名空间键）
+    const hostile = { providers: { bad: hostileEntry } };
+    const { providers, source } = readOf(
+      makeGateway({ descriptors: descriptorsWithValue(hostile) }),
+    );
+    expect(providers).toStrictEqual([]);
+    expect(source.status).toBe(SETTINGS_FAILED);
+    expect(source.message).toMatch(/provider field blew up/u);
   });
 });
 
@@ -332,6 +373,46 @@ describe("markKeyFlags", () => {
     ]);
     expect(keyed[0]?.hasKey).toBe(false);
     expect(gateway.describedRefs).toStrictEqual([]);
+  });
+
+  it("空串 apiKeyEnv 与 null 同义：不把空 ref 送进凭据服务", async () => {
+    // 此前判据只有 === null，而 apply / migrate 侧是 === null || === ""：同一份
+    // DshProvider 上两套判据，有别的构造路径送来 "" 就会去问凭据服务。
+    const gateway = makeGateway();
+    const keyed = await markKeyFlags(gateway, [
+      {
+        name: "blank",
+        displayName: "blank",
+        apiKeyEnv: "",
+        protocol: "openai",
+        baseURL: "https://n",
+        models: [],
+      },
+    ]);
+    expect(keyed[0]?.hasKey).toBe(false);
+    expect(gateway.describedRefs).toStrictEqual([]);
+  });
+
+  it("单个 ref 探测失败只降级这一条，不连坐整张卡", async () => {
+    // 修复前 Promise.all 整体 reject → providersForCard 抛穿到 GET /providers 的兜底，
+    // 整张卡退化成 500 JSON，连其他 provider 已探到的 configured 结果一起丢。
+    const gateway = makeGateway({ configured: ["SENSENOVA_API_KEY"] });
+    const original = gateway.credentialConfigured;
+    gateway.credentialConfigured = async (ref: string): Promise<boolean> => {
+      if (ref === "XKIRO_API_KEY") {
+        throw new Error("credentials service unavailable");
+      }
+      return original(ref);
+    };
+    const keyed = await markKeyFlags(gateway, providers);
+    // configured 名单里只有 SENSENOVA：xkiro 探针抛错降级成 false（此刻读不到），
+    // amd / antdigital 本来就没配。修复前这里整个 Promise.all reject，四个全丢。
+    expect(keyed.map((entry) => [entry.name, entry.hasKey])).toStrictEqual([
+      ["sensenova", true],
+      ["xkiro", false],
+      ["amd", false],
+      ["antdigital", false],
+    ]);
   });
 });
 
@@ -1056,5 +1137,362 @@ describe("配置通道文案双语（en 注入）", () => {
     const enPayload = await providersForCard(gateway, paths, MESSAGES.en);
     expect(zhPayload.source.message).not.toBe(enPayload.source.message);
     expect(enPayload.source.status).toBe(zhPayload.source.status);
+  });
+});
+
+// ── api_key_cmd 指针自愈（换 profile / 重装后不留悬空路径）────────────────────
+//
+// 背景：api_key_cmd 里烤的是**写那一刻**的插件安装绝对路径。插件装在 desktop 还是
+// browser、profile 叫什么名字都不影响——路径一律来自 host.ts 的
+// PLUGIN_DIR = import.meta.dirname。本组钉的就是「目录一变就自动拉回来」，以及三条
+// 不越界的边界：当前脚本自己缺失不动、旧脚本还活着不动、读不懂的命令串不动。
+
+describe("parseApiKeyCmd", () => {
+  it("反解本包写出的两段/三段形态", () => {
+    expect(parseApiKeyCmd("node '/a/scripts/get-cred.mjs' 'SENSENOVA_API_KEY'")).toStrictEqual({
+      script: "/a/scripts/get-cred.mjs",
+      envKey: "SENSENOVA_API_KEY",
+      dshHome: undefined,
+    });
+    expect(
+      parseApiKeyCmd("node '/a/scripts/get-cred.mjs' 'SENSENOVA_API_KEY' '/home/t/.dsh'"),
+    ).toStrictEqual({
+      script: "/a/scripts/get-cred.mjs",
+      envKey: "SENSENOVA_API_KEY",
+      dshHome: "/home/t/.dsh",
+    });
+  });
+
+  it("路径里有空格或单引号也能原样反解（shq 转义的往返）", () => {
+    const cmd = buildApiKeyCmd(
+      "/Users/me/my dir/o'brien/get-cred.mjs",
+      "XKIRO_API_KEY",
+      undefined,
+      zh,
+    );
+    expect(parseApiKeyCmd(cmd)).toStrictEqual({
+      script: "/Users/me/my dir/o'brien/get-cred.mjs",
+      envKey: "XKIRO_API_KEY",
+      dshHome: undefined,
+    });
+  });
+
+  it("串尾多余空白仍能正常反解（buildApiKeyCmd 不产生，但手改过就会）", () => {
+    expect(parseApiKeyCmd("node '/a/get-cred.mjs' 'KEY'   ")).toStrictEqual({
+      script: "/a/get-cred.mjs",
+      envKey: "KEY",
+      dshHome: undefined,
+    });
+    expect(parseApiKeyCmd("node   '/a/get-cred.mjs'\t'KEY'")).toStrictEqual({
+      script: "/a/get-cred.mjs",
+      envKey: "KEY",
+      dshHome: undefined,
+    });
+  });
+
+  it("不是本包形态一律 null（宁可漏修也不猜）", () => {
+    expect(parseApiKeyCmd("cat /etc/passwd")).toBeNull();
+    // 只剩 "node " 这种一个 token 都没有的残串：槽位取不到值，按形态不符处理。
+    expect(parseApiKeyCmd("node ")).toBeNull();
+    expect(parseApiKeyCmd("node /a/get-cred.mjs KEY")).toBeNull();
+    expect(parseApiKeyCmd("node '/a/get-cred.mjs' 'KEY")).toBeNull();
+    expect(parseApiKeyCmd("node '/a/get-cred.mjs' 'foo;echo pwned'")).toBeNull();
+    expect(parseApiKeyCmd("node '/a/get-cred.mjs' 'K' '/h' 'extra'")).toBeNull();
+    expect(parseApiKeyCmd("")).toBeNull();
+  });
+});
+
+/** 造一条 llm-pi-ai 形态的 provider 原始条目（这组用例只关心 api → protocol）。 */
+const RAW_BASE_URL = "https://x.invalid/v1";
+const RAW_API_KEY_ENV = "RAW_API_KEY";
+const ANTHROPIC_MESSAGES = "anthropic-messages";
+
+function providerRaw(api: unknown): Record<string, unknown> {
+  return { baseURL: RAW_BASE_URL, apiKeyEnv: RAW_API_KEY_ENV, api };
+}
+
+describe("协议映射表不被原型链污染", () => {
+  // __proto__ 在 Object.prototype 上：键走变量，方括号字面量会被 lint 的 no-proto 改写，
+  // 而这里要验的恰恰是「方括号查表不命中继承属性」。
+  const protoKey = "__proto__";
+
+  it("api=constructor / __proto__ / toString 原样透传（交给写侧白名单拒绝），不取到构造函数", () => {
+    const value = {
+      providers: {
+        ctor: providerRaw("constructor"),
+        proto: providerRaw(protoKey),
+        tostr: providerRaw("toString"),
+        anthropic: providerRaw(ANTHROPIC_MESSAGES),
+      },
+    };
+    expect(providersFromSettingsValue(value).map((provider) => provider.protocol)).toStrictEqual([
+      "constructor",
+      "__proto__",
+      "toString",
+      "anthropic",
+    ]);
+  });
+
+  it("api 类型不对（数字/对象）不静默降级成 openai，字符串化后原样透传给白名单", () => {
+    // 此前所有非字符串 api 都塌成 ""，与「未声明」共用同一条 openai 兜底，于是
+    // api: 123 被写进 config.json 当成 OpenAI 线协议 —— select 成功、OCR 调不通。
+    const value = {
+      providers: {
+        num: providerRaw(123),
+        obj: providerRaw({ nested: true }),
+      },
+    };
+    expect(providersFromSettingsValue(value).map((provider) => provider.protocol)).toStrictEqual([
+      "123",
+      "[unreadable]",
+    ]);
+  });
+
+  it("api / baseURL / model id 的首尾空白被裁掉；全空白视作未声明", () => {
+    const value = {
+      providers: {
+        relay: {
+          baseURL: `  ${RAW_BASE_URL}  `,
+          apiKeyEnv: RAW_API_KEY_ENV,
+          api: `  ${ANTHROPIC_MESSAGES}  `,
+          models: [{ id: "  m1  ", name: "  " }, { id: "   " }],
+        },
+      },
+    };
+    const [provider] = providersFromSettingsValue(value);
+    expect(provider?.baseURL).toBe("https://x.invalid/v1");
+    expect(provider?.protocol).toBe("anthropic");
+    // 全空白 id 的 model 视为无效被丢弃；有效 id 被裁掉空白；全空白 name 回落到 id
+    expect(provider?.models).toStrictEqual([{ id: "m1", name: "m1" }]);
+  });
+});
+
+// 悬空脚本路径样本（刻意写成「已消失的 profile 安装目录」形态：它要证明的是自愈不看
+// profile 叫什么名字，只看解析出来的当前路径）。
+const STALE_SCRIPT = "/profiles/desktop/node_modules/pkg/scripts/get-cred.mjs";
+const CURRENT_TARGET = { script: "/now/here/scripts/get-cred.mjs", dshHome: "/now/.dsh" };
+
+/** 造一条指向 script 的 api_key_cmd 文档（带一个未知键，验证「保留未知键」）。 */
+function docOf(script: string): Record<string, unknown> {
+  return {
+    provider: "opencodego",
+    language: "中文",
+    custom_providers: {
+      opencodego: {
+        url: "https://example.inference/v1",
+        protocol: "openai",
+        model: "space-bunny-free",
+        temperature: 0.2,
+        api_key_cmd: buildApiKeyCmd(script, "OPENCODEGO_API_KEY", "/old/.dsh", zh),
+      },
+    },
+  };
+}
+
+function entryOf(doc: Record<string, unknown>, name: string): Record<string, unknown> {
+  return (doc["custom_providers"] as Record<string, Record<string, unknown>>)[name] ?? {};
+}
+
+describe("repointDanglingKeyScripts", () => {
+  const current = CURRENT_TARGET;
+
+  it("脚本已不存在 ⇒ 重指向当前安装目录，其余键与未知顶层键原样保留", () => {
+    // current.script 必须**真实存在**：第一道闸正是「当前脚本自己都不在 ⇒ 一律不动」，
+    // 拿假路径当 current 会让本例退化成那条早返回，等于没测到重指向本身。
+    const paths = makePaths();
+    try {
+      const live = { script: paths.getCredScript, dshHome: current.dshHome };
+      const doc = docOf(STALE_SCRIPT);
+      const result = repointDanglingKeyScripts(doc, live, zh);
+      expect(result.repointed).toStrictEqual(["opencodego"]);
+      // /old/.dsh 同样已不存在 ⇒ 连同脚本路径一起换成宿主此刻解析出的 current.dshHome。
+      expect(entryOf(doc, "opencodego")["api_key_cmd"]).toBe(
+        buildApiKeyCmd(live.script, "OPENCODEGO_API_KEY", current.dshHome, zh),
+      );
+      expect(entryOf(doc, "opencodego")["temperature"]).toBe(0.2);
+      expect(doc["language"]).toBe("中文");
+    } finally {
+      removeTmpSandbox();
+    }
+  });
+
+  it("旧脚本还活着 ⇒ 一条都不动（用户显式指定优先于 pluginDir 兜底）", () => {
+    const paths = makePaths();
+    try {
+      const live = { script: paths.getCredScript, dshHome: current.dshHome };
+      // 情形一：指向的就是当前这份。
+      const same = docOf(paths.getCredScript);
+      expect(repointDanglingKeyScripts(same, live, zh).repointed).toStrictEqual([]);
+      expect(entryOf(same, "opencodego")["api_key_cmd"]).toContain(paths.getCredScript);
+      // 情形二：指向另一份**同样存在**的脚本（自制脚本 / 共享副本）。这条走的是
+      // 「旧脚本还活着」而不是「就是当前这份」，两者是不同的判据。
+      const elsewhere = path.join(paths.pluginDir, "scripts", "other-get-cred.mjs");
+      writeFileSync(elsewhere, "#!/usr/bin/env node\n");
+      const other = docOf(elsewhere);
+      expect(repointDanglingKeyScripts(other, live, zh).repointed).toStrictEqual([]);
+      expect(entryOf(other, "opencodego")["api_key_cmd"]).toContain(elsewhere);
+    } finally {
+      removeTmpSandbox();
+    }
+  });
+
+  it("当前脚本自己缺失 ⇒ 一律不动（把报错留给 apply 侧）", () => {
+    const doc = docOf(STALE_SCRIPT);
+    const result = repointDanglingKeyScripts(
+      doc,
+      { script: "/no/such/get-cred.mjs", dshHome: undefined },
+      zh,
+    );
+    expect(result.repointed).toStrictEqual([]);
+    expect(entryOf(doc, "opencodego")["api_key_cmd"]).toContain("/profiles/desktop");
+  });
+
+  it("读不懂的命令串 ⇒ 不动（不插手用户手写的取用方式）", () => {
+    const paths = makePaths();
+    try {
+      const live = { script: paths.getCredScript, dshHome: current.dshHome };
+      const doc: Record<string, unknown> = {
+        custom_providers: {
+          mine: { api_key_cmd: "/usr/local/bin/my-own-fetcher OPENCODEGO_API_KEY" },
+        },
+      };
+      expect(repointDanglingKeyScripts(doc, live, zh).repointed).toStrictEqual([]);
+    } finally {
+      removeTmpSandbox();
+    }
+  });
+
+  it("非 custom_providers / 无 api_key_cmd / 明文 key 一律不产生产物", () => {
+    const paths = makePaths();
+    try {
+      const live = { script: paths.getCredScript, dshHome: current.dshHome };
+      expect(repointDanglingKeyScripts({}, live, zh).repointed).toStrictEqual([]);
+      expect(
+        repointDanglingKeyScripts({ custom_providers: "x" }, live, zh).repointed,
+      ).toStrictEqual([]);
+      expect(
+        repointDanglingKeyScripts({ custom_providers: { a: { api_key: "sk-plain" } } }, live, zh)
+          .repointed,
+      ).toStrictEqual([]);
+      expect(
+        repointDanglingKeyScripts({ custom_providers: { a: "not-a-record" } }, live, zh).repointed,
+      ).toStrictEqual([]);
+    } finally {
+      removeTmpSandbox();
+    }
+  });
+
+  it("多条 provider 并存时只重指向悬空的那几条", () => {
+    const paths = makePaths();
+    try {
+      const doc = docOf(paths.getCredScript);
+      const customs = doc["custom_providers"] as Record<string, Record<string, unknown>>;
+      customs["stale"] = {
+        api_key_cmd: buildApiKeyCmd(
+          "/profiles/desktop/pkg/get-cred.mjs",
+          "AMD_API_KEY",
+          undefined,
+          zh,
+        ),
+      };
+      expect(
+        repointDanglingKeyScripts(
+          doc,
+          { script: paths.getCredScript, dshHome: current.dshHome },
+          zh,
+        ).repointed,
+      ).toStrictEqual(["stale"]);
+      expect(entryOf(doc, "opencodego")["api_key_cmd"]).toContain(paths.getCredScript);
+    } finally {
+      removeTmpSandbox();
+    }
+  });
+});
+
+describe("ensureKeyScriptPointer", () => {
+  afterEach(() => {
+    removeTmpSandbox();
+  });
+
+  it("悬空的 api_key_cmd 被拉回当前沙箱脚本，且权限仍是 0600", async () => {
+    const paths = makePaths();
+    writeFileSync(
+      paths.ocrConfigJson,
+      `${JSON.stringify(
+        {
+          provider: "opencodego",
+          custom_providers: {
+            opencodego: {
+              model: "space-bunny-free",
+              api_key_cmd: buildApiKeyCmd(STALE_SCRIPT, "OPENCODEGO_API_KEY", undefined, zh),
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await expect(ensureKeyScriptPointer(paths, zh)).resolves.toStrictEqual({
+      repointed: ["opencodego"],
+      checked: true,
+    });
+    const written = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as {
+      custom_providers: Record<string, { api_key_cmd: string }>;
+    };
+    expect(written.custom_providers["opencodego"]?.api_key_cmd).toBe(
+      buildApiKeyCmd(paths.getCredScript, "OPENCODEGO_API_KEY", undefined, zh),
+    );
+    // mode 的低九位用取模取（不进位），避开 no-bitwise：0o600 是 0o1000 内的数。
+    expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o600);
+  });
+
+  it("指针本就健康 ⇒ 不写盘（配置字节不变，也没有 .bak）", async () => {
+    const paths = makePaths();
+    const original = `${JSON.stringify(
+      {
+        provider: "opencodego",
+        custom_providers: {
+          opencodego: {
+            api_key_cmd: buildApiKeyCmd(paths.getCredScript, "OPENCODEGO_API_KEY", undefined, zh),
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(paths.ocrConfigJson, original);
+    await expect(ensureKeyScriptPointer(paths, zh)).resolves.toStrictEqual({
+      repointed: [],
+      checked: true,
+    });
+    expect(readFileSync(paths.ocrConfigJson, "utf8")).toBe(original);
+    expect(existsSync(`${paths.ocrConfigJson}.bak`)).toBe(false);
+  });
+
+  it("没有配置文件 ⇒ 什么都不建（不凭空造出用户目录）", async () => {
+    const paths = makePaths();
+    await expect(ensureKeyScriptPointer(paths, zh)).resolves.toStrictEqual({
+      repointed: [],
+      checked: true,
+    });
+    expect(existsSync(paths.ocrConfigJson)).toBe(false);
+  });
+
+  it("坏 JSON / 脚本缺失 ⇒ 静默放过，绝不把工具一起拖死", async () => {
+    const broken = makePaths();
+    writeFileSync(broken.ocrConfigJson, "{ broken");
+    await expect(ensureKeyScriptPointer(broken, zh)).resolves.toStrictEqual({
+      repointed: [],
+      checked: false,
+    });
+    removeTmpSandbox();
+
+    const noScript = makePaths();
+    rmSync(noScript.getCredScript, { force: true });
+    writeFileSync(noScript.ocrConfigJson, "{}");
+    await expect(ensureKeyScriptPointer(noScript, zh)).resolves.toStrictEqual({
+      repointed: [],
+      checked: false,
+    });
   });
 });

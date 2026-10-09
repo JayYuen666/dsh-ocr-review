@@ -136,6 +136,8 @@ interface ResolveCall {
   onExpiry?: string;
   stdoutMaxBytes?: number;
   signal?: AbortSignal;
+  /** 按调用携带的沙箱策略（官方 `SandboxExecutionPolicy`，手抄形状以免测试引运行期包）。 */
+  sandboxPolicy?: { mode: string; workspaceRoot: string };
 }
 
 /** dsh-shell 的非消费按偏移读者（官方作业注册表的 pull source 直接吃它）。 */
@@ -1066,7 +1068,8 @@ async function settleBackgroundRuns(host: FakeHost, from: number): Promise<void>
   await settledTick();
 }
 
-/** 本机网卡上的非回环 IPv4：`shared/lib/trust.ts:120-129` 只认"确属本机网卡"的那批地址。
+/** 本机网卡上的非回环 IPv4：`@jayyuen66/dsh-plugin-shared/lib/trust` 的 `interfaceAddresses`
+ *  只认"确属本机网卡"的那批地址。
  *  取不到就响亮失败而不是跳过——这条用例是本仓唯一把 `servingNonLoopback` 拨到 **true**
  *  的接线（两包替身根本没有 `host` 成员，那道锁在真实接线上永为合着）。 */
 function lanIpv4(): string {
@@ -1418,6 +1421,30 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB }, makeExec());
       expect(host.shell.resolveCalls.at(-1)?.workdir).toBe(MONO_SUB);
+    });
+
+    it("每条 ocr 调用都显式带 danger-full-access：否则会话写不进 ~/.opencodereview", async () => {
+      // 回归钉的是**下发给宿主的请求形态**（本文件既有断言一律读 resolveCalls）：
+      // 宿主围栏的 workspace-write 只放行 workspaceRoot 与后端临时区，而 ocr 的状态目录
+      // 是 $HOME/.opencodereview（在 workspace 之外），漏掉这一栏的后果不是"少个功能"
+      // 而是**跑完的评审被丢掉**——同步调用在 finalize session 失败、对外整体报错。
+      // 宿主侧确实采纳调用方的值（dsh-bash-sandbox 的 resolve 是
+      // `request.sandboxPolicy ?? 默认`，且 execute 对 danger-full-access 直接绕过围栏），
+      // 所以这一栏写在这里就够了，不需要插件侧再做任何兜底。
+      host.shell.gitTopLevel = MONO_TOP;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute({ repo: MONO_SUB }, makeExec());
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB }, makeExec());
+
+      // 覆盖 review 与 scan 两条执行路径（前台）；background 那条由 startBackground 另发。
+      expect(host.shell.resolveCalls.length).toBeGreaterThanOrEqual(2);
+      for (const call of host.shell.resolveCalls) {
+        expect(call.sandboxPolicy).toStrictEqual({
+          mode: "danger-full-access",
+          workspaceRoot: call.workdir,
+        });
+      }
     });
 
     it("非 git 目录 + 符号链接前缀 ⇒ 回退 realpath（缺陷 1 的触发条件②）", async () => {

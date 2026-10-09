@@ -59,7 +59,9 @@ import {
   loadOcrConfig,
   parseExistingConfig,
   readText,
+  renderConfigDoc,
   renderSelectedConfig,
+  repointDanglingKeyScripts,
   updateConfigLocked,
   writeConfigAtomic,
 } from "./config-store.ts";
@@ -336,4 +338,60 @@ export async function migratePlaintextKeys(
   // 等的是那把文件锁与锁内的一次写：回执必须落定后才报迁移了哪几条
   //（`return await` 被 typescript/return-await 判违规，故先落变量再回）。
   return outcome;
+}
+
+/** api_key_cmd 指针自愈的回执。 */
+export interface KeyScriptPointerResult {
+  /** 被重指向的 custom_providers 条目名；空数组 = 没有一条需要改。 */
+  repointed: string[];
+  /** 是否完成了这次检查（false = 脚本缺失 / 配置读不动，一律静默放过）。 */
+  checked: boolean;
+}
+
+/**
+ * 调用 ocr 之前的一次性指针自愈：把 config.json 里指向已不存在目录的 api_key_cmd
+ * 拉回当前安装目录（判据见 lib/config-store.ts 的 repointDanglingKeyScripts）。
+ *
+ * 为什么放在调用前而不是启动时：插件可能在会话进行到一半被重装或换 profile，启动时
+ * 修好的一次覆盖不了「上次跑完到这次开跑」之间发生的迁移。
+ *
+ * 为什么永不抛错：这是锦上添花的修复，不能因为它把工具拖死。坏 JSON、锁抢不到、权限
+ * 不足、设置项写坏——一律放过，让 ocr 报它自己的原始错误，那才是诊断价值最高的形态。
+ *
+ * 常态零锁开销：先无锁读一次做判据，确实要改写才进 withFileLock（锁内按新快照重判，
+ * 避免把并发写入的 provider 选择覆盖掉）。
+ */
+export async function ensureKeyScriptPointer(
+  paths: OcrPaths,
+  messages: OcrReviewMessages,
+): Promise<KeyScriptPointerResult> {
+  const scriptPath = credentialScriptPath(paths);
+  if (!existsSync(scriptPath)) {
+    return { repointed: [], checked: false };
+  }
+  const current = { script: scriptPath, dshHome: resolveDshHome() };
+  const text = readText(paths.ocrConfigJson);
+  if (text.trim() === "") {
+    // 还没有配置文件：不进锁。updateConfigLocked 会 mkdir 建出配置目录，
+    // 仅仅调用一次工具就把用户目录凭空造出来不是本包该有的副作用。
+    return { repointed: [], checked: true };
+  }
+  try {
+    // 判据整体放进锁内，不在锁外先判一遍「要不要改」：锁外的结论基于一份**随时可能过期**
+    // 的快照，据此决定跳过锁内重读，只在「别的进程恰好在两次读之间修好了」时才与锁内
+    // 结论一致——为了省一次锁而多留一个必须靠并发才能触发的分支，不值。锁是一次 mkdir +
+    // 一次 wx 建锁，相对一次分钟级评审可忽略。
+    const repointed = await updateConfigLocked(paths.ocrConfigJson, async () => {
+      const doc = parseExistingConfig(readText(paths.ocrConfigJson), paths.ocrConfigJson, messages);
+      const result = repointDanglingKeyScripts(doc, current, messages);
+      if (result.repointed.length === 0) {
+        return result.repointed;
+      }
+      await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc));
+      return result.repointed;
+    });
+    return { repointed, checked: true };
+  } catch {
+    return { repointed: [], checked: false };
+  }
 }

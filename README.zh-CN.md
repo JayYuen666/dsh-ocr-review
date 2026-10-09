@@ -19,7 +19,7 @@
 - 平台：目标平台是 macOS / Linux。进程收割（`ocr_review` / `ocr_scan` 的 reaper 守护）依赖 POSIX 工具链——bash 的 trap 与作业控制，加上 `ps` / `pgrep` / `kill` 的进程组语义。Windows 上这层整体缺席，本包按 `process.platform` 直接放行裸命令（不收割但能跑）；代价是宿主硬退出后 OCR 可能留下孤儿进程。
 - provider 清单与 key 状态走宿主官方通道 `ctx.settings.describe()`（`llm-pi-ai` 那条的 `value.providers`）与 `ctx.credentials`。
 - 两者缺席时卡片显示降级原因，工具与设置照常可用。
-- 宿主版本要求 `>=0.2.0-rc.2`：写在 `peerDependencies`（0.1.7-rc 起宿主装插件时校验它；alpha.1 还没有这道门）与 `engines.dsh`（同值、无人读）。
+- 宿主版本要求 `>= 0.2.1-alpha.1`：写在 `peerDependencies`（0.1.7-rc 起宿主装插件时校验它；alpha.1 还没有这道门）与 `engines.dsh`（同值、无人读）。
 
 ## 安装
 
@@ -56,7 +56,10 @@ allowBuilds:
 **关于这个 postinstall：** 它在正常路径下什么都不做。平台二进制由上游的 `optionalDependencies`（`@alibaba-group/ocr-<os>-<arch>`，各自带 `os` / `cpu` 字段，pnpm 只装匹配当前平台的那个）提供，`install.js` 检测到就打印 `Binary provided by platform package, skipping download.` 后直接返回。实测放行与不放行都能让 `ocr` 正常执行，差别只是要不要在安装期跑那段脚本——它只在平台包装不上时才下载兜底，而在 pnpm 下平台包必然装得上。
 
 如果你更希望完全不执行安装期脚本，可以写 `'@alibaba-group/open-code-review': false`：`ocr` 同样可用（launcher 直接从平台包目录取二进制），但宿主 `readPendingBuilds()` 只认值为 `set this to true or false` 的条目，改成 `false` 后官方审批流程就不再能代为授权，只能手工维护。
-- 运行期值依赖 `@jayyuen66/dsh-plugin-shared`、`@deepseek-ai/schemastery`（宿主 fork 的 schemastery，0.1.7 的 `.volatile()` 解析只在它有实现）与 `js-yaml`（后者只被 `scripts/get-cred.mjs` 用）。
+- `dependencies` 里不放任何 `@deepseek-ai/*`，这不是风格偏好。本包的消费方是 dsh 插件，被装进 profile（`nodeLinker: hoisted`、`autoInstallPeers: false`），只要宿主包出现在 `dependencies`，pnpm 就会把它在那颗 profile 里落成**真实目录**，与宿主进程已经加载的那份并存。而 `@deepseek-ai/dsh-tools` 的 `TOOL_RUNTIME_SCHEDULER` 是普通 `Symbol`（不是 `Symbol.for`），符号身份按模块实例计算——宿主 `dsh-agent-loop` 拿自己那份的 Symbol 去读由副本挂载出来的 `ToolRuntime`，得到 `undefined`，于是**每一次原生工具调用都抛** `Cannot read properties of undefined (reading 'prepare')`，整个 profile 的工具一起失效。本包的构建、类型检查与测试在这之前全部照绿，所以判据只能由 `test/publish-manifest.test.ts` 落在 manifest 面。
+- 产物里以**值**导入的四枚宿主包是非 optional 的 `peerDependencies`：`@deepseek-ai/schemastery`（宿主 fork 的 schemastery，0.1.7 的 `.volatile()` 解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write`。运行期由宿主在场提供，而 profile 不装 peer，所以不产生副本；`build-host.mjs` 对 `dependencies` 与 `peerDependencies` 两张表一律外部化，`host.js` 里的裸说明符因此一字不变。
+- 这四枚同时另列一份进 `devDependencies`——那才是本包自己的 typecheck、build、test 解析得到它们的方式。其余 `@deepseek-ai/*` 全是 type-only（构建即擦除，`host.js` 里不留说明符），只留在 `devDependencies`。
+- `dependencies` 剩下的确实是本包自己的运行期代码：`@jayyuen66/dsh-plugin-shared` 与 `js-yaml`（后者只被 `scripts/get-cred.mjs` 用）。
 
 ## 在 dsh 里启用
 

@@ -29,7 +29,17 @@ const root = import.meta.dirname;
 /** @type {unknown} */
 const pkgJson = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 const pkgNameRaw = isRecord(pkgJson) ? pkgJson.name : undefined;
-const pkgName = typeof pkgNameRaw === "string" ? pkgNameRaw : "unknown";
+// 刻意 fail loud：包名会写进产物的 `id`，而 dsh 的 client 模块表**按包名建键**——键对不上
+// 不是报错，而是整张设置卡静默不渲染。此前这里退化成 "unknown"：构建照样成功、照样写出
+// client.js，而 test/build-client.test.ts 的新鲜度门禁用同一个 buildClient() 的内存产物
+// 逐字节比对磁盘文件，两端都来自这段退化逻辑，所以门禁照样绿——缺陷直达运行时且全绿。
+if (typeof pkgNameRaw !== "string" || pkgNameRaw === "") {
+  throw new Error(
+    "build-client：package.json 的 name 缺失或非字符串。client.js 的 id 必须等于 dsh client 模块表的键（bundle 包名），" +
+      "退化只会让整张卡静默不渲染。",
+  );
+}
+const pkgName = pkgNameRaw;
 
 /** 生成 client.js 的完整文本（含 ModuleLoader 外壳）。 */
 export async function buildClient() {

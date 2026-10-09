@@ -1,4 +1,4 @@
-# ocr-review（2026-09-14）：open-code-review 工作区审查插件（bundle）。
+# ocr-review：open-code-review 工作区审查插件（bundle）。
 # 双面包机制：本包含 Host 半（host.ts：5 个工具 ocr_review/ocr_scan/
 # ocr_delegate_preview/ocr_delegate_rule/ocr_session + settings namespace「ocr-review」+
 # webServer 配置端点）与 Client 半（src/client-entry.ts → client.js：设置卡片，

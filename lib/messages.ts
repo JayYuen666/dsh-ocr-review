@@ -138,6 +138,12 @@ export interface OcrReviewMessages {
   readonly noApiKeyEnv: string;
   readonly keyNotResolvable: string;
   readonly credScriptMissing: string;
+  /** 收割器降级：进程信息命令不可用，已把进程树交回宿主管（stderr 只报一次，不每轮刷）。 */
+  readonly reaperDegraded: string;
+  /** warnings 字段形状不符（不是数组 / 条目读不出 file+error）：占位而非静默丢弃。 */
+  readonly warningUnreadable: string;
+  /** 逗号列表的数组形式里，某一项自身含逗号（无法表达一个含逗号的模式）。 */
+  readonly commaInListItem: string;
   // ── 端点回显 ──────────────────────────────────────────────────────────────
   readonly providerModelRequired: string;
   readonly bodyParseFailed: string;
@@ -292,6 +298,13 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "provider {provider} 未声明 apiKeyEnv，无法动态读取 key（OCR 自定义 provider 不支持无 key 解析）",
     keyNotResolvable: "provider {provider} 的 API key 未配置：dsh 凭据服务未解析到 {ref}",
     credScriptMissing: "get-cred 脚本缺失：{path}（api_key_cmd 无法工作）",
+    reaperDegraded:
+      "[ocr-review] 宿主回收守护已降级：ps/pgrep 不可用（进程信息命令被沙箱拒绝），改由宿主管进程树。" +
+      "dsh 硬退出时 ocr 可能留孤儿进程。",
+    warningUnreadable: "（一条格式无法解析的 warning：既不是字符串，也没有 file/error 字段）",
+    commaInListItem:
+      "{name} 的数组形式里有一项自身含逗号：{item}。数组与逗号字符串两条路径 join 后无法区分，" +
+      "而 glob 花括号（{ts,tsx}）恰好含逗号——静默拆成多项会改变审查/过滤范围。改用逗号字符串形式。",
     providerModelRequired: "provider 与 model 必填",
     bodyParseFailed: "body 解析失败：{message}",
     reviewToolDescription:
@@ -485,6 +498,15 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     keyNotResolvable:
       "the API key of provider {provider} is not configured: the dsh credentials service resolved no {ref}",
     credScriptMissing: "get-cred script missing: {path} (api_key_cmd cannot work)",
+    reaperDegraded:
+      "[ocr-review] host reaper degraded: ps/pgrep are unavailable (process-info commands denied by " +
+      "the sandbox), so the host manages the process tree. dsh may leave an orphaned ocr process.",
+    warningUnreadable:
+      "(one unreadable warning entry: neither a string nor an object with file/error)",
+    commaInListItem:
+      "an item of the array form of {name} contains a comma itself: {item}. The array form and the " +
+      "comma-joined string are indistinguishable after joining, and glob braces ({ts,tsx}) contain " +
+      "commas — silently splitting changes the review/filter scope. Use the comma-separated string form.",
     providerModelRequired: "provider and model are both required",
     bodyParseFailed: "failed to parse the body: {message}",
     reviewToolDescription:

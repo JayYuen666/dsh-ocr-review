@@ -12,24 +12,49 @@
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 
-/** POSIX sh 单引号转义：' → '\''。把任意字符串安全放进单引号内，防注入。 */
+/**
+ * POSIX sh 单引号转义：' → '\''。把任意字符串安全放进单引号内，防注入。
+ *
+ * NUL 一律拒绝：POSIX 命令串根本无法表示 NUL 字节，含 NUL 的值经 `bash -c '<inner>'`
+ * 会被截断或报错，产出「看起来成功但 argv 被截断」的不确定行为。当前各调用点恰好都先
+ * 做了 NUL 拒绝，但那是靠调用顺序维持的隐式不变量；这里把闸下沉到实现自身，让
+ * 「转义后的串一定能被 shell 完整读回」由本函数保证，而不是指望每个新调用点记得先查一遍。
+ */
 export function shq(value: string): string {
+  if (value.includes("\u0000")) {
+    // 刻意不走消息表：这不该由用户输入触发——各入口（assertAbsoluteRoot /
+    // takeTrimmedItems）都已先拒过 NUL，能走到这里说明是**内部不变量**破了，
+    // 文案要的是给维护者看「哪条路径漏了检查」，而不是给用户看的可翻译拒绝理由。
+    throw new Error(
+      "shq：值里含 NUL 字节，转义后的命令串无法被 shell 完整读回（漏了上游 NUL 检查）",
+    );
+  }
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 
-/** 绝对路径校验（macOS/Linux）：非空、以 / 开头、无 NUL 字节。 */
+/**
+ * 绝对路径校验（macOS/Linux）：非空、trim 后以 / 开头、无 NUL 字节。
+ *
+ * 先 trim 再判：调用点会先 trim 再传进来，而直接调用 `args.repo` 的路径若带首尾空白，
+ * 会被「必须是绝对路径」这条误导性文案拦下——读起来像是路径写错了格式，实际只是多了
+ * 几个空格。顺带也挡住全空白（trim 后为空 ⇒ 触发 repoRequired）。
+ */
 export function assertAbsoluteRoot(root: unknown, messages: OcrReviewMessages): string {
-  if (typeof root !== "string" || root.length === 0) {
+  const trimmed = typeof root === "string" ? root.trim() : "";
+  if (trimmed.length === 0) {
     throw new Error(messages.repoRequired);
   }
-  if (root.includes("\u0000")) {
+  if (trimmed.includes("\u0000")) {
     throw new Error(format(messages.noNulBytes, { name: "repo" }));
   }
-  if (!root.startsWith("/")) {
-    throw new Error(format(messages.repoMustBeAbsolute, { root }));
+  if (!trimmed.startsWith("/")) {
+    throw new Error(format(messages.repoMustBeAbsolute, { root: trimmed }));
   }
-  return root;
+  return trimmed;
 }
+
+/** limit 非法（NaN / ≤0 / 非整数）时的保守兜底上限：宁可比调用方的意图更严。 */
+const DEFAULT_LIST_LIMIT = 200;
 
 const EFFORTS = ["low", "medium", "high"] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -40,22 +65,11 @@ export function clampEffort(value: unknown, fallback: Effort): Effort {
   return matched ?? fallback;
 }
 
-/** 正整数钳制（concurrency/timeout/maxTokens 用，非正整数回 fallback）。 */
-export function clampPositiveInt(
-  value: unknown,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  if (value === undefined || value === null) {
-    return fallback;
-  }
-  const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isSafeInteger(parsed)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, parsed));
-}
+// clampPositiveInt（concurrency/timeout/maxTokens 的数值钳制）已删除：生产侧从无
+// 调用方——lib/cli.ts 的对应槽位全部走 ocr 自身的默认值或 clampEffort。它此前还带着
+// 一处实现与注释相反的缺陷（注释说「非正整数回 fallback」，实际 0/负数被 Math.max
+// 钳到 min），以及 Number(Symbol()) 抛非预期 TypeError 的洞。一个无人调用的导出
+// 留着，它的"契约"只会误导后来人以为已有人在用。
 
 /** 入参 → 原始项序列（commaList 的第一段：只判「值从哪来」，不判内容）。
  *  数组分支保留逐元素 for-of 而不是 `value.map`：map 会跳过稀疏数组的空洞，
@@ -69,6 +83,13 @@ function listSourceItems(value: unknown, name: string, messages: OcrReviewMessag
     for (const item of value) {
       if (typeof item !== "string") {
         throw new TypeError(format(messages.listItemsMustBeString, { name }));
+      }
+      // 数组元素自身含逗号 ⇒ 拒绝，而不是等 join(",") 之后再拆。两条路径对同一语义输入
+      // 会产出无法区分的命令行 token：["a,b"] 与 ["a","b"] join 后都是 "a,b"。而 glob
+      // 花括号（{ts,tsx}）恰好含逗号，模型用数组传一个模式会被当成两个独立模式——
+      // 审查或过滤范围被静默改变且不报错。这里宁可拒绝：静默改范围比报错危险得多。
+      if (item.includes(",")) {
+        throw new TypeError(format(messages.commaInListItem, { name, item }));
       }
       items.push(item);
     }
@@ -84,6 +105,10 @@ function takeTrimmedItems(
   limit: number,
   messages: OcrReviewMessages,
 ): string[] {
+  // limit 是本模块的内部常量，但这一层是**专门防绕过**的闸，参数被传成 NaN 时静默放开
+  // 上限是最危险的形态（out.length >= NaN 恒为 false ⇒ 完全不设限）。非法值回落到
+  // 一个保守默认，而不是让它悄悄失效。
+  const cap = Number.isSafeInteger(limit) && limit > 0 ? limit : DEFAULT_LIST_LIMIT;
   const out: string[] = [];
   for (const item of items) {
     if (item.includes("\u0000")) {
@@ -93,7 +118,7 @@ function takeTrimmedItems(
     if (trimmed.length > 0) {
       out.push(trimmed);
     }
-    if (out.length >= limit) {
+    if (out.length >= cap) {
       break;
     }
   }

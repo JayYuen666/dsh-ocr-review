@@ -1,4 +1,5 @@
-// lib/routing.ts —— systemPrompt 路由段：教模型四个 ocr_* 工具何时用。
+// lib/routing.ts —— systemPrompt 路由段：教模型五个 ocr_* 工具何时用
+// （ocr_review / ocr_scan / ocr_delegate_preview / ocr_delegate_rule / ocr_session）。
 // order 1555（紧邻 zg 1550 之后、lesson-loop 1560 之前；修撞车：
 // 原 1560 与 lesson-loop SECTION_ORDER 同值，同 order 按名称稳定排序但仍属
 // 语义混层，官方约定 order 递增分层）。文本精简、只讲路由与坑，细节放进工具描述。
