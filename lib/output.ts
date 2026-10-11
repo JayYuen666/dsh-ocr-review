@@ -105,20 +105,26 @@ function objectViolations(
     return [`${path}: expected object`];
   }
   const { properties, required, additionalProperties } = schema;
+  // 一律用 Object.hasOwn，而不是 `properties?.[key]` / `key in value`：后者沿原型链
+  // 命中继承属性，`constructor`/`toString` 这些键于是取到 Object.prototype 上的成员
+  // 而非 undefined，逃过 additionalProperties:false，再以「无约束节点」静默通过递归。
+  // 本模块的立身之本是「未声明字段必须抛错」，这两处必须闭合。
+  const declared = (key: string): JsonSchemaNode | undefined =>
+    properties !== undefined && Object.hasOwn(properties, key) ? properties[key] : undefined;
   if (additionalProperties === false) {
-    const extra = Object.keys(value).filter((key) => properties?.[key] === undefined);
+    const extra = Object.keys(value).filter((key) => declared(key) === undefined);
     if (extra.length > 0) {
       return [`${path}: fields outside the schema: ${extra.join(", ")}`];
     }
   }
   for (const key of required ?? []) {
-    if (!(key in value) || value[key] === undefined) {
+    if (!Object.hasOwn(value, key) || value[key] === undefined) {
       return [`${path}: missing required field ${key}`];
     }
   }
   const violations: string[] = [];
   for (const key of Object.keys(value)) {
-    const child = properties?.[key];
+    const child = declared(key);
     if (child !== undefined) {
       violations.push(...walk(child, value[key], `${path}.${key}`));
     }
@@ -143,40 +149,89 @@ function arrayViolations(
   return value.flatMap((item, index) => walk(items, item, `${path}[${index}]`));
 }
 
+// ── 明文 key 脱敏 ───────────────────────────────────────────────────────────
+// 本块排在走查之前：schema 校验的失败消息出口要用 redactKeyMaterial，而本仓的
+// no-use-before-define 不放行「先声明后定义」。
+
+/** provider key 形状：`sk-…`/`ark-…`/`ghp-…` 一类「短前缀 + 长随机串」。
+ *
+ *  为什么额外要求随机串里至少有一个数字或大写字母：真实 key 是随机 base62（32 位
+ *  纯小写的概率约 1e-12），而审查输出里的 kebab 小写长串几乎只可能是文件路径
+ *  （`src/my-super-long-directory-name/index.ts`）。少了这道约束，session/delegate
+ *  透传出的路径会被抹成 ***REDACTED***，模型拿不到可行动的位置信息。 */
+const STANDALONE_KEY =
+  /\b[A-Za-z]{2,5}-(?=[A-Za-z0-9_-]{20,}\b)(?=[A-Za-z0-9_-]*[0-9A-Z])[A-Za-z0-9_-]{20,}\b/gu;
+/** `Authorization: <scheme> <value>` / `Proxy-Authorization: …`：认**头名**而不是
+ *  枚举认证方案。头名本身就是「后面跟着凭据」的信号，Basic / Token / Digest 乃至
+ *  vendor 自定义 scheme 都不会漏；而只认头名还避开了正文里「token based
+ *  authentication」这类措辞被误抹。scheme 组连同其后的空白一起捕获，回填时凭据被
+ *  替换而 scheme 词保留。 */
+const AUTH_HEADER_VALUE =
+  /(?<name>\b(?:proxy-)?authorization["'\s]*[:=]["'\s]*)(?:(?<scheme>[a-z][a-z0-9_-]*[ \t]+))?[^\s"',;)}\]]{4,}/giu;
+/** 裸 scheme + 值（没有头名时 OCR 也会整行回显）。scheme 只留 bearer：它在散文中几乎
+ *  不出现，而 token / basic 之类会撞上「token count」「basic usage」等普通措辞。 */
+const BEARER_VALUE = /(?<scheme>\bbearer[ \t]+)[a-z0-9._~+/=-]{4,}/giu;
+/** `api_key: "xxx"`、`apiKey=xxx`、`token: xxx`、`x-api-key: xxx` 等赋值形态。
+ *  值下限取 4 且容许一个 scheme 词：`token: Basic <base64>` 里赋值形态先能吃到的只是
+ *  scheme 词（Basic 恰好 5 字符），下限更高时整条失配，后面那个 base64 就原样进了日志。 */
+const KEY_ASSIGNMENT =
+  /(?<name>\b(?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token)["'\s]*[:=]["'\s]*)(?:(?<scheme>[a-z][a-z0-9_-]*[ \t]+))?[^\s"',;)}\]]{4,}/giu;
+const REDACTION = "***REDACTED***";
+
+/**
+ * 抹掉文本里 key 形状的片段。
+ *
+ * 为什么需要：OCR 会把 provider 配置错误连同请求头/端点整段回显到 stderr，
+ * `ocr llm test` 的输出又直通设置卡片；工具错误文本还会被持久化进会话日志
+ * （session log），一次回显就等于把明文 key 写进了长期存储。本插件的既定
+ * 决策是「key 绝不落盘、绝不过 HTTP」，故所有原始输出出口都必须过这道闸
+ * （harness 同方向的红线见 packages/settings/settings/src/redact.ts）。
+ *
+ * 只做「形态匹配」替换：赋值/Bearer 形态一律从严（宁可多抹），独立 key 形态则
+ * 要求随机串特征，避免把要交给模型的文件路径一起抹掉。
+ */
+export function redactKeyMaterial(text: string): string {
+  // 头名形态排在最前：它连 scheme 词一起捕获，先跑掉就不会被后面的规则拆开。
+  return text
+    .replaceAll(AUTH_HEADER_VALUE, `$<name>$<scheme>${REDACTION}`)
+    .replaceAll(BEARER_VALUE, `$<scheme>${REDACTION}`)
+    .replaceAll(KEY_ASSIGNMENT, `$<name>$<scheme>${REDACTION}`)
+    .replaceAll(STANDALONE_KEY, REDACTION);
+}
+
 /** 官方子集的迷你走查（path 限定违规位置，一次列全）。oneOf 语义与官方一致：
  *  恰好一支命中，多支/零支都算违规。 */
 function violationsOf(schema: JsonSchemaNode, value: unknown, path: string): string[] {
-  if (schema.oneOf !== undefined) {
-    const passing = schema.oneOf.filter((branch) => violationsOf(branch, value, path).length === 0);
+  // 关键词之间是合取关系（与官方实现一致）：oneOf 命中**不等于**同级的 type/const/enum
+  // 被豁免。在 oneOf 分支里直接 return 会把它们一并跳过，于是 `{ const: true,
+  // oneOf: [...] }` 这类 schema 的 const 被静默放过——正是文件头警惕的那种
+  // 「守卫假装支持却静默放过」。
+  const violations: string[] = [];
+  const { oneOf } = schema;
+  if (oneOf !== undefined) {
+    const passing = oneOf.filter((branch) => violationsOf(branch, value, path).length === 0);
     if (passing.length !== 1) {
-      return [`${path}: matched ${passing.length} of ${schema.oneOf.length} oneOf branches`];
+      violations.push(`${path}: matched ${passing.length} of ${oneOf.length} oneOf branches`);
     }
-    return [];
   }
   const { type } = schema;
   if (type === "object") {
-    return objectViolations(schema, value, path, violationsOf);
-  }
-  if (type === "array") {
-    return arrayViolations(schema, value, path, violationsOf);
-  }
-  if (type === undefined) {
-    // 官方子集的「无约束」节点：任何 JSON 值都合形态。
-    return [];
-  }
-  // 剩下的全是标量分支（string/number/integer/boolean/null）+ 标量级 const/enum。
-  if (scalarMismatch(type, value)) {
-    return [`${path}: expected ${type}`];
+    violations.push(...objectViolations(schema, value, path, violationsOf));
+  } else if (type === "array") {
+    violations.push(...arrayViolations(schema, value, path, violationsOf));
+  } else if (type !== undefined && scalarMismatch(type, value)) {
+    // type 缺省是官方子集的「无约束」节点：任何 JSON 值都合形态。
+    violations.push(`${path}: expected ${type}`);
   }
   if (schema.const !== undefined && value !== schema.const) {
-    return [`${path}: must be exactly ${JSON.stringify(schema.const)}`];
+    violations.push(`${path}: must be exactly ${JSON.stringify(schema.const)}`);
   }
   if (schema.enum !== undefined && !(schema.enum as readonly unknown[]).includes(value)) {
-    return [
+    violations.push(
       `${path}: must be one of ${schema.enum.map((entry) => JSON.stringify(entry)).join("/")}`,
-    ];
+    );
   }
-  return [];
+  return violations;
 }
 
 /**
@@ -198,52 +253,20 @@ export function assertToolOutput(
   assertGuardable(schema, toolName, messages);
   const violations = violationsOf(schema, value, "result");
   if (violations.length > 0) {
+    // 违规清单会被宿主持久化进 session log，所以既限量也脱敏：全量评论一起不合形态时
+    // `join` 能产出几十万字符（日志膨胀），而清单里的字段名/路径一旦含 key 形状的串，
+    // 就等于把凭据写进长期存储。
+    const MAX_LISTED = 20;
+    const MAX_CHARS = 2000;
+    const omitted = violations.length - MAX_LISTED;
+    const listed =
+      violations.slice(0, MAX_LISTED).join("; ") + (omitted > 0 ? ` …(+${omitted})` : "");
     throw new Error(
       format(messages.resultSchemaViolation, {
         tool: toolName,
-        violations: violations.join("; "),
+        violations: redactKeyMaterial(listed).slice(0, MAX_CHARS),
       }),
     );
   }
   return value;
-}
-
-// ── 明文 key 脱敏 ───────────────────────────────────────────────────────────
-
-/** provider key 形状：`sk-…`/`ark-…`/`ghp-…` 一类「短前缀 + 长随机串」。
- *
- *  为什么额外要求随机串里至少有一个数字或大写字母：真实 key 是随机 base62（32 位
- *  纯小写的概率约 1e-12），而审查输出里的 kebab 小写长串几乎只可能是文件路径
- *  （`src/my-super-long-directory-name/index.ts`）。少了这道约束，session/delegate
- *  透传出的路径会被抹成 ***REDACTED***，模型拿不到可行动的位置信息。 */
-const STANDALONE_KEY =
-  /\b[A-Za-z]{2,5}-(?=[A-Za-z0-9_-]{20,}\b)(?=[A-Za-z0-9_-]*[0-9A-Z])[A-Za-z0-9_-]{20,}\b/gu;
-/** `Authorization: Bearer xxx` / `bearer xxx`。
- *
- *  字符集写 `[a-z…]` 而不是 `[A-Za-z…]`：本条带 `i` 旗标，`a-z` 在大小写不敏感下
- *  已同时匹配 `A-Z`——再并列一枚 `A-Z` 是同一个字符集抄两遍（sonarjs 判为字符类内重复），
- *  删掉重复的那一位，匹配语言不变。 */
-const BEARER_VALUE = /(?<scheme>\bbearer\s+)[a-z0-9._~+/=-]{12,}/giu;
-/** `api_key: "xxx"`、`apiKey=xxx`、`token: xxx`、`x-api-key: xxx` 等赋值形态。 */
-const KEY_ASSIGNMENT =
-  /(?<name>\b(?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token)["'\s]*[:=]["'\s]*)[^\s"',;)}\]]{6,}/giu;
-const REDACTION = "***REDACTED***";
-
-/**
- * 抹掉文本里 key 形状的片段。
- *
- * 为什么需要：OCR 会把 provider 配置错误连同请求头/端点整段回显到 stderr，
- * `ocr llm test` 的输出又直通设置卡片；工具错误文本还会被持久化进会话日志
- * （session log），一次回显就等于把明文 key 写进了长期存储。本插件的既定
- * 决策是「key 绝不落盘、绝不过 HTTP」，故所有原始输出出口都必须过这道闸
- * （harness 同方向的红线见 packages/settings/settings/src/redact.ts）。
- *
- * 只做「形态匹配」替换：赋值/Bearer 形态一律从严（宁可多抹），独立 key 形态则
- * 要求随机串特征，避免把要交给模型的文件路径一起抹掉。
- */
-export function redactKeyMaterial(text: string): string {
-  return text
-    .replaceAll(BEARER_VALUE, `$<scheme>${REDACTION}`)
-    .replaceAll(KEY_ASSIGNMENT, `$<name>${REDACTION}`)
-    .replaceAll(STANDALONE_KEY, REDACTION);
 }

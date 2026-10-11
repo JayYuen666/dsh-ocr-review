@@ -111,10 +111,14 @@ function str(value: unknown): string {
  * 故作兜底值。
  */
 function nonNegativeInt(value: number): number {
-  if (!Number.isFinite(value) || value < 0) {
+  const truncated = Math.trunc(value);
+  // 用 Number.isSafeInteger 而不是 Number.isFinite：1e300 有限但远超安全整数域，
+  // 原样传播会把行号与 insertions/deletions 变成天文数字。与 host.ts:readMaxComments
+  // 的口径保持一致。
+  if (!Number.isSafeInteger(truncated) || truncated < 0) {
     return 0;
   }
-  return Math.trunc(value);
+  return truncated;
 }
 
 function num(value: unknown): number {
@@ -123,7 +127,9 @@ function num(value: unknown): number {
   }
   if (typeof value === "string") {
     const trimmed = value.trim();
-    if (trimmed === "") {
+    // 只认十进制整数：`Number()` 还接受 "0x10"（=16）、"1e3"（=1000）、"0b11" 这类
+    // 写法，OCR 一旦吐出十六进制行号，"0x10" 会被当成第 16 行报给模型。
+    if (!/^\d+$/u.test(trimmed)) {
       return 0;
     }
     return nonNegativeInt(Number(trimmed));
@@ -409,6 +415,57 @@ export interface ParsedDelegatePreview {
   mergeBase: string;
 }
 
+/**
+ * preview 的条目数组 → 结构化清单；返回 null 表示「上游给了条目却一条都没解析出来」。
+ *
+ * 判据分两层：部分条目解析不出来照旧丢弃（OCR 偶发脏条目不该毁掉整份清单），
+ * 但一条不剩时不能继续以 ok:true 的形态报「0 个文件可审」——那不是「没有可审的
+ * 文件」，是半截产出，模型与用户都会拿它当范围结论。
+ */
+function toDelegateFiles(raw: unknown): DelegateFile[] | null {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const files = raw
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return null;
+      }
+      const entryPath = str(entry["path"]);
+      if (entryPath === "") {
+        return null;
+      }
+      return {
+        path: entryPath,
+        status: str(entry["status"]),
+        insertions: num(entry["insertions"]),
+        deletions: num(entry["deletions"]),
+      };
+    })
+    .filter((fileEntry): fileEntry is DelegateFile => fileEntry !== null);
+  return raw.length > 0 && files.length === 0 ? null : files;
+}
+
+/** excluded_files 同款门：条目形状与 reviewable 一致，缺 path 即不可用。 */
+function toExcludedFiles(raw: unknown): { path: string; reason: string }[] | null {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const files = raw
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return null;
+      }
+      const entryPath = str(entry["path"]);
+      if (entryPath === "") {
+        return null;
+      }
+      return { path: entryPath, reason: str(entry["reason"]) };
+    })
+    .filter((fileEntry): fileEntry is { path: string; reason: string } => fileEntry !== null);
+  return raw.length > 0 && files.length === 0 ? null : files;
+}
+
 /** 解析 `ocr delegate preview --format json` 输出。 */
 export function parseDelegatePreview(text: string): ParsedDelegatePreview {
   let doc: unknown;
@@ -436,36 +493,11 @@ export function parseDelegatePreview(text: string): ParsedDelegatePreview {
       return delegatePreviewFailure();
     }
   }
-  const reviewable: DelegateFile[] = Array.isArray(root["reviewable_files"])
-    ? root["reviewable_files"]
-        .map((fileRaw) => {
-          if (!isRecord(fileRaw)) {
-            return null;
-          }
-          return {
-            path: str(fileRaw["path"]),
-            status: str(fileRaw["status"]),
-            insertions: num(fileRaw["insertions"]),
-            deletions: num(fileRaw["deletions"]),
-          };
-        })
-        .filter(
-          (fileEntry): fileEntry is DelegateFile => fileEntry !== null && fileEntry.path.length > 0,
-        )
-    : [];
-  const excluded: { path: string; reason: string }[] = Array.isArray(root["excluded_files"])
-    ? root["excluded_files"]
-        .map((fileRaw) => {
-          if (!isRecord(fileRaw)) {
-            return null;
-          }
-          return { path: str(fileRaw["path"]), reason: str(fileRaw["reason"]) };
-        })
-        .filter(
-          (fileEntry): fileEntry is { path: string; reason: string } =>
-            fileEntry !== null && fileEntry.path.length > 0,
-        )
-    : [];
+  const reviewable = toDelegateFiles(root["reviewable_files"]);
+  const excluded = toExcludedFiles(root["excluded_files"]);
+  if (reviewable === null || excluded === null) {
+    return delegatePreviewFailure();
+  }
   return {
     ok: true,
     mode: str(root["mode"]),
@@ -518,7 +550,7 @@ export function parseDelegateRules(text: string): { ok: boolean; groups: RuleGro
     return { ok: false, groups: [] };
   }
   // 到这里的组必带**数组** files：files 存在却非数组的已在上面整体判失败，
-  // 不存在 files 的组会在下面被 files.length > 0 滤掉。故守卫式收窄一次即可，
+  // 不存在 files 的组会被下面 files.length > 0 滤掉。故守卫式收窄一次即可，
   // 不必在映射里再写一遍不可能走到的 : [] 兜底。
   const groupsWithFiles = groupsRaw.filter(
     (groupRaw): groupRaw is { files: unknown[] } & Record<string, unknown> =>
@@ -529,9 +561,19 @@ export function parseDelegateRules(text: string): { ok: boolean; groups: RuleGro
       groupId: num(groupRaw["group_id"]),
       source: str(groupRaw["source"]),
       pattern: str(groupRaw["pattern"]),
-      files: groupRaw.files.map((file) => str(file)).filter(Boolean),
+      // 只收非空字符串项：str() 会把数字/对象变成 "1" / "[object Object]" 这类凭空
+      // 造出来的文件名，模型拿着它去定位只会扑空。
+      files: groupRaw.files
+        .filter((file): file is string => typeof file === "string" && file.trim() !== "")
+        .map((file) => file.trim()),
       rule: str(groupRaw["rule"]),
     }))
+    // files 为空的组传达不了任何文件路径，留着它等于给模型一条无处可用的规则。
     .filter((group) => group.files.length > 0);
+  // 上游给了分组却一条都没解析出来 ⇒ 半截产出，不能再以 ok:true 的形态报「0 个规则
+  // 分组」。部分分组解析不出来仍照旧放行（上面已按组丢弃），与 preview 同口径。
+  if (groupsRaw.length > 0 && groups.length === 0) {
+    return { ok: false, groups: [] };
+  }
   return { ok: true, groups };
 }

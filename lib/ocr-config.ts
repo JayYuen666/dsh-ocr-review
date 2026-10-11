@@ -185,6 +185,17 @@ export async function applyProviderSelection(
   messages: OcrReviewMessages,
 ): Promise<AppliedConfig> {
   const { provider, model } = selection;
+  // 包内自带形状闸：宿主对 HTTP body 与模型入参都不做校验，全靠调用点逐个挑一遍迟早
+  // 漏一条新路径。model 为空串时下游 `target.models.length === 0` 会无条件放行，
+  // 把空 model 写进 config.json——正是「错形状必须抛错」要防的静默写入。
+  if (
+    typeof provider !== "string" ||
+    typeof model !== "string" ||
+    provider.trim() === "" ||
+    model.trim() === ""
+  ) {
+    throw new Error(format(messages.providerModelRequired, {}));
+  }
   const { providers, source } = readProviders(gateway, messages);
   if (source.status !== "ready") {
     throw new Error(source.message);
@@ -232,6 +243,17 @@ export async function applyProviderSelection(
   return { provider: target.name, model, url: target.baseURL, protocol: target.protocol };
 }
 
+/** 单条迁移共用的上下文（打成一个对象：入参超过 5 个时逐项平铺反而难读）。 */
+interface MigrateContext {
+  /** get-cred 脚本在本包内的绝对路径。 */
+  readonly scriptPath: string;
+  /** 宿主侧此刻解析出的 dsh 数据目录，写进 api_key_cmd 作显式定位档。 */
+  readonly dshHome: string;
+  /** 已确认解析得到值的 env key；不在其中的绝不删明文。 */
+  readonly resolvableEnvKeys: ReadonlySet<string>;
+  readonly messages: OcrReviewMessages;
+}
+
 /**
  * 迁移单条 custom provider 条目：有明文 api_key 且能找到 envKey → 改写入
  * api_key_cmd 并删除明文，返回 'migrated'；找不到 envKey 或构造命令失败 →
@@ -240,18 +262,23 @@ export async function applyProviderSelection(
 function migrateEntry(
   entry: Record<string, unknown>,
   envKey: string | undefined,
-  scriptPath: string,
-  dshHome: string,
-  messages: OcrReviewMessages,
+  context: MigrateContext,
 ): "migrated" | "unknown" | "noPlain" {
   if (typeof entry["api_key"] !== "string" || entry["api_key"].length === 0) {
     return "noPlain";
   }
-  if (envKey === undefined || envKey === "") {
+  // 解析不到值就整条记 unknown，绝不删明文：换过去的命令取不到东西，等于把一条本来
+  // 能用的凭据换成一条不能用的，而原文只剩 .bak 里的副本。
+  if (envKey === undefined || envKey === "" || !context.resolvableEnvKeys.has(envKey)) {
     return "unknown";
   }
   try {
-    entry["api_key_cmd"] = buildApiKeyCmd(scriptPath, envKey, dshHome, messages);
+    entry["api_key_cmd"] = buildApiKeyCmd(
+      context.scriptPath,
+      envKey,
+      context.dshHome,
+      context.messages,
+    );
   } catch {
     // 非法 env key 无法构造命令 → 记入 unknown。
     return "unknown";
@@ -295,7 +322,10 @@ export async function migratePlaintextKeys(
   parseExistingConfig(precheck, paths.ocrConfigJson, messages);
   const scriptPath = credentialScriptPath(paths);
   if (!existsSync(scriptPath)) {
-    return { migrated: [], skippedUnknown: [] };
+    // 脚本缺失却回空名单，端点会给 200 {ok:true, migrated:[]}，卡片据此渲染成
+    // 「没有需要迁移的明文 key」——把「没做」报成「没有」，用户以为明文密钥已清掉，
+    // 实际还留在盘上。apply 侧同一情况是抛 credScriptMissing，两条路径口径必须一致。
+    throw new Error(format(messages.credScriptMissing, { path: scriptPath }));
   }
   // 与 applyProviderSelection 同源：宿主侧此刻解析出的数据目录显式进 api_key_cmd。
   const dshHome = resolveDshHome();
@@ -306,6 +336,21 @@ export async function migratePlaintextKeys(
       envByProvider.set(providerCfg.name, providerCfg.apiKeyEnv);
     }
   }
+  // 删明文前逐条确认新命令解析得到值（resolve 的值当场丢弃，绝不外传）。这是迁移与
+  // apply 的关键差别：apply 不成功就整条放弃，迁移一旦删掉明文就没有回头路。
+  const candidateEnvKeys = [...new Set(envByProvider.values())];
+  const resolvedFlags = await Promise.all(
+    candidateEnvKeys.map((envKey) => gateway.credentialResolvable(envKey)),
+  );
+  const resolvableEnvKeys = new Set(
+    candidateEnvKeys.filter((_envKey, index) => resolvedFlags[index] === true),
+  );
+  const migrateContext: MigrateContext = {
+    scriptPath,
+    dshHome,
+    resolvableEnvKeys,
+    messages,
+  };
   const outcome = await updateConfigLocked(paths.ocrConfigJson, async () => {
     // 锁内不再判一次"空文件"：`parseExistingConfig`（lib/config-store.ts）对空白输入返回
     // `{}`，于是下面的 `custom_providers` 形状闸门自然走成同一条"无可迁移对象"的早返回，
@@ -321,7 +366,7 @@ export async function migratePlaintextKeys(
     for (const [name, raw] of Object.entries(customs)) {
       if (isRecord(raw)) {
         const entry = raw;
-        const result = migrateEntry(entry, envByProvider.get(name), scriptPath, dshHome, messages);
+        const result = migrateEntry(entry, envByProvider.get(name), migrateContext);
         if (result === "migrated") {
           migrated.push(name);
         } else if (result === "unknown") {

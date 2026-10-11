@@ -114,9 +114,12 @@ describe("ocr-review host 构建", () => {
     const text = await buildHost();
     expect(text).toContain("const PLUGIN_DIR = import.meta.dirname;");
     // 构建脚本的写入目标 = 脚本自身目录（= 包根）；改这一行必须同步改本断言。
+    // 走「临时文件 + rename」而不是直接覆盖：同目录 rename 是原位的，中断不会留下
+    // 半份 host.js。
     const builder = await readFile(path.join(PKG_ROOT, "build-host.mjs"), "utf8");
     expect(builder).toContain("const root = import.meta.dirname;");
-    expect(builder).toContain('writeFile(path.join(root, "host.js")');
+    expect(builder).toContain('const target = path.join(root, "host.js")');
+    expect(builder).toContain("await rename(tmp, target);");
     const artifactStat = await stat(path.join(PKG_ROOT, "host.js"));
     const credStat = await stat(path.join(PKG_ROOT, "scripts", "get-cred.mjs"));
     expect(artifactStat.isFile(), "host.js 已产出（npm run build）").toBe(true);

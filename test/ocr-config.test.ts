@@ -682,6 +682,27 @@ describe("providersForCard（磁盘只剩外部 ocr config）", () => {
 describe("applyProviderSelection", () => {
   afterEach(removeTmpSandbox);
 
+  it("包内形状闸：provider / model 非字符串或全空白即抛错，不写盘", async () => {
+    // 宿主对 HTTP body 与模型入参都不做校验，这一层就是最后一道。model 为空串时
+    // 下游 `target.models.length === 0` 会无条件放行，把空 model 写进 config.json。
+    const shapes = [
+      { provider: "", model: "m" },
+      { provider: "  ", model: "m" },
+      { provider: "sensenova", model: "" },
+      { provider: "sensenova", model: "  " },
+    ];
+    const wrote = await Promise.all(
+      shapes.map(async (selection) => {
+        const paths = makePaths();
+        await expect(applyProviderSelection(makeGateway(), paths, selection, zh)).rejects.toThrow(
+          zh.providerModelRequired,
+        );
+        return existsSync(paths.ocrConfigJson);
+      }),
+    );
+    expect(wrote, "形状不合时不得留下半份配置").not.toContain(true);
+  });
+
   it("应用成功：生成配置 + chmod 0600 + 只走 resolve 这一问", async () => {
     const gateway = makeGateway();
     const paths = makePaths();
@@ -887,6 +908,38 @@ describe("migratePlaintextKeys", () => {
     expect(doc.custom_providers["unknown"]!["api_key"]).toBe("sk-other");
   });
 
+  it("apiKeyEnv 形状不合法（解得出值也构造不出命令）⇒ 记 unknown，明文原样留着", async () => {
+    // 两道闸是独立的：ref 名解析得到值（resolvableEnvKeys 放行），但不符合
+    // ^[A-Z0-9_]+$ 时命令根本构造不出来。此时绝不能删明文——删了就只剩一条取不到
+    // 东西的命令，等于把能用的凭据换成不能用的。
+    const paths = makePaths();
+    writeFileSync(
+      paths.ocrConfigJson,
+      JSON.stringify({
+        provider: "weird",
+        custom_providers: {
+          weird: { url: "u", protocol: "openai", model: "m", api_key: "sk-keepme" },
+        },
+      }),
+    );
+    const gateway = makeGateway({
+      descriptors: descriptorsWithValue({
+        providers: {
+          weird: { apiKeyEnv: "bad-name", api: "openai-completions", baseURL: "u", models: [] },
+        },
+      }),
+      resolvable: ["bad-name"],
+    });
+    const { migrated, skippedUnknown } = await migrateOf(gateway, paths);
+    expect(migrated).toStrictEqual([]);
+    expect(skippedUnknown).toStrictEqual(["weird"]);
+    const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as {
+      custom_providers: Record<string, Record<string, unknown>>;
+    };
+    expect(doc.custom_providers["weird"]!["api_key"]).toBe("sk-keepme");
+    expect(doc.custom_providers["weird"]!["api_key_cmd"]).toBeUndefined();
+  });
+
   it("credentials 缺席不阻断迁移（它只需要 name→apiKeyEnv 映射）", async () => {
     const paths = makePaths();
     writeFileSync(paths.ocrConfigJson, PLAINTEXT_KEY_DOC);
@@ -911,7 +964,7 @@ describe("migratePlaintextKeys", () => {
     expect(readFileSync(paths.ocrConfigJson, "utf8")).toContain("api_key");
   });
 
-  it("无 config / 无 custom_providers / 无 get-cred 脚本 ⇒ 空回执且不写盘", async () => {
+  it("无 config / 无 custom_providers ⇒ 空回执且不写盘", async () => {
     const paths = makePaths();
     const gateway = makeGateway();
     await expect(migrateOf(gateway, paths)).resolves.toStrictEqual({
@@ -923,12 +976,26 @@ describe("migratePlaintextKeys", () => {
       migrated: [],
       skippedUnknown: [],
     });
+  });
+
+  it("缺 get-cred 脚本 ⇒ 抛错，绝不回空名单", async () => {
+    // 回空名单会让端点给 200 {ok:true, migrated:[]}，卡片据此渲染成「没有需要迁移的
+    // 明文 key」——把「没做」报成「没有」，用户以为明文密钥已清掉，实际还留在盘上。
+    const paths = makePaths();
     writeFileSync(paths.ocrConfigJson, PLAINTEXT_KEY_DOC);
     rmSync(paths.getCredScript);
-    await expect(migrateOf(gateway, paths)).resolves.toStrictEqual({
-      migrated: [],
-      skippedUnknown: [],
-    });
+    await expect(migrateOf(makeGateway(), paths)).rejects.toThrow(/get-cred 脚本缺失/u);
+    expect(readFileSync(paths.ocrConfigJson, "utf8")).toContain(PLAINTEXT_KEY);
+  });
+
+  it("新命令解析不到值 ⇒ 明文一条都不删，记入 skippedUnknown", async () => {
+    // 与 apply 的关键差别：apply 不成功就整条放弃，迁移一旦删掉明文就没有回头路。
+    // resolvable 给空名单即等价于凭据服务解析不到那条 ref。
+    const paths = makePaths();
+    writeFileSync(paths.ocrConfigJson, PLAINTEXT_KEY_DOC);
+    const result = await migrateOf(makeGateway({ resolvable: [] }), paths);
+    expect(result.migrated).toStrictEqual([]);
+    expect(result.skippedUnknown).toStrictEqual(["sensenova"]);
     expect(readFileSync(paths.ocrConfigJson, "utf8")).toContain(PLAINTEXT_KEY);
   });
 

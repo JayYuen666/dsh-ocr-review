@@ -74,6 +74,14 @@ describe("assertToolOutput", () => {
     );
   });
 
+  it("违规超过 20 条 ⇒ 截断并标出省略条数", () => {
+    // 一次跑出 25 条违规：只列前 20 条，尾部注明还剩几条，否则失败消息本身就能把
+    // 整张结果表撑爆。
+    const strings = { type: "array", items: { type: "string" } } satisfies JsonSchemaNode;
+    const many = Array.from({ length: 25 }, (_unused, index) => index);
+    expect(() => guardOf(many, strings)).toThrow(/…\(\+5\)/u);
+  });
+
   it("标量分支：number 须有限、integer 须整数、boolean/null 各自点名", () => {
     expect(() => guardOf("x", { type: "number" })).toThrow(/result: expected number/u);
     expect(() => guardOf(Number.NaN, { type: "number" })).toThrow(/expected number/u);

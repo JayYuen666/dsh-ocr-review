@@ -299,9 +299,12 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     const { apply } = await loadClientExports();
     const { ctx, trace } = makeHost(fakeForm(formTrace));
     apply(ctx);
-    const payload = trace.payload as { set: (field: string, value: unknown) => Promise<unknown> };
-    // 卡片侧写入面是 Promise<void>：受理位 await 后刻意不消费，故返回 undefined。
-    assert.equal(await payload.set("effort", "low"), undefined, "payload.set 不外泄受理位");
+    const payload = trace.payload as {
+      set: (field: string, value: unknown) => boolean | Promise<boolean>;
+    };
+    // 受理位必须外泄：官方 ConfigForm.set 用它区分「宿主受理」与「拒绝/跳过」，
+    // 丢掉它就分不出「已保存」和「宿主根本没写盘」这两种用户可见的结果。
+    assert.equal(await payload.set("effort", "low"), true, "payload.set 把受理位回传给卡片");
     assert.deepEqual(
       formTrace.setCalls,
       [["effort", "low"]],

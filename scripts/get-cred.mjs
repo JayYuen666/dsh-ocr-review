@@ -66,16 +66,28 @@ function isRecord(value) {
 
 /**
  * 数据目录：显式参数 > $DSH_HOME > homedir()/.dsh（空/全空白按未设置处理）。
+ *
+ * 相对路径在这里是硬错误而不是照用：本脚本的 cwd 是 OCR 当时所在的那个仓库，
+ * 相对路径会被解析成 `<被审查仓库>/.dsh/…`——正是文件头声明要避免的「拿被审查
+ * 仓库里的文件当用户凭据」。猜不出用户指的是哪个目录，就不猜。
  * @param {string | undefined} fromArg
  * @returns {string}
  */
 function dataDirFrom(fromArg) {
   const arg = typeof fromArg === "string" ? fromArg.trim() : "";
-  if (arg !== "") {
-    return arg;
-  }
   const fromEnv = typeof process.env.DSH_HOME === "string" ? process.env.DSH_HOME.trim() : "";
-  return fromEnv === "" ? path.join(homedir(), ".dsh") : fromEnv;
+  let chosen = path.join(homedir(), ".dsh");
+  if (fromEnv !== "") {
+    chosen = fromEnv;
+  }
+  if (arg !== "") {
+    chosen = arg;
+  }
+  if (!path.isAbsolute(chosen)) {
+    process.stderr.write(`[get-cred] dsh 数据目录必须是绝对路径，收到 ${JSON.stringify(chosen)}\n`);
+    process.exit(1);
+  }
+  return chosen;
 }
 
 /** 取值过程中遇到的坏消息（文件损坏/权限）；只在最终失败时一并报出，
@@ -113,17 +125,29 @@ function isNotFound(error) {
  */
 function yamlErrorDetail(error) {
   if (error instanceof Error) {
-    // js-yaml 的 YAMLException 覆盖了 toString(compact)：传 true 走紧凑分支。
-    // 别的 Error 会忽略这个参数，返回普通的 "Name: message"，同样不含 snippet。
+    // js-yaml 的 YAMLException 覆盖了 toString(compact)：传 true 走紧凑分支，
+    // 只有这一条路不带 snippet。别的 Error 会忽略这个参数，返回普通的
+    // "Name: message"，同样不含出错点邻域的原文。
     const compact = error.toString(true);
     if (typeof compact === "string" && compact !== "") {
       return compact;
     }
-    return error.message;
+    // 拿不到紧凑形态时**不能**退回 error.message：js-yaml 构造器里赋的就是
+    // this.message = formatError(this, false)，那份 message 正是带 snippet 的
+    // 那一条。改用 reason + 行列定位自行拼装，两者都不含原文。
+    const reason = typeof error.reason === "string" ? error.reason : "";
+    const { mark } = error;
+    const line = isRecord(mark) ? mark.line : undefined;
+    const column = isRecord(mark) ? mark.column : undefined;
+    const located =
+      typeof line === "number" && typeof column === "number"
+        ? ` (line:${line + 1}, column:${column + 1})`
+        : "";
+    return `${reason}${located}`;
   }
-  // 兜底也不能用 String(error)：error 是 unknown，非字符串时会被隐式走
-  // Object.prototype.toString，产出 "[object Object]" 这种毫无信息量的文本。
-  return error instanceof Error ? error.message : "";
+  // 到这里 error 不是 Error 实例：String(error) 会隐式走 Object.prototype.toString
+  // 产出 "[object Object]" 这种毫无信息量的文本，直接给空串。
+  return "";
 }
 
 function fromCredentialsDoc(credPath, refName) {
@@ -146,8 +170,21 @@ function fromCredentialsDoc(credPath, refName) {
     }
   }
   const refs = isRecord(doc) ? doc.refs : undefined;
-  const value = isRecord(refs) ? refs[refName] : undefined;
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+  let value = isRecord(refs) ? refs[refName] : undefined;
+  if (value !== undefined && typeof value !== "string") {
+    // 只报形状，绝不把值本身写进 problems（明文不落日志）。refs.<REF> 被写成
+    // 数字/布尔/映射时若静默当「没有值」，用户改了托管文档却拿到下一层的旧值，
+    // 全程零提示。
+    problems.push(
+      `凭证文件 refs.${refName} 不是字符串（是 ${Array.isArray(value) ? "数组" : typeof value}）：${credPath}`,
+    );
+    value = undefined;
+  }
+  // OCR 的 api_key_cmd 契约只认**单行** stdout（空/多行都是硬错误）。托管文档里
+  // 引号内的空白与块标量（| / >）分别产出空白值与多行值：交给 OCR 只会换来隔了
+  // 一层的「resolve LLM endpoint」报错，而这一层本可以当没有值、继续往下回退。
+  const key = typeof value === "string" ? value.trim() : "";
+  return key !== "" && !/[\r\n]/u.test(key) ? key : undefined;
 }
 
 /**
@@ -157,8 +194,13 @@ function fromCredentialsDoc(credPath, refName) {
  */
 function unquotedValue(raw) {
   const trimmed = raw.trim();
-  const quoted = trimmed.length > 1 && (trimmed.startsWith('"') || trimmed.startsWith("'"));
-  return quoted ? trimmed.slice(1, -1) : trimmed;
+  const [first] = trimmed;
+  // 只有首尾**配对**的引号才剥。单边引号是用户写坏了，硬砍首尾等于把凭据改短
+  // 一位，拿一个错 key 去打上游（401），比报「未配置」难排查得多。
+  if (trimmed.length > 1 && (first === '"' || first === "'") && trimmed.endsWith(first)) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
 }
 
 /**
@@ -178,7 +220,10 @@ function fromUserDotEnv(envPath, refName) {
   }
   const pattern = new RegExp(`^\\s*(?:export\\s+)?${refName}\\s*=\\s*(?<value>.*)$`, "u");
   let hit = "";
-  for (const line of (text ?? "").split("\n")) {
+  // 按 /\r?\n/ 拆而不是 "\n"：上面那条正则的 `.*` 不匹配 \r、`$` 又要求串尾，
+  // 而按 "\n" 拆出来的 CRLF 行每行都带尾随 \r，于是每一行都匹配不上——整个 .env
+  // 层对所有 key 静默失配，用户只看到隔了一层的「取不到凭据」。
+  for (const line of (text ?? "").split(/\r?\n/u)) {
     const value = unquotedValue(pattern.exec(line)?.groups?.value ?? "");
     if (value.length > 0) {
       hit = value;

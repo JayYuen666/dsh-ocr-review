@@ -102,6 +102,19 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     expect(res.stderr).toMatch(/\(\d+:\d+\)/u);
   });
 
+  it("数据目录是相对路径 ⇒ 直接非零退出，不去读被审查仓库下的 .dsh", async () => {
+    // 本脚本的 cwd 是 OCR 当时所在的那个仓库。相对路径会被解析成 <被审查仓库>/.dsh/…，
+    // 那正是文件头声明要避免的「拿被审查仓库里的文件当用户凭据」；猜不出用户指的是
+    // 哪个目录就不猜，而不是照着 cwd 拼一个出来。
+    const res = await runCred(["OCR_TEST_KEY", "relative/.dsh"], {
+      HOME: ROOT,
+      DSH_HOME: undefined,
+    });
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe("");
+    expect(res.stderr).toContain("必须是绝对路径");
+  });
+
   it("非法 ref 名直接拒绝，不读任何文件", async () => {
     const res = await runCred(["bad;rm -rf"], { HOME: ROOT, DSH_HOME: undefined });
     expect(res.code).toBe(1);

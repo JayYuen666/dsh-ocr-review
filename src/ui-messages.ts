@@ -5,7 +5,9 @@
 // （`ctx.locale.register(ns, dicts)`，一次交齐两语）+ `ctx.locale.bind(ns)`，语言切换由
 // 宿主驱动、无需重载页面（见 client-entry.ts 的 apply）。键集之所以能由官方表达式给出，
 // 靠的是本文件把 `ocr-review` merge 进了官方 `LocaleNamespaceMap`（见下面）。
-// 插值不放进字典（官方字典是扁平字符串表）：带变量的整行由调用点用固定模板 + 本表片段拼。
+// 插值留在字典里：官方字典是扁平字符串表，`t(key, params)` 的 `{name}` 语法是官方
+// 能力，所以带变量的整行（currentConfig / applied / loadProvidersFailed /
+// readProvidersFailed / saveRefused）直接在本表留占位符，由调用点传 params，不在调用点拼模板。
 //
 // 不在此列的中文：`{ value: "中文", label: "中文" }` 那一行——value 是写进
 // config.language 并透传给外部 ocr CLI 的枚举值，label 是语言的自称（任何界面语言
@@ -33,6 +35,8 @@ export interface UiMessages {
   readonly revert: string;
   /** 保存失败前缀（后接错误摘要）。 */
   readonly saveFailed: string;
+  /** 宿主拒收/跳过的字段整行（{fields} 为逗号分隔的字段名）。 */
+  readonly saveRefused: string;
   /** providers 端点请求失败整行（含原因与自救提示）。 */
   readonly loadProvidersFailed: string;
   /** providers 首次加载中的占位。 */
@@ -174,7 +178,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
   zh: {
     cardTitle: "open-code-review 代码审查",
     cardDescription:
-      "ocr 工具配置：选择 provider/model 应用到 OCR（key 走 api_key_cmd 动态读取，不落明文）+ 审查参数设置",
+      "ocr 工具配置：选择 provider/model 应用到 OCR（应用后 key 由 api_key_cmd 动态读取，不再写入明文）+ 审查参数设置",
     statusReadOnly: "当前作用域只读",
     statusDirty: "有未保存的修改，点「保存」生效",
     statusClean: "无未保存的修改",
@@ -182,6 +186,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "保存中…",
     revert: "撤销",
     saveFailed: "保存失败：",
+    saveRefused: "未写入（宿主拒收或跳过）：{fields}",
     loadProvidersFailed: "加载 providers 失败：{error}（端点未就绪？重启 dsh 后重试）",
     loadingProviders: "加载 providers…",
     noKeySuffix: "（未配置 key）",
@@ -235,7 +240,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
   en: {
     cardTitle: "open-code-review code review",
     cardDescription:
-      "ocr tool setup: pick a provider/model and apply it to OCR (keys are read dynamically via api_key_cmd, never stored in plain text) + review parameters",
+      "ocr tool setup: pick a provider/model and apply it to OCR (once applied, keys are read dynamically via api_key_cmd and no longer written in plain text) + review parameters",
     statusReadOnly: "This scope is read-only",
     statusDirty: "Unsaved changes — press Save to apply",
     statusClean: "No unsaved changes",
@@ -243,6 +248,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saving: "Saving…",
     revert: "Revert",
     saveFailed: "save failed: ",
+    saveRefused: "not written (host refused or skipped): {fields}",
     loadProvidersFailed:
       "failed to load providers: {error} (endpoint not ready? restart dsh and retry)",
     loadingProviders: "loading providers…",

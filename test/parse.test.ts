@@ -524,6 +524,32 @@ describe("delegate 解析的失败与降级分支", () => {
       { groupId: 2, source: "", pattern: "", files: ["a.ts"], rule: "r" },
     ]);
   });
+
+  it("rule：分组一条都解析不出来 ⇒ ok:false（不是「0 个规则分组」）", () => {
+    // 部分分组解析不出来照旧放行，但全灭时继续报 ok:true + 空分组，模型与用户都会把
+    // 半截产出当成范围结论——与 preview 的同款门。
+    expect(parseDelegateRules('{"groups":[{"group_id":1}]}')).toStrictEqual({
+      ok: false,
+      groups: [],
+    });
+    // files 全是非字符串项时 str() 会造出 "1" / "[object Object]" 这类凭空文件名，
+    // 这里整组判不可用。
+    expect(parseDelegateRules('{"groups":[{"rule":"r","files":[1,null,{}]}]}')).toStrictEqual({
+      ok: false,
+      groups: [],
+    });
+  });
+
+  it("preview：excluded_files 条目全废 ⇒ ok:false（不是「没有排除项」）", () => {
+    // 与 reviewable_files 同款门：条目一个都没解析出来时，那是半截产出，不能以
+    // ok:true 的形态报「排除项为空」。
+    expect(parseDelegatePreview('{"mode":"commit","excluded_files":[7]}').ok).toBe(false);
+    expect(parseDelegatePreview('{"mode":"commit","excluded_files":[{"reason":"x"}]}').ok).toBe(
+      false,
+    );
+    // 合法空数组仍然放行。
+    expect(parseDelegatePreview('{"mode":"commit","excluded_files":[]}').ok).toBe(true);
+  });
 });
 
 // ── i18n：解析文案取自注入的消息表（换那份 = 换语言）─────────────────────────

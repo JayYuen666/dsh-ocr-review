@@ -137,9 +137,8 @@ export interface BuiltCommand {
  * 负数/非整数由 OCR 侧报错，但桥接层先做同源校验给出更早的错误）。
  * value 为 undefined/null 时省略 flag（跟随 OCR flag 默认值）。
  *
- * 注入面：数值经 `String(num)` 落进命令串（不走 shq）。Number.isInteger 对
- * 1e21 为 true 而 String() 会写成 `1e+21`，故再加一道「只含数字」的形态校验：
- * 命令串里的数值 token 结构上不可能带 shell 元字符。
+ * 注入面：数值经 `String(num)` 落进命令串（不走 shq）。数值 token 结构上不可能带
+ * shell 元字符，「只含数字」的形态校验顺带把 1e21 写成 `1e+21` 这类形态也挡住。
  */
 function pushIntFlag(
   parts: string[],
@@ -151,9 +150,7 @@ function pushIntFlag(
   if (value === undefined || value === null) {
     return;
   }
-  const num = typeof value === "number" ? value : Number(value);
-  const text = String(num);
-  if (!Number.isInteger(num) || num < min || !/^\d+$/u.test(text)) {
+  const reject = (): never => {
     throw new Error(
       format(messages.intFlagMustBeInt, {
         flag,
@@ -161,6 +158,19 @@ function pushIntFlag(
         received: describeValue(value),
       }),
     );
+  };
+  // 只接受 number 与纯十进制数字串（口径与本文件的 sessionLimit 一致）：`Number()`
+  // 会把 true 当 1、把 [] 当 0、把 ["5"] 当 5，于是 `{timeoutMinutes: false}` 静默变成
+  // `--timeout 0`，而 OCR 侧 0 的语义是「不限时」——错类型悄悄改掉的是「有没有超时
+  // 上限」，比报错危险得多。
+  const decimalString = typeof value === "string" && /^\d+$/u.test(value.trim());
+  if (typeof value !== "number" && !decimalString) {
+    reject();
+  }
+  const num = Number(value);
+  const text = String(num);
+  if (!Number.isSafeInteger(num) || num < min || !/^\d+$/u.test(text)) {
+    reject();
   }
   parts.push(flag, text);
 }

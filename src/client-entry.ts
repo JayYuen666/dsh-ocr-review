@@ -196,9 +196,9 @@ export interface ProvidersPayload {
  * 入口是 `ctx.configForms.get(entryId)`，`entryId` 即 profile 条目 id = 本包命名空间。
  * 本卡依赖的两条：
  *  - `set`/`unset` 多带回**受理位**：`true` 宿主受理，`false` = 拒绝或写入被跳过，只有传输
- *    失败才 reject。本卡维持既有行为：失败面只认 rejection，受理位 await 后即弃（见 apply 里
- *    的 payload）——消费它要新增文案键与判定，属改行为而不是迁移（session-rescue /
- *    quality-gate / danger-guard / ctx-observe 同一条纪律）。
+ *    失败才 reject。本卡两条都认：受理位回传到 `saveSettingsDraft`，`false` 的字段留在
+ *    touched 上并报出（见下面 saveRefused 文案键）；把受理位丢掉会让「宿主没写盘」显示成
+ *    「已保存」，用户无从分辨。
  *  - 交回的表单**没有 `dispose()`**：那是 provider 自己持有的共享表单，消费者无从销毁。 */
 export type EntryForm = ConfigForm<Record<string, unknown>>;
 
@@ -398,8 +398,11 @@ function OcrPluginCard(props: {
     chevron,
   );
   const body = open ? createElement("div", { className: "ocr-card-body" }, children) : null;
+  // 根节点是 div 而不是 li：宿主把本卡放进 PackageDetail 的 <section data-plugin-config>
+  // 与 SlotOutlet 的 <div data-slot>，两处都不是列表，li 在此是非法嵌套。本卡靠 class 画
+  // 外观，不需要列表语义。
   return createElement(
-    "li",
+    "div",
     { className: `ocr-card${open ? " ocr-card-open" : ""}` },
     header,
     body,
@@ -1083,10 +1086,13 @@ interface SaveDraftDeps {
   setTouched: (next: Record<string, unknown>) => void;
   setSettingsBusy: (busy: boolean) => void;
   setSaveError: (message: string | null) => void;
-  set: (field: string, value: unknown) => void | Promise<void>;
+  set: (field: string, value: unknown) => boolean | Promise<boolean>;
 }
 
-/** 只写差异字段：touched 值为 undefined → 写 null（= 清回 schema 默认）。 */
+/** 只写差异字段：touched 值为 undefined → 写 null（= 清回 schema 默认）。
+ *  受理位必须回来：`set` 回 `false` 表示宿主拒收或跳过了这次写入（值没落盘），
+ *  这时不能清 touched、也不能报成功——否则用户看到「已保存」而配置原封未动。
+ *  传输失败仍以 rejection 表达。 */
 async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   const { t, value, touched } = deps;
   const keys = diffTouched(touched, value);
@@ -1097,11 +1103,16 @@ async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   deps.setSaveError(null);
   const ops = keys.map(async (field: string) => {
     const draft = touched[field];
-    await deps.set(field, draft === undefined ? null : draft);
+    return deps.set(field, draft === undefined ? null : draft);
   });
   try {
-    await Promise.all(ops);
+    const settled = await Promise.all(ops);
     deps.setSettingsBusy(false);
+    const refused = keys.filter((_field, index) => settled[index] !== true);
+    if (refused.length > 0) {
+      deps.setSaveError(t("saveRefused", { fields: refused.join(", ") }));
+      return;
+    }
     deps.setTouched({});
   } catch (error: unknown) {
     deps.setSettingsBusy(false);
@@ -1295,7 +1306,7 @@ export interface CardSlotProps {
   /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
   t: Translate;
   useCard: <TResult>(selector: (snap: CardSnapshot) => TResult) => TResult;
-  set: (field: string, value: unknown) => void | Promise<void>;
+  set: (field: string, value: unknown) => boolean | Promise<boolean>;
 }
 
 /**
@@ -1404,13 +1415,8 @@ function apply(ctx: ClientCtx): void {
         inject: () => ({
           t,
           hooks: { card: store },
-          set: async (field: string, value: unknown): Promise<void> => {
-            try {
-              await scope.set(field, value);
-            } catch (error) {
-              console.error(`[ocr-review-card] set ${field} failed:`, error);
-            }
-          },
+          set: (field: string, value: unknown): boolean | Promise<boolean> =>
+            scope.set(field, value),
         }),
       },
       OcrCard,
