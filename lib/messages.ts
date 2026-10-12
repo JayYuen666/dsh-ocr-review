@@ -48,7 +48,7 @@ export interface OcrReviewMessages {
   // ── 官方作业面（ctx.jobs）：写进模型可见 detail / 环里的说明 ──────────────
   /** 工具调用被中止时 `job_kill` 的理由（模型侧 job_output 读得到）。 */
   readonly jobReasonAborted: string;
-  /** 兜底 deadline 到点时 `job_kill` 的理由。 */
+  /** 兜底 deadline 到点时 `job_kill` 的理由（{minutes} = 实际窗口的分钟数）。 */
   readonly jobReasonTimeout: string;
   /** 插件卸载时 `job_kill` 的理由。 */
   readonly jobReasonUnload: string;
@@ -137,6 +137,11 @@ export interface OcrReviewMessages {
   readonly configPathLayoutInvalid: string;
   readonly noApiKeyEnv: string;
   readonly keyNotResolvable: string;
+  /**
+   * key 存在于 OCR 运行时不可达的凭据层（{source}）：宿主 resolve 得到、OCR 子进程
+   * 取不到（宿主净化环境 / get-cred 刻意不读被审查仓库）。写盘前拒绝的假绿闸。
+   */
+  readonly keyNotReachable: string;
   readonly credScriptMissing: string;
   /** 收割器降级：进程信息命令不可用，已把进程树交回宿主管（stderr 只报一次，不每轮刷）。 */
   readonly reaperDegraded: string;
@@ -216,11 +221,11 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "启动即可读，一定有结果；要停它就 job_kill(job_id=<同一 id>)。会话落盘后再走 ocr_session：" +
       "ocr_session(action=list) 找本仓库最新会话（启动几秒后出现，按 scanPaths/时间匹配）；" +
       "completed_files == selected_files 即已完成；再 ocr_session(action=comments, id) 取全部评论、" +
-      "ocr_session(action=show, id) 看元数据与逐文件检查点。后台运行不设宿主超时，只在 2 小时" +
-      "后兜底回收（挂死不动会一直占着官方作业桶），取消本工具调用即终止该后台 OCR" +
-      "（宿主 kill + 命令内回收守护）。",
+      "ocr_session(action=show, id) 看元数据与逐文件检查点。后台运行不设宿主超时，只在兜底窗口" +
+      "（ocrBackgroundMaxMs，默认 2 小时）到点后回收（挂死不动会一直占着官方作业桶），" +
+      "取消本工具调用即终止该后台 OCR（宿主 kill + 命令内回收守护）。",
     jobReasonAborted: "ocr-review 工具调用被中止",
-    jobReasonTimeout: "ocr-review 后台评审超过 2 小时，兜底回收",
+    jobReasonTimeout: "ocr-review 后台评审超过兜底窗口（{minutes} 分钟），兜底回收",
     jobReasonUnload: "ocr-review 插件卸载",
     jobOutputGap: "\n[ocr-review] 注意：有一次输出读取失败，已按原游标重试（这段可能不完整）",
     requiredNotArray: "parameters.required 必须是字符串数组",
@@ -297,6 +302,11 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     noApiKeyEnv:
       "provider {provider} 未声明 apiKeyEnv，无法动态读取 key（OCR 自定义 provider 不支持无 key 解析）",
     keyNotResolvable: "provider {provider} 的 API key 未配置：dsh 凭据服务未解析到 {ref}",
+    keyNotReachable:
+      "provider {provider} 的 API key 存在于凭据层「{source}」，OCR 运行时取不到它：" +
+      "dsh 起 shell 会剥掉名字含 KEY/PASSWORD/SECRET/TOKEN 或 DSH_ 前缀的环境变量，" +
+      "get-cred 也刻意不读被审查仓库的 .env。请把 key 存入 dsh 托管凭据" +
+      "（$DSH_HOME/.credentials.yaml 的 refs.{ref}）或 $DSH_HOME/.env 后重试",
     credScriptMissing: "get-cred 脚本缺失：{path}（api_key_cmd 无法工作）",
     reaperDegraded:
       "[ocr-review] 宿主回收守护已降级：ps/pgrep 不可用（进程信息命令被沙箱拒绝），改由宿主管进程树。" +
@@ -333,7 +343,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramExclude: "gitignore 风格排除模式（可多值）",
     paramExcludeShort: "排除模式",
     paramWait:
-      "true（缺省）=等待完成并返回聚合摘要；false=后台启动立即返回（2 小时后兜底回收），用 ocr_session 轮询结果。两种模式都带宿主回收守护：dsh 退出（含 kill -9）时 OCR 进程一并结束",
+      "true（缺省）=等待完成并返回聚合摘要；false=后台启动立即返回（兜底窗口 " +
+      "ocrBackgroundMaxMs 默认 2 小时），用 ocr_session 轮询结果。两种模式都带宿主回收守护：" +
+      "dsh 退出（含 kill -9）时 OCR 进程一并结束",
     paramProvider: "本次运行临时指定已配置 provider",
     paramModel: "本次运行临时覆盖 model",
     paramResume: "从之前中断的会话 id 恢复（会话 id 在返回结果里）",
@@ -402,11 +414,13 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "repository's newest session (it appears a few seconds after start; match by scanPaths/time); " +
       "completed_files == selected_files means it is done. Then ocr_session(action=comments, id) for " +
       "all comments and ocr_session(action=show, id) for metadata " +
-      "and per-file checkpoints. Background runs get reclaimed by a 2-hour backstop (a wedged one would " +
+      "and per-file checkpoints. Background runs get no host timeout; they are reclaimed when the " +
+      "backstop window (ocrBackgroundMaxMs, 2 hours by default) elapses (a wedged one would " +
       "otherwise keep occupying the official job bucket); cancelling this tool call terminates " +
       "the background OCR (host kill + the reaper guard inside the command).",
     jobReasonAborted: "ocr-review tool call aborted",
-    jobReasonTimeout: "ocr-review background review exceeded 2 hours and was reclaimed",
+    jobReasonTimeout:
+      "the ocr-review background review exceeded its backstop window ({minutes} minutes) and was reclaimed",
     jobReasonUnload: "ocr-review plugin unloaded",
     jobOutputGap:
       "\n[ocr-review] note: one output read failed and was retried from the same offset (this stretch " +
@@ -497,6 +511,12 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "provider {provider} declares no apiKeyEnv, so the key cannot be read dynamically (OCR custom providers do not support keyless resolution)",
     keyNotResolvable:
       "the API key of provider {provider} is not configured: the dsh credentials service resolved no {ref}",
+    keyNotReachable:
+      'the API key of provider {provider} lives in the credential source "{source}", which OCR ' +
+      "cannot reach at runtime: dsh strips variables named KEY/PASSWORD/SECRET/TOKEN or prefixed " +
+      "DSH_ from spawned shells, and get-cred deliberately does not read the reviewed repository's " +
+      ".env. Store the key in the dsh managed credentials ($DSH_HOME/.credentials.yaml refs.{ref}) " +
+      "or $DSH_HOME/.env and retry",
     credScriptMissing: "get-cred script missing: {path} (api_key_cmd cannot work)",
     reaperDegraded:
       "[ocr-review] host reaper degraded: ps/pgrep are unavailable (process-info commands denied by " +
@@ -559,7 +579,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramExcludeShort: "Exclusion patterns",
     paramWait:
       "true (default) = wait for completion and return the aggregated summary; false = start in the " +
-      "background and return immediately (a 2-hour backstop reclaims it), poll with ocr_session. Both " +
+      "background and return immediately (reclaimed when the backstop window ocrBackgroundMaxMs, " +
+      "2 hours by default, elapses), poll with ocr_session. Both " +
       "modes carry the host reaper guard: when dsh exits (including kill -9) the OCR process is terminated too",
     paramProvider: "Temporarily use a configured provider for this run",
     paramModel: "Temporarily override the model for this run",

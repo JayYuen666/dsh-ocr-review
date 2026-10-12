@@ -11,11 +11,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      # action 按 tag 引用意味着上游动 tag 就等于本仓换了构建器。钉 commit SHA，
+      # tag 版本写在同行注释里，升级时照着改这一行即可。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 12
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -49,10 +51,21 @@ jobs:
           [ "$code" = "200" ] || exit 1
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
-      # prepack 会重建 host.js/client.js/dist，产物不入库也发得出去
-      # 凭据走 NODE_AUTH_TOKEN：setup-node 配了 registry-url 之后会设
-      # NPM_CONFIG_USERCONFIG 指向它自己生成的那份 .npmrc，npm 只读那一份，
-      # $HOME/.npmrc 会被完全忽略——所以 token 必须以环境变量注入，不能写文件。
-      - run: pnpm publish --no-git-checks --access public
+      # prepack 会重建 host.js/client.js，产物不入库也发得出去。
+      # 凭据两条路：配了 NPM_TOKEN 就经 NODE_AUTH_TOKEN 注入；没配就交给 OIDC。
+      # setup-node 配了 registry-url 之后会设 NPM_CONFIG_USERCONFIG 指向它自己生成的那份
+      # .npmrc，npm 只读那一份，$HOME/.npmrc 会被完全忽略——所以 token 必须以环境变量注入，
+      # 不能写文件。publish 那步的 if 也不能省：把 NODE_AUTH_TOKEN 设成空串会顶掉
+      # setup-node 注入的那一份，而 OIDC 那条路本来就不该看到它。
+      # --provenance：上面的 id-token: write 就是给它用的，不加等于白拿 OIDC；
+      # 消费方在 npm 页面就能看到这一版是从哪个仓库、哪次构建出来的。
+      # --publish-wait-timeout：等 registry 真正放出这个版本并对 tarball 回 HEAD，
+      # 于是「发出去了但装不上」在 workflow 里就红，而不是等用户报障才发现。
+      - name: 发布
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+          fi
+          pnpm publish --no-git-checks --access public --provenance --publish-wait-timeout 600000

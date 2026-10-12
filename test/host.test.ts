@@ -57,6 +57,7 @@ const HOST_MODULE = await import("../host.ts");
 const {
   default: plugin,
   createGateway,
+  isLoopbackBindAddress,
   ocrRepo,
   parseJsonBody,
   registerConfigEndpoints,
@@ -66,6 +67,7 @@ const {
 // host 侧双语：直接被单测调到的两个纯函数按「host 注入哪一份」显式传表，
 // 其余文案走 apply 的官方 locale 偏好替身（makeHost({ locale: { preference } })）。
 const { zh } = MESSAGES;
+const { format } = await import("../lib/messages.ts");
 
 const OCR_CONFIG = path.join(HOME, OCR_DIR_NAME, OCR_CONFIG_NAME);
 const CSRF_HEADER = "x-ocr-csrf";
@@ -579,8 +581,9 @@ interface FakeHost {
 /** 宿主替身的可选项：两个官方通道的装配状态与回答。 */
 interface FakeHostOptions {
   webServer?: boolean;
-  /** webServer 服务替身的 `host` 成员（官方唯一可读的非回环信号）。缺省 = undefined，
-   *  即"没声明绑到哪张网卡"；给 `"0.0.0.0"` 才让 `servingNonLoopback` 那道锁真的合上。 */
+  /** webServer 服务替身的 `host` 成员（具体 IP 字面量，config 层拒绝通配）。
+   *  缺省 = `"127.0.0.1"`（回环，`servingNonLoopback` 断开）；给 LAN IP 才让
+   *  `isLoopbackBindAddress` 判成非回环、trust 闸放行局域网 Host 头。 */
   webServerHost?: string;
   /** false ⇒ get("settings") 拿不到服务（未装配 settings 的 profile）。 */
   settingsService?: boolean;
@@ -725,9 +728,10 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
               }
             };
           },
-          // 官方唯一可读的非回环信号（同包 d.ts `:50`）：host 成员不给，`servingNonLoopback`
-          // 就永为 false，那道锁在接线层面从没被拨开过。
-          host: options.webServerHost,
+          // 官方 `Config['host']` 是**必有**的具体 IP 字面量（config 层拒绝通配与
+          // 非字面量），替身缺省给回环 127.0.0.1 与现实一致；要测非回环面就用
+          // `webServerHost` 显式给 LAN IP（isLoopbackBindAddress 据此放行局域网 Host）。
+          host: options.webServerHost ?? "127.0.0.1",
         };
       } else if (name === "settings" && options.settingsService !== false) {
         settingsLookups += 1;
@@ -2018,9 +2022,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       proc?.settle();
       await settledTick();
       // 与上面"取消经注册表收"那条同形：整串钉死（生产者结局 + 注册表追加的 reason），reason
-      // 取字典。原先只 `toContain("超过 2 小时")` 是字典值的一段 ⇒ 拼接次序坏了也不会红。
+      // 按实际兜底窗口换算（默认 7200000ms ⇒ 120 分钟，不再写死"2 小时"）。原先只
+      // `toContain(...)` 是字典值的一段 ⇒ 拼接次序坏了也不会红。
       expect(host.jobs.get(onlyJob(job)).detail).toBe(
-        `killed before exit; ${MESSAGES.zh.jobReasonTimeout}`,
+        `killed before exit; ${format(MESSAGES.zh.jobReasonTimeout, { minutes: "120" })}`,
       );
     });
 
@@ -2762,37 +2767,37 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       expect(gateway.descriptors().map((descriptor) => descriptor.ns)).toContain("llm-pi-ai");
     });
 
-    it("credentialConfigured 走 describe、credentialResolvable 走 resolve，两者都只回布尔", async () => {
+    it("credentialConfigured 走 describe、credentialSource 走 resolve，只回存在性/层 id", async () => {
       const host = makeHost();
       const gateway = createGateway(host as unknown as GatewayArg);
       await expect(gateway.credentialConfigured("AMD_API_KEY")).resolves.toBe(true);
-      await expect(gateway.credentialResolvable("AMD_API_KEY")).resolves.toBe(true);
+      await expect(gateway.credentialSource("AMD_API_KEY")).resolves.toBe("file");
       await expect(gateway.credentialConfigured("MISSING_KEY")).resolves.toBe(false);
-      await expect(gateway.credentialResolvable("MISSING_KEY")).resolves.toBe(false);
+      await expect(gateway.credentialSource("MISSING_KEY")).resolves.toBeUndefined();
       expect(host.describedRefs).toStrictEqual(["AMD_API_KEY", "MISSING_KEY"]);
       expect(host.resolvedRefs).toStrictEqual(["AMD_API_KEY", "MISSING_KEY"]);
     });
 
-    it("服务缺席时两个凭据问题一律回 false（不抛）", async () => {
+    it("服务缺席时两个凭据问题一律降级（false / undefined，不抛）", async () => {
       const gateway = createGateway(
         makeHost({ credentialsService: false }) as unknown as GatewayArg,
       );
       await expect(gateway.credentialConfigured("AMD_API_KEY")).resolves.toBe(false);
-      await expect(gateway.credentialResolvable("AMD_API_KEY")).resolves.toBe(false);
+      await expect(gateway.credentialSource("AMD_API_KEY")).resolves.toBeUndefined();
     });
 
     it("不合 ref 语法的名不去烦凭据服务（官方 isCredentialRefName 的语义）", async () => {
       const host = makeHost();
       const gateway = createGateway(host as unknown as GatewayArg);
       await expect(gateway.credentialConfigured("9BAD-KEY")).resolves.toBe(false);
-      await expect(gateway.credentialResolvable("")).resolves.toBe(false);
+      await expect(gateway.credentialSource("")).resolves.toBeUndefined();
       expect(host.describedRefs).toStrictEqual([]);
       expect(host.resolvedRefs).toStrictEqual([]);
     });
 
     it("resolve 命中但值为空串 ⇒ 按未配置处理（凭据层「空值即不存在」的同款规则）", async () => {
       const gateway = createGateway(makeHost({ emptyValue: true }) as unknown as GatewayArg);
-      await expect(gateway.credentialResolvable("AMD_API_KEY")).resolves.toBe(false);
+      await expect(gateway.credentialSource("AMD_API_KEY")).resolves.toBeUndefined();
     });
 
     it("凭据服务 describe 抛错 ⇒ 与「未配置」同一降级面，不外抛成 500", async () => {
@@ -2800,9 +2805,9 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       await expect(gateway.credentialConfigured("AMD_API_KEY")).resolves.toBe(false);
     });
 
-    it("凭据服务 resolve 抛错 ⇒ 按不可解析处理（应用据此拒绝，热路径不炸）", async () => {
+    it("凭据服务 resolve 抛错 ⇒ 按未配置处理（应用据此拒绝，热路径不炸）", async () => {
       const gateway = createGateway(makeHost({ credentialsReject: true }) as unknown as GatewayArg);
-      await expect(gateway.credentialResolvable("AMD_API_KEY")).resolves.toBe(false);
+      await expect(gateway.credentialSource("AMD_API_KEY")).resolves.toBeUndefined();
     });
   });
 
@@ -3231,12 +3236,29 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 4 个 webServer 端点
       const refused = await get(loopbackOnly, PROVIDERS_PATH, headers);
       expect(refused.statusCode).toBe(403);
       expect(refused.body).toMatch(/untrusted host/u);
-      // 声明绑了 0.0.0.0 ⇒ 同一个请求过闸门，往后是 providers 的正常应答。
-      const bound = makeHost({ webServerHost: "0.0.0.0" });
+      // 声明绑了具体 LAN IP（宿主 config 唯一允许的非回环形态——0.0.0.0/:: 会被
+      // config 拒绝）⇒ 同一个请求过闸门，往后是 providers 的正常应答。
+      const bound = makeHost({ webServerHost: "192.168.1.7" });
       applyPlugin(bound);
       const allowed = await get(bound, PROVIDERS_PATH, headers);
       expect(allowed.statusCode).toBe(200);
       expect(bodyOf(allowed)["csrf"]).toMatch(/[0-9a-f-]{36}/u);
+    });
+
+    it("isLoopbackBindAddress：回环各形态判真，LAN IP / 全零判假（host config 只收 IP 字面量）", () => {
+      expect(isLoopbackBindAddress("127.0.0.1")).toBe(true);
+      expect(isLoopbackBindAddress("127.9.9.9")).toBe(true);
+      expect(isLoopbackBindAddress("::1")).toBe(true);
+      expect(isLoopbackBindAddress("::1%lo0")).toBe(true);
+      expect(isLoopbackBindAddress("0:0:0:0:0:0:0:1")).toBe(true);
+      expect(isLoopbackBindAddress("::ffff:127.0.0.1")).toBe(true);
+      expect(isLoopbackBindAddress("192.168.1.7")).toBe(false);
+      expect(isLoopbackBindAddress("::ffff:192.168.1.7")).toBe(false);
+      expect(isLoopbackBindAddress("::2")).toBe(false);
+      // 宿主 config 会拒绝的值（通配/主机名）不在判定域内，但函数不该炸：
+      expect(isLoopbackBindAddress("0.0.0.0")).toBe(false);
+      expect(isLoopbackBindAddress("::")).toBe(false);
+      expect(isLoopbackBindAddress("localhost")).toBe(false);
     });
   });
 

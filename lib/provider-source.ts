@@ -55,8 +55,15 @@ export interface DshConfigGateway {
   descriptors: () => ProviderDescriptor[];
   /** credentials.describe(ref).configured：卡片判断「有没有 key」，值不经手。 */
   credentialConfigured: (envKey: string) => Promise<boolean>;
-  /** credentials.resolve(ref) 是否命中：应用前确认 OCR 侧真拿得到 key。 */
-  credentialResolvable: (envKey: string) => Promise<boolean>;
+  /**
+   * credentials.resolve(ref) 的 **source 层 id**（值本身不经手、当场丢弃）：
+   * `undefined` = 未配置 / 服务缺席 / ref 语法非法。
+   *
+   * 为什么是层 id 而不是布尔：宿主侧 resolve 得到值 ≠ OCR 运行时取得到——
+   * dsh 起 shell 会净化环境（见 lib/ocr-config.ts 的 keyReachableAtOcrRuntime），
+   * apply/migrate 需要按层判定可达性，把「select 成功 → OCR 401」的假绿拦在写盘前。
+   */
+  credentialSource: (envKey: string) => Promise<string | undefined>;
 }
 
 /** provider 数据源状态；非 ready 时 message 是给用户看的不可用原因。 */

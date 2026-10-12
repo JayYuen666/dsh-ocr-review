@@ -80,8 +80,22 @@ export function readText(configPath: string): string {
   }
 }
 
-/** 单引号转义（api_key_cmd 内嵌命令用，模块级纯函数）。 */
+/**
+ * api_key_cmd 内嵌值的转义。POSIX 走单引号（ocr 在 Unix 用 `sh -c` 跑 api_key_cmd，
+ * keycmd_unix.go）；Windows 的 ocr 用 **cmd.exe** 跑它（keycmd_windows.go），单引号
+ * 在那里是普通字符、命令必坏，故走双引号：值内 `"` 翻倍、收尾反斜杠再翻倍（防被
+ * CommandLineToArgvW 当成转义吃掉收尾引号）。ref 名白名单 `^[A-Z0-9_]+$` 不含两种
+ * 引号；脚本与数据目录是盘上常规路径。已知残留：cmd.exe 会对双引号内的 `%VAR%`
+ * 做环境展开，路径含 `%` 的 Windows 部署需自行规避（Windows 非目标平台，此处只
+ * 保证常规路径形态正确）。
+ */
 function shqDyn(value: string): string {
+  if (process.platform === "win32") {
+    const escaped = value
+      .replaceAll('"', '""')
+      .replace(/\\+$/u, (backslashes: string) => backslashes + backslashes);
+    return `"${escaped}"`;
+  }
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 
@@ -175,19 +189,89 @@ function readShqTokens(body: string): string[] | null {
 }
 
 /**
- * api_key_cmd → 三个槽位；只认本包写出的那一种形态。
+ * 读一个 cmd.exe 双引号串：解出它的值与结束位置（`""` 是翻倍的引号）。
+ * 未闭合返回 null：宁可判「读不懂」，也不把半截命令当可信输入。
+ */
+function readDqToken(body: string, start: number): { value: string; next: number } | null {
+  let value = "";
+  let i = start + 1;
+  let closed = false;
+  while (i < body.length && !closed) {
+    const ch = body[i];
+    if (ch === '"' && body[i + 1] === '"') {
+      value += '"';
+      i += 2;
+    } else if (ch === '"') {
+      closed = true;
+      i += 1;
+    } else {
+      value += ch;
+      i += 1;
+    }
+  }
+  if (!closed) {
+    return null;
+  }
+  // 尾部翻倍的反斜杠还原（写侧只对收尾反斜杠翻倍）：2n 个 → n 个。折半对「值本来
+  // 就以偶数个反斜杠结尾」的形态有歧义——写侧的信息不足以区分，接受这一点。
+  const doubled = value.replace(/(?:\\\\)+$/u, (backslashes: string) =>
+    "\\".repeat(backslashes.length / 2),
+  );
+  return { value: doubled, next: i };
+}
+
+/**
+ * cmd.exe 双引号形态的 token 列表（buildApiKeyCmd 的 win32 臂写出的那种：
+ * `node "a" "b" "c"`）；形态不符（裸词 / 未闭合）返回 null。
+ *
+ * 只在 readShqTokens 判 null 之后被调用，而那条路必有非空白内容 ⇒ 循环至少走一轮，
+ * 解析成功的列表至少一枚 token；末尾的 `return tokens` 对实际可达的输入不可能交出
+ * 空列表（parseApiKeyCmd 的 `script === ""` 闸对它另有兜底）。
+ */
+function readDqTokens(body: string): string[] | null {
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < body.length) {
+    while (i < body.length && (body[i] === " " || body[i] === "\t")) {
+      i += 1;
+    }
+    if (i >= body.length) {
+      break;
+    }
+    if (body[i] !== '"') {
+      return null;
+    }
+    const token = readDqToken(body, i);
+    if (token === null) {
+      return null;
+    }
+    tokens.push(token.value);
+    i = token.next;
+  }
+  return tokens;
+}
+
+/**
+ * api_key_cmd → 三个槽位；认本包写出的**两种**形态（POSIX 单引号与 Windows 双引号）。
  *
  * 为什么需要反解：写进 config.json 的脚本路径是**写那一刻**的插件安装目录（绝对
  * 路径），而插件会被重装、换 profile、换发布形态——目录一变，ocr 执行 api_key_cmd
  * 就是 MODULE_NOT_FOUND，而它把这件事报成「resolve LLM endpoint 失败」，错误完全
  * 指不到「本包被挪了地方」这个真因。没有反解就无从判断一条 api_key_cmd 是否还活着。
  *
- * 为什么只认一种形态：认不出来的一律给 undefined，由调用方原样保留。改写一条读不
- * 懂的命令串，可能把用户手写的凭据取用方式弄坏，而那正是本包明令不该插手的部分。
+ * 为什么两种形态都认：config.json 可能跨机迁移（HOME 同步、换部署），反解不能假设
+ * 「写它的平台 = 读它的平台」。POSIX 形态优先判（单引号）；POSIX 判不出且整体是
+ * 双引号形态时再走 cmd.exe 那一档。
+ *
+ * 为什么认不出来一律给 undefined：由调用方原样保留。改写一条读不懂的命令串，可能
+ * 把用户手写的凭据取用方式弄坏，而那正是本包明令不该插手的部分。
  */
 export function parseApiKeyCmd(command: string): ParsedApiKeyCmd | null {
   const body = command.replace(/^node[ \t]+/u, "");
-  const tokens = body === command ? null : readShqTokens(body);
+  if (body === command) {
+    return null;
+  }
+  const tokens = readShqTokens(body) ?? readDqTokens(body);
   if (tokens === null) {
     return null;
   }

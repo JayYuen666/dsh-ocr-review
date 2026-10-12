@@ -25,8 +25,12 @@
 //   env 档同样不可靠。
 //
 // 取值的层序镜像官方 credentials-local 的优先级里**够得到**的那两层：
-//   1. 继承来的进程环境（dsh 的 env 层就是最高层：`DEEPSEEK_API_KEY=… dsh` 时，
-//      OCR 作为孙进程本来就继承得到，过去只读文件反而把它丢了）；
+//   1. 继承来的进程环境。注意：dsh 起 shell 会经 scrubbedParentEnv 剥掉名字命中
+//      KEY/PASSWORD/SECRET/TOKEN 或 DSH_ 前缀的变量——凭据 ref 几乎全中招，所以对
+//      经 dsh shell 起的 OCR，这一层对凭据 ref 实际常为空；它只在 ref 名不被净化
+//      模式命中、或调用链不经 dsh shell（手工在终端跑 ocr）时才有值。宿主侧的
+//      select/migrate 已按同一事实加闸（keyReachableAtOcrRuntime）：key 只存在于
+//      环境层/项目 .env 的配置会在写盘前被拒绝，而不是等 OCR 401。
 //   2. `$DSH_HOME/.credentials.yaml` 的 `refs.<REF>`（version: 1 托管文档，
 //      格式来源 packages/credentials/credentials-local/src/index.ts:169-216）；
 //   3. `$DSH_HOME/.env`（用户级回退层）。

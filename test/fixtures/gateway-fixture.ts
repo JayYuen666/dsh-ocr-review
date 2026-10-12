@@ -19,8 +19,9 @@ export interface GatewayFixtureOptions {
   descriptors?: ProviderDescriptor[];
   /** describe(ref) 回答「已配置」的 ref 名单。 */
   configured?: string[];
-  /** resolve(ref) 能命中值的 ref 名单（名单外一律未命中）。 */
-  resolvable?: string[];
+  /** resolve(ref) 命中值时交出的 **source 层 id**（名单外一律未命中 → undefined）。
+   *  默认全部 `file`（OCR 运行时可达），既有 apply/migrate 用例的行为不变。 */
+  sources?: Record<string, string>;
   /** describe() 抛出的错误值（模拟宿主服务内部故障；非 Error 也要能降级）。 */
   describeThrows?: Error;
 }
@@ -46,13 +47,16 @@ export class NonErrorFault {
 export interface GatewayFixture extends DshConfigGateway {
   /** 被问过「有没有 key」的 ref（卡片侧）。 */
   describedRefs: string[];
-  /** 被问过「能不能解析」的 ref（应用侧）。 */
+  /** 被问过「能不能解析 / 层是什么」的 ref（应用侧）。 */
   resolvedRefs: string[];
 }
 
 export function makeGateway(options: GatewayFixtureOptions = {}): GatewayFixture {
   const configured = options.configured ?? CONFIGURED_REFS;
-  const resolvable = options.resolvable ?? CONFIGURED_REFS;
+  // 默认全部 ref 落在 file 层（OCR 运行时可达）——既有 apply/migrate 用例的
+  // 「ref 都解析得到」行为不变；要测不可达层请显式传 sources。
+  const sources: Record<string, string> =
+    options.sources ?? Object.fromEntries(CONFIGURED_REFS.map((ref) => [ref, "file"]));
   const fixture: GatewayFixture = {
     describedRefs: [],
     resolvedRefs: [],
@@ -67,9 +71,9 @@ export function makeGateway(options: GatewayFixtureOptions = {}): GatewayFixture
       fixture.describedRefs.push(envKey);
       return configured.includes(envKey);
     },
-    credentialResolvable: async (envKey: string) => {
+    credentialSource: async (envKey: string) => {
       fixture.resolvedRefs.push(envKey);
-      return resolvable.includes(envKey);
+      return sources[envKey];
     },
   };
   return fixture;

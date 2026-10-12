@@ -12,7 +12,8 @@
 // 注入防线与此并行，不受语言影响：拼进 argv 的值全部经 shq()，枚举一律白名单钳制，
 // 校验闸的调用位置与抛错先后次序都不因文案迁移而改变。
 //
-// 契约依据（open-codereview.ai/docs；1.12.x 起以源码逐条核对，当前 1.12.10）：
+// 契约依据（open-codereview.ai/docs；1.12.x 起以源码逐条核对，当前 1.12.13，与
+// optionalDependencies 的 ^1.12.13 同源）：
 //   - ocr review：workspace（默认）/ commit（-c）/ range（--from/--to）三模式互斥。
 //   - ocr scan：--path 逗号分隔；二者都接受 --format/--output/--audience/--exclude。
 //   - ocr delegate preview / rule：--format json 机器可读，reviewable_files
@@ -370,8 +371,16 @@ export function ocrCommand(
   memo: { value?: string } = memoBox,
 ): string {
   if (memo.value === undefined) {
-    const launcher = locate();
-    memo.value = launcher === null ? "ocr" : shq(launcher);
+    // Windows 不取随包 launcher：bin/ocr.js 是 shebang 脚本，pwsh/cmd 无法直接执行
+    // （.js 会被交给 WSH/JScript 解释），与 wrapWithHostReaper/withHomeEnv 的 win32
+    // 放行同一口径——随包装法只在 macOS/Linux 生效，Windows 一直走 PATH 上的全局
+    // `ocr`（README 的平台承诺；此前代码并没有兑现这句话，launcher 在 win32 照取）。
+    if (process.platform === "win32") {
+      memo.value = "ocr";
+    } else {
+      const launcher = locate();
+      memo.value = launcher === null ? "ocr" : shq(launcher);
+    }
   }
   return memo.value;
 }

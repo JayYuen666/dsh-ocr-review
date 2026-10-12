@@ -224,6 +224,24 @@ describe("ocrCommand：命令词解析", () => {
     expect(ocrCommand()).toMatch(/^(?:'.*ocr\.js'|ocr)$/u);
   });
 
+  it("win32 不取随包 launcher：shebang 脚本 pwsh/cmd 无法直执行，恒走 PATH 裸 ocr", () => {
+    // 与 wrapWithHostReaper / withHomeEnv 的 win32 放行同一口径；README 的平台承诺
+    // （Windows 跑裸命令）由此兑现。platform 与定位口都换成 stub，记忆槽用局部盒。
+    const real = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      const memo = {};
+      expect(ocrCommand(() => "/opt/pkg/bin/ocr.js", memo)).toBe("ocr");
+      expect(ocrCommand(() => null, memo)).toBe("ocr");
+    } finally {
+      if (real === undefined) {
+        Reflect.deleteProperty(process, "platform");
+      } else {
+        Object.defineProperty(process, "platform", real);
+      }
+    }
+  });
+
   it("定位口两档：入口在盘上给出绝对路径，不在盘上给 null（依赖装了一半那一档）", () => {
     expect(locateLauncher()).toMatch(/ocr\.js$/u);
     fsStub.exists = false;

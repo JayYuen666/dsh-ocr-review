@@ -41,7 +41,11 @@
 // 运行时值导入只有 @deepseek-ai/schemastery（Config schema：`.volatile()` 与
 // volatile 字段的引用化只在这个宿主 fork 里有实现，公共 schemastery@3.18 没有，
 // 用它的产物在 0.1.7 上设置卡写得进、读不到）、@deepseek-ai/dsh-credentials（在
-// peerDependencies，只取两枚纯语法件，见下面的 import 注释）与 @jayyuen66/dsh-plugin-shared；
+// peerDependencies，只取两枚纯语法件，见下面的 import 注释）、
+// @deepseek-ai/dsh-home-paths 与 @deepseek-ai/dsh-atomic-write（lib/ocr-config.ts 与
+// lib/config-store.ts 取 resolveDshHome/expandHomePath 与 writeFileAtomic/withFileLock
+// ——外部 config.json 的定位与落盘锁都归官方件，四件同在 peerDependencies）以及
+// @jayyuen66/dsh-plugin-shared；
 // cordis / dsh-settings / dsh-tools / dsh-shell / dsh-host-webserver / dsh-system-prompt
 // 一律 type-only（运行时服务由 ctx 注入，见 plugins/README.md 的解耦原则；工具面与
 // shell/webServer/systemPrompt 三面的类型绑官方见下面 import 段）。dsh-credentials 是
@@ -861,7 +865,7 @@ const SESSION_OUTPUT_SCHEMA = {
  * owner 口径是「状态归 ocr 自己，围栏由本包显式放开」，故直接要 `danger-full-access`。
  *
  * **「能不能只放开需要写的那一条路径」：不能。** 官方按调用携带的 `SandboxPolicyRequest`
- * 只有 `session` 与 `mode` 两个字段（dsh-sandbox-policy 0.2.1-alpha.1 的
+ * 只有 `session` 与 `mode` 两个字段（dsh-sandbox-policy 0.2.1-alpha.2 的
  * lib/types/index.d.ts:50），**没有**附加可写路径、没有自定义 HOME、没有目录级豁免。
  * 可选的收紧路径只有「改 ocr 自己的状态落点」或「等上游加字段」，两者都不是本包能在
  * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
@@ -898,7 +902,35 @@ interface RunTuning {
   stdoutMaxBytes: number;
 }
 
-/** 前台执行：失败抛错（含给模型的行动提示），成功返回 stdout 文本。
+/** 前台执行的一手结果：stdout 文本与截断事实。
+ *  截断说明刻意**不**拼进 text：delegate/session 的 text 是载荷本体，拼进去会破坏
+ *  JSON，而解析失败只回显前 500 码元（头部）——尾部的说明连同 spill 落盘路径会一起
+ *  变得不可见（被截断的 JSON 恰恰必然解析失败，说明必须另有出口）。载荷型调用方用
+ *  stdoutTruncationNote 按各自形态把说明拼进自己的回显；review/scan 走 --output，
+ *  stdout 恒空，截断位对它们只是形式上存在。 */
+interface ForegroundRun {
+  text: string;
+  /** stdout 触到 `stdoutMaxBytes` 上限被截断。 */
+  truncated: boolean;
+  /** 完整输出的落盘位置（截断且执行器给得出落盘路径时才有）。 */
+  spillPath: string | undefined;
+}
+
+/** 截断说明（stdoutTruncated 文案 + 可选的落盘位置），判据见 ForegroundRun 的注释。 */
+function stdoutTruncationNote(
+  limitBytes: number,
+  run: ForegroundRun,
+  messages: OcrReviewMessages,
+): string {
+  if (!run.truncated) {
+    return "";
+  }
+  const spill =
+    run.spillPath === undefined ? "" : format(messages.outputSpill, { path: run.spillPath });
+  return `\n${format(messages.stdoutTruncated, { limit: String(limitBytes), spill })}`;
+}
+
+/** 前台执行：失败抛错（含给模型的行动提示），成功返回 stdout 的一手结果。
  * timeoutMs 恒有值（tuningOf(config)），宿主按 min(请求, shell.maxTimeoutMs) 收口。
  * signal 必传：harness ToolExecution.signal 是必填的调用方取消权。 */
 async function runForeground(
@@ -907,7 +939,7 @@ async function runForeground(
   workdir: string,
   run: RunTuning,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<ForegroundRun> {
   const messages = localeMessages(host);
   const spec = host.shell.resolve({
     command,
@@ -940,16 +972,7 @@ async function runForeground(
     throw new Error(detail === "" ? head : `${head}${messages.detailSeparator}${detail}`);
   }
   const { text, truncated, spillPath } = result.stdout;
-  if (truncated) {
-    const spill =
-      typeof spillPath === "string" ? format(messages.outputSpill, { path: spillPath }) : "";
-    // 原文照抄在前、截断说明在后（位置不变，只换说明文案）。
-    return `${text}\n${format(messages.stdoutTruncated, {
-      limit: String(run.stdoutMaxBytes),
-      spill,
-    })}`;
-  }
-  return text;
+  return { text, truncated, spillPath };
 }
 
 /** 后台任务描述（>5 参数会撞 max-params，收成对象）。 */
@@ -1092,7 +1115,8 @@ async function startBackground(
     sandboxPolicy: ocrSandboxPolicy(job.workdir),
   });
   const proc = await host.shell.execute(spec);
-  // 先剪窗口再起：注册表的容量闸只管"活的"，已落定的旧记录只有我们 remove 才会消失。
+  // 剪枝先于作业**登记**（进程已在上面起来）：注册表的容量闸只管"活的"，已落定的
+  // 旧记录只有我们 remove 才会消失。
   pruneOcrJobHistory(registry);
   const messages = localeMessages(host);
   let jobId: JobId;
@@ -1114,8 +1138,15 @@ async function startBackground(
     killProc(proc);
     throw error;
   }
-  // 兜底 deadline（时长来自 entry config，判据见 OCR_BACKGROUND_MAX_MS）。
-  void enforceOcrDeadline(registry, jobId, messages.jobReasonTimeout, job.backgroundMaxMs);
+  // 兜底 deadline（时长来自 entry config；kill 理由按实际窗口换算，别把可配置的
+  // 窗口说成写死的"2 小时"——理由是模型可见的 detail）。
+  const backstopMinutes = Math.round(job.backgroundMaxMs / 60_000);
+  void enforceOcrDeadline(
+    registry,
+    jobId,
+    format(messages.jobReasonTimeout, { minutes: String(backstopMinutes) }),
+    job.backgroundMaxMs,
+  );
   const stop = (): void => {
     // 监听器里不许抛（判据见 `killProc`）：注册表被重载/关掉时它对陌生 id 抛
     // `unknown job ...`（installed dsh-jobs-local/lib/index.js:554-558 的 `expect`），
@@ -1582,18 +1613,25 @@ export function createGateway(host: HostCtx): DshConfigGateway {
         return false;
       }
     },
-    credentialResolvable: async (envKey: string): Promise<boolean> => {
+    credentialSource: async (envKey: string): Promise<string | undefined> => {
       const svc = credentialsService();
-      if (svc === undefined || !isCredentialRefName(envKey)) {
-        return false;
+      // 不合官方 ref 语法的名根本不是一个 ref：按「未配置」处理而不是抛错
+      // （官方 isCredentialRefName 的既定语义，见文件头）。过了这道判据才 brand。
+      let resolved: Awaited<ReturnType<CredentialsService["resolve"]>> | undefined;
+      if (svc !== undefined && isCredentialRefName(envKey)) {
+        try {
+          resolved = await svc.resolve(credentialRef(envKey));
+        } catch {
+          // 凭据服务 reject 与「未配置」是同一类结论：都拿不到值。让它冒到卡片上
+          // 会变成 500，而本包对 settings 不可用早已走 ProviderSourceStatus 降级面——
+          // 两侧口径必须一致，否则一个宿主侧故障就把整张 provider 卡打死。
+          resolved = undefined;
+        }
       }
-      try {
-        const resolved = await svc.resolve(credentialRef(envKey));
-        return resolved !== undefined && resolved.value.length > 0;
-      } catch {
-        // 同上：resolve 抛错按「不可解析」处理，应用面据此拒绝而不是外抛。
-        return false;
-      }
+      // resolve 的值当场丢弃，只带出 source 层 id（可达性判定用，见 lib/ocr-config.ts）；
+      // 空值按「未配置」处理（凭据层「空值即不存在」的同款规则），明文 key 绝不进
+      // 配置/回执/日志。
+      return resolved !== undefined && resolved.value.length > 0 ? resolved.source : undefined;
     },
   };
 }
@@ -1654,6 +1692,27 @@ async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string>
     // 落到下面的 realpath 回退：git 缺席 / 非仓库 / 进程被杀，都不该让评审失败。
   }
   return realpathOrSelf(root);
+}
+
+/**
+ * 判定 webserver 绑定地址字面量是否回环（127/8、::1 及其全展开/IPv4 映射形态；
+ * `%zone` 后缀剥掉再比，对齐宿主 isLoopbackHost 的判定域）。
+ *
+ * 为什么不是 `host === "0.0.0.0"`：宿主 webserver 的 Config 在装载期就**拒绝通配
+ * 地址**（0.2.1-alpha.2 packages/host/webserver/src/index.ts:263-267 —— 0.0.0.0/::
+ * 一律 throw，要求绑定本机某个具体接口的 IP 字面量），所以那个等式是永假死分支，
+ * 唯一需要 trust 闸放行局域网 Host 头的场景（绑定 LAN IP，容器/远端部署的正路）
+ * 反而被当成回环、整批 403。host 经 config 校验必为具体 IP 字面量，故本函数
+ * 不必处理主机名与通配，只枚举回环字面量的常见书写。
+ */
+export function isLoopbackBindAddress(host: string): boolean {
+  const value = host.toLowerCase().replace(/%.*$/u, "");
+  return (
+    value === "::1" ||
+    value === "0:0:0:0:0:0:0:1" ||
+    value.startsWith("127.") ||
+    /^::ffff:127(?:\.\d{1,3}){3}$/u.test(value)
+  );
 }
 
 /** select 端点过了 trust 闸门与 guardPost 之后那一段的依赖（对象化以受 max-params 约束）。 */
@@ -1722,8 +1781,9 @@ export function registerConfigEndpoints(
     // 无 webServer 服务（未起 web 组合）→ 卡片不可用，工具与设置照常。
     return;
   }
-  // 非回环服务面唯一的可读信号（installed dsh-host-webserver d.ts `:50`/`:83`）。
-  const servingNonLoopback = webServer.host === "0.0.0.0";
+  // 非回环服务面的信号按 isLoopbackBindAddress 重算（判据与宿主 config 的现实一致，
+  // 见该函数的注释——"=== 0.0.0.0" 那条旧等式在通配被 config 拒绝后是永假分支）。
+  const servingNonLoopback = !isLoopbackBindAddress(webServer.host);
   const gateway = createGateway(host);
   // 端点回执是给人看的：每个请求现取一份文案（用户在「设置 → 常规」换语言后，
   // 下一次请求即换新文案，不必重启）。
@@ -2067,21 +2127,25 @@ function registerDelegatePreviewTool(host: HostCtx, config: Config): void {
       await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       const { command, workdir } = buildDelegatePreviewCommand({ ...args, repo }, runMsgs);
-      const text = await runForeground(
+      const stdout = await runForeground(
         host,
         withHomeEnv(command, homeOverride),
         workdir,
         tuningOf(config),
         exec.signal,
       );
-      const parsed = parseDelegatePreview(text);
+      const parsed = parseDelegatePreview(stdout.text);
       if (!parsed.ok) {
-        // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）。
-        return format(runMsgs.parseFailedPlain, {
-          tool: "ocr delegate preview",
-          limit: String(RAW_ECHO_LIMIT),
-          raw: echoRaw(text, RAW_ECHO_LIMIT),
-        });
+        // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）。截断说明
+        // 单独拼在尾部：载荷被截断恰恰必然解析失败，而 raw 只回显头部，spill 落盘
+        // 路径只有从这里才到得了模型。
+        return (
+          format(runMsgs.parseFailedPlain, {
+            tool: "ocr delegate preview",
+            limit: String(RAW_ECHO_LIMIT),
+            raw: echoRaw(stdout.text, RAW_ECHO_LIMIT),
+          }) + stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs)
+        );
       }
       // 清单对象直返（canonical value）。mergeBase 一并带出：previewHint 让模型用
       // `git diff <merge_base>..<to>` 取 diff，此前解析了却没交出去，模型只能再跑一次。
@@ -2127,21 +2191,24 @@ function registerDelegateRuleTool(host: HostCtx, config: Config): void {
         { repo, paths: args["paths"] },
         runMsgs,
       );
-      const text = await runForeground(
+      const stdout = await runForeground(
         host,
         withHomeEnv(command, ocrHome(config)),
         workdir,
         tuningOf(config),
         exec.signal,
       );
-      const parsed = parseDelegateRules(text);
+      const parsed = parseDelegateRules(stdout.text);
       if (!parsed.ok) {
-        // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）。
-        return format(runMsgs.parseFailedPlain, {
-          tool: "ocr delegate rule",
-          limit: String(RAW_ECHO_LIMIT),
-          raw: echoRaw(text, RAW_ECHO_LIMIT),
-        });
+        // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）；截断说明
+        // 单独拼在尾部（判据同 ocr_delegate_preview）。
+        return (
+          format(runMsgs.parseFailedPlain, {
+            tool: "ocr delegate rule",
+            limit: String(RAW_ECHO_LIMIT),
+            raw: echoRaw(stdout.text, RAW_ECHO_LIMIT),
+          }) + stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs)
+        );
       }
       // 分组对象直返（canonical value）。
       return {
@@ -2186,24 +2253,28 @@ function registerSessionTool(host: HostCtx, config: Config): void {
       const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
       const { command, workdir } = buildSessionCommand({ ...args, repo }, runMsgs);
       // session 也读 OCR 家目录（sessions 清单），随 ocrConfigPath 一并重定向。
-      const text = await runForeground(
+      const stdout = await runForeground(
         host,
         withHomeEnv(command, ocrHome(config)),
         workdir,
         tuningOf(config),
         exec.signal,
       );
+      const { text } = stdout;
       // 无会话时 OCR 返回 JSON null → 转友好提示，避免模型困惑。
       const stripped = text.trim();
       const empty = stripped === "null" || stripped === "[]";
       // session 输出体量小，直接透传（含长度保护，避免假完整 + 明文 key 脱敏）。
+      // 截断说明拼在尾部：stdout 被截断时 session JSON 也会缺尾，模型需要知道去哪读全。
       const capped =
         text.length > 12_000
           ? `${echoRaw(text, 11_900)}\n${runMsgs.sessionTruncated}`
           : redactKeyMaterial(text);
       // 对象直返（canonical value）；sessionOutput 保持一手透传字符串的诚实值。
       return {
-        sessionOutput: empty ? runMsgs.sessionEmpty : capped,
+        sessionOutput:
+          (empty ? runMsgs.sessionEmpty : capped) +
+          stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs),
         hint: runMsgs.sessionResumeHint,
       };
     },

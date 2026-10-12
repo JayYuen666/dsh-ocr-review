@@ -71,6 +71,38 @@ import type { OcrConfigCurrent, OcrPaths } from "./config-store.ts";
 const OCR_CONFIG_DIR = ".opencodereview";
 const OCR_CONFIG_FILE = "config.json";
 
+/**
+ * 宿主起 shell 子进程时的**环境净化**模式（dsh-subprocess 的 SENSITIVE_ENV_PATTERN
+ * `KEY|PASSWORD|SECRET|TOKEN` 大小写不敏感命中即剥，另加 `DSH_` 前缀全剥）。
+ * 本包不传 `env`，OCR 子进程拿到的环境就是净化后的那一份——名字命中本模式的
+ * 凭据 ref，OCR 及其孙进程（get-cred）在「继承环境」这一层永远读到空。
+ */
+const HOST_SCRUBBED_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN|^DSH_/iu;
+
+/**
+ * key 在 **OCR 运行时**是否真的取得到（get-cred 三层里有没有一层够得到它）。
+ *
+ * 宿主侧 resolve() 的 source 是「dsh 进程自己的取值层」，不等于「OCR 子进程够得到的
+ * 层」——少了这道判定就是「select 成功 → OCR 401」的假绿：
+ *   - `file`（$DSH_HOME/.credentials.yaml）→ get-cred 第 2 层，可达；
+ *   - `user-env`（$DSH_HOME/.env）→ get-cred 第 3 层，可达；
+ *   - `env`（dsh 进程继承的环境）→ 只有 ref 名**不**命中宿主净化模式时才可达
+ *     （API key 类 ref 几乎全含 KEY/TOKEN，实际常不可达）；
+ *   - `project-env`（dsh 工作区 .env）→ get-cred 刻意不读被审查仓库的 .env，永不可达；
+ *   - 未知层 / `undefined`（未配置）→ 一律按不可达，由调用方分别报「未配置」。
+ * @param source credentials.resolve() 交出的层 id（gateway.credentialSource）。
+ * @param ref 凭据 ref 名（get-cred/buildApiKeyCmd 用的那个大写名）。
+ */
+export function keyReachableAtOcrRuntime(source: string | undefined, ref: string): boolean {
+  if (source === "file" || source === "user-env") {
+    return true;
+  }
+  if (source === "env") {
+    return !HOST_SCRUBBED_ENV_PATTERN.test(ref);
+  }
+  return false;
+}
+
 /** 无凭据可问时的一律 false（卡片据 source 显示原因，不显示假的「未配置 key」）。 */
 function withoutKeyFlags(providers: DshProvider[]): DshProviderWithKey[] {
   return providers.map((providerCfg) => ({ ...providerCfg, hasKey: false }));
@@ -207,10 +239,17 @@ export async function applyProviderSelection(
   if (target.apiKeyEnv === null || target.apiKeyEnv === "") {
     throw new Error(format(messages.noApiKeyEnv, { provider }));
   }
-  // resolve 只用于确认「凭据服务现在解析得到值」；值当场丢弃，绝不进配置/回执/日志。
-  const resolvable = await gateway.credentialResolvable(target.apiKeyEnv);
-  if (!resolvable) {
+  // resolve 只用于判定「key 在 OCR 运行时取不取得到」；值当场丢弃，绝不进配置/回执/日志。
+  // 两段式：先「未配置」（沿用既有 keyNotResolvable 文案），再「层不可达」（假绿闸，
+  // 见 keyReachableAtOcrRuntime）——把「select 成功 → OCR 401」拦在写盘前。
+  const keySource = await gateway.credentialSource(target.apiKeyEnv);
+  if (keySource === undefined) {
     throw new Error(format(messages.keyNotResolvable, { provider, ref: target.apiKeyEnv }));
+  }
+  if (!keyReachableAtOcrRuntime(keySource, target.apiKeyEnv)) {
+    throw new Error(
+      format(messages.keyNotReachable, { provider, ref: target.apiKeyEnv, source: keySource }),
+    );
   }
   const scriptPath = credentialScriptPath(paths);
   if (!existsSync(scriptPath)) {
@@ -249,8 +288,9 @@ interface MigrateContext {
   readonly scriptPath: string;
   /** 宿主侧此刻解析出的 dsh 数据目录，写进 api_key_cmd 作显式定位档。 */
   readonly dshHome: string;
-  /** 已确认解析得到值的 env key；不在其中的绝不删明文。 */
-  readonly resolvableEnvKeys: ReadonlySet<string>;
+  /** 已确认在 OCR 运行时**可达**的 env key（source 层判定，见
+   *  keyReachableAtOcrRuntime）；不在其中的绝不删明文。 */
+  readonly reachableEnvKeys: ReadonlySet<string>;
   readonly messages: OcrReviewMessages;
 }
 
@@ -267,9 +307,9 @@ function migrateEntry(
   if (typeof entry["api_key"] !== "string" || entry["api_key"].length === 0) {
     return "noPlain";
   }
-  // 解析不到值就整条记 unknown，绝不删明文：换过去的命令取不到东西，等于把一条本来
-  // 能用的凭据换成一条不能用的，而原文只剩 .bak 里的副本。
-  if (envKey === undefined || envKey === "" || !context.resolvableEnvKeys.has(envKey)) {
+  // 解析不到可达层就整条记 unknown，绝不删明文：换过去的命令在 OCR 运行时取不到
+  // 值，等于把一条本来能用的凭据换成一条不能用的，而原文只剩 .bak 里的副本。
+  if (envKey === undefined || envKey === "" || !context.reachableEnvKeys.has(envKey)) {
     return "unknown";
   }
   try {
@@ -336,19 +376,25 @@ export async function migratePlaintextKeys(
       envByProvider.set(providerCfg.name, providerCfg.apiKeyEnv);
     }
   }
-  // 删明文前逐条确认新命令解析得到值（resolve 的值当场丢弃，绝不外传）。这是迁移与
-  // apply 的关键差别：apply 不成功就整条放弃，迁移一旦删掉明文就没有回头路。
+  // 删明文前逐条确认新命令在 OCR 运行时可达（resolve 的值当场丢弃，绝不外传）。这是
+  // 迁移与 apply 的关键差别：apply 不成功就整条放弃，迁移一旦删掉明文就没有回头路。
+  // 与 apply 同一把 keyReachableAtOcrRuntime 闸：source 在「宿主进程取得到、OCR 子
+  // 进程取不到」的层（env/project-env）时同样不许删明文。
   const candidateEnvKeys = [...new Set(envByProvider.values())];
-  const resolvedFlags = await Promise.all(
-    candidateEnvKeys.map((envKey) => gateway.credentialResolvable(envKey)),
+  const keySources = await Promise.all(
+    candidateEnvKeys.map((envKey) => gateway.credentialSource(envKey)),
   );
-  const resolvableEnvKeys = new Set(
-    candidateEnvKeys.filter((_envKey, index) => resolvedFlags[index] === true),
-  );
+  const reachableEnvKeys = new Set<string>();
+  for (const [index, envKey] of candidateEnvKeys.entries()) {
+    const keySource = keySources[index];
+    if (keySource !== undefined && keyReachableAtOcrRuntime(keySource, envKey)) {
+      reachableEnvKeys.add(envKey);
+    }
+  }
   const migrateContext: MigrateContext = {
     scriptPath,
     dshHome,
-    resolvableEnvKeys,
+    reachableEnvKeys,
     messages,
   };
   const outcome = await updateConfigLocked(paths.ocrConfigJson, async () => {

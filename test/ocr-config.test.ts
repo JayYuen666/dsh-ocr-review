@@ -62,6 +62,9 @@ const GET_CRED_FILE = "get-cred.mjs";
 const SENSENOVA_MODEL = "deepseek-v4-flash";
 const SENSENOVA_LITE_MODEL = "sensenova-6.8-flash-lite";
 const SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1";
+/** parseApiKeyCmd 用例共用的样本脚本路径与 amd 那条的真实型号。 */
+const SAMPLE_SCRIPT = "/a/get-cred.mjs";
+const AMD_MODEL = "DeepSeek-V4-Flash";
 /** pi-ai 侧的 api 取值（入参那一侧）与投影到 OCR 的 protocol（期望那一侧）：同一个字，
  *  两个角色，分成两名才留得住「api→protocol 是映射」这条判据。 */
 const RESPONSES_API = "openai-responses";
@@ -434,6 +437,34 @@ describe("buildApiKeyCmd", () => {
     );
     expect(buildApiKeyCmdOf("/s/get-cred.mjs", "K")).toBe("node '/s/get-cred.mjs' 'K'");
   });
+
+  it("win32 走双引号（ocr 在 Windows 用 cmd.exe 跑 api_key_cmd，单引号是字面字符）", () => {
+    const real = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      expect(
+        buildApiKeyCmdOf(
+          String.raw`C:\Program Files\p\get-cred.mjs`,
+          "K",
+          String.raw`C:\Users\t\.dsh`,
+        ),
+      ).toBe(String.raw`node "C:\Program Files\p\get-cred.mjs" "K" "C:\Users\t\.dsh"`);
+      // 值内双引号翻倍；收尾反斜杠再翻倍（防 CommandLineToArgvW 吃掉收尾引号）。
+      expect(buildApiKeyCmdOf(String.raw`C:\we "ird"\get-cred.mjs`, "K")).toBe(
+        String.raw`node "C:\we ""ird""\get-cred.mjs" "K"`,
+      );
+      // 以反斜杠收尾的值没法走 String.raw：收尾反引号前的 \` 是转义反引号，而 \${ 又会把
+      // 插值转义成字面量——窄化豁免，仅此一行用普通转义串。
+      // oxlint-disable-next-line unicorn/prefer-string-raw
+      expect(buildApiKeyCmdOf("C:\\dir\\", "K")).toBe('node "C:\\dir\\\\" "K"');
+    } finally {
+      if (real === undefined) {
+        Reflect.deleteProperty(process, "platform");
+      } else {
+        Object.defineProperty(process, "platform", real);
+      }
+    }
+  });
 });
 
 describe("renderSelectedConfig", () => {
@@ -750,11 +781,59 @@ describe("applyProviderSelection", () => {
   });
 
   it("凭据 resolve 未命中 ⇒ 拒绝并点名 ref（错误文本里没有 key 值）", async () => {
-    const gateway = makeGateway({ resolvable: [] });
-    await expect(selectOf(gateway, makePaths(), "amd", "DeepSeek-V4-Flash")).rejects.toThrow(
+    const gateway = makeGateway({ sources: {} });
+    await expect(selectOf(gateway, makePaths(), "amd", AMD_MODEL)).rejects.toThrow(
       /API key 未配置：dsh 凭据服务未解析到 AMD_API_KEY/u,
     );
     expect(gateway.resolvedRefs).toStrictEqual(["AMD_API_KEY"]);
+  });
+
+  it("key 只存在于 OCR 运行时不可达的层（env/project-env）⇒ 写盘前拒绝（假绿闸）", async () => {
+    // env 层 + ref 名命中宿主净化模式（*API_KEY 全中招）⇒ OCR 子进程拿不到。
+    const paths = makePaths();
+    const envGateway = makeGateway({ sources: { AMD_API_KEY: "env" } });
+    await expect(selectOf(envGateway, paths, "amd", AMD_MODEL)).rejects.toThrow(
+      /存在于凭据层「env」，OCR 运行时取不到/u,
+    );
+    // 拒绝发生在写盘之前：config.json 根本没有被创建。
+    expect(existsSync(paths.ocrConfigJson)).toBe(false);
+    // project-env 层：get-cred 刻意不读被审查仓库，一律不可达。
+    const projectGateway = makeGateway({ sources: { AMD_API_KEY: "project-env" } });
+    await expect(selectOf(projectGateway, paths, "amd", AMD_MODEL)).rejects.toThrow(
+      /存在于凭据层「project-env」/u,
+    );
+  });
+
+  it("key 在可达层（file/user-env/env 但 ref 不命中净化模式）⇒ 照常应用", async () => {
+    const userEnv = await selectOf(
+      makeGateway({ sources: { SENSENOVA_API_KEY: "user-env" } }),
+      makePaths(),
+      "sensenova",
+      SENSENOVA_MODEL,
+    );
+    expect(userEnv.provider).toBe("sensenova");
+    const file = await selectOf(
+      makeGateway({ sources: { AMD_API_KEY: "file" } }),
+      makePaths(),
+      "amd",
+      AMD_MODEL,
+    );
+    expect(file.provider).toBe("amd");
+    // env 层但 ref 名不被 KEY/TOKEN/SECRET/PASSWORD/DSH_ 命中 ⇒ OCR 继承得到，放行。
+    const envGateway = makeGateway({
+      descriptors: descriptorsWithValue({
+        providers: {
+          custom: {
+            baseURL: "https://c",
+            apiKeyEnv: "MY_UNSCRUBBED_REF",
+            models: [{ id: "m", name: "m" }],
+          },
+        },
+      }),
+      sources: { MY_UNSCRUBBED_REF: "env" },
+    });
+    const applied = await selectOf(envGateway, makePaths(), "custom", "m");
+    expect(applied.provider).toBe("custom");
   });
 
   it("get-cred 脚本缺失时报错（防御纵深）", async () => {
@@ -909,7 +988,7 @@ describe("migratePlaintextKeys", () => {
   });
 
   it("apiKeyEnv 形状不合法（解得出值也构造不出命令）⇒ 记 unknown，明文原样留着", async () => {
-    // 两道闸是独立的：ref 名解析得到值（resolvableEnvKeys 放行），但不符合
+    // 两道闸是独立的：ref 名在可达层（reachableEnvKeys 放行），但不符合
     // ^[A-Z0-9_]+$ 时命令根本构造不出来。此时绝不能删明文——删了就只剩一条取不到
     // 东西的命令，等于把能用的凭据换成不能用的。
     const paths = makePaths();
@@ -928,7 +1007,7 @@ describe("migratePlaintextKeys", () => {
           weird: { apiKeyEnv: "bad-name", api: "openai-completions", baseURL: "u", models: [] },
         },
       }),
-      resolvable: ["bad-name"],
+      sources: { "bad-name": "file" },
     });
     const { migrated, skippedUnknown } = await migrateOf(gateway, paths);
     expect(migrated).toStrictEqual([]);
@@ -990,10 +1069,10 @@ describe("migratePlaintextKeys", () => {
 
   it("新命令解析不到值 ⇒ 明文一条都不删，记入 skippedUnknown", async () => {
     // 与 apply 的关键差别：apply 不成功就整条放弃，迁移一旦删掉明文就没有回头路。
-    // resolvable 给空名单即等价于凭据服务解析不到那条 ref。
+    // sources 给空表即等价于凭据服务解析不到那条 ref（undefined = 未配置）。
     const paths = makePaths();
     writeFileSync(paths.ocrConfigJson, PLAINTEXT_KEY_DOC);
-    const result = await migrateOf(makeGateway({ resolvable: [] }), paths);
+    const result = await migrateOf(makeGateway({ sources: {} }), paths);
     expect(result.migrated).toStrictEqual([]);
     expect(result.skippedUnknown).toStrictEqual(["sensenova"]);
     expect(readFileSync(paths.ocrConfigJson, "utf8")).toContain(PLAINTEXT_KEY);
@@ -1187,7 +1266,7 @@ describe("配置通道文案双语（en 注入）", () => {
     ).rejects.toThrow(/provider nokey declares no apiKeyEnv/u);
     await expect(
       applyProviderSelection(
-        makeGateway({ resolvable: [] }),
+        makeGateway({ sources: {} }),
         paths,
         { provider: "amd", model: "m" },
         en,
@@ -1245,13 +1324,50 @@ describe("parseApiKeyCmd", () => {
   });
 
   it("串尾多余空白仍能正常反解（buildApiKeyCmd 不产生，但手改过就会）", () => {
-    expect(parseApiKeyCmd("node '/a/get-cred.mjs' 'KEY'   ")).toStrictEqual({
-      script: "/a/get-cred.mjs",
+    expect(parseApiKeyCmd(`node '${SAMPLE_SCRIPT}' 'KEY'   `)).toStrictEqual({
+      script: SAMPLE_SCRIPT,
       envKey: "KEY",
       dshHome: undefined,
     });
-    expect(parseApiKeyCmd("node   '/a/get-cred.mjs'\t'KEY'")).toStrictEqual({
-      script: "/a/get-cred.mjs",
+    expect(parseApiKeyCmd(`node   '${SAMPLE_SCRIPT}'\t'KEY'`)).toStrictEqual({
+      script: SAMPLE_SCRIPT,
+      envKey: "KEY",
+      dshHome: undefined,
+    });
+  });
+
+  it("win32 双引号形态（双引号臂写出的那种）也能反解，含引号/尾部反斜杠的往返", () => {
+    expect(parseApiKeyCmd(String.raw`node "C:\p\get-cred.mjs" "K" "C:\u\.dsh"`)).toStrictEqual({
+      script: String.raw`C:\p\get-cred.mjs`,
+      envKey: "K",
+      dshHome: String.raw`C:\u\.dsh`,
+    });
+    // 值内 "" 是翻倍的引号；中段反斜杠是字面量（cmd 不把它当转义）。
+    expect(parseApiKeyCmd(String.raw`node "C:\we ""ird""\get-cred.mjs" "K"`)).toStrictEqual({
+      script: String.raw`C:\we "ird"\get-cred.mjs`,
+      envKey: "K",
+      dshHome: undefined,
+    });
+    // 收尾反斜杠在写侧被翻倍（防 CommandLineToArgvW 吃掉收尾引号），读侧按对称规则折半。
+    // 期望值以反斜杠收尾——String.raw 写不出这种串（收尾反引号前的 \` 是转义反引号），
+    // 规则自己也不会要求转换，这里就是普通转义串的合理用场。
+    expect(parseApiKeyCmd(String.raw`node "C:\dir\\" "K"`)).toStrictEqual({
+      script: "C:\\dir\\",
+      envKey: "K",
+      dshHome: undefined,
+    });
+    // 配置可能跨机迁移：同一解析源两种形态都认，不假设「写它的平台=读它的平台」。
+    expect(parseApiKeyCmd(`node '${SAMPLE_SCRIPT}' 'KEY'`)).toStrictEqual({
+      script: SAMPLE_SCRIPT,
+      envKey: "KEY",
+      dshHome: undefined,
+    });
+    // 双引号形态自己的三档形态不符（POSIX 先判 null 才轮到它们）：裸词 / 未闭合 /
+    // 尾随空白在最后一枚 token 之后照常收口。
+    expect(parseApiKeyCmd(`node ${SAMPLE_SCRIPT} "KEY"`)).toBeNull();
+    expect(parseApiKeyCmd(`node "${SAMPLE_SCRIPT} 'KEY'`)).toBeNull();
+    expect(parseApiKeyCmd(`node "${SAMPLE_SCRIPT}" "KEY"   `)).toStrictEqual({
+      script: SAMPLE_SCRIPT,
       envKey: "KEY",
       dshHome: undefined,
     });

@@ -10,7 +10,7 @@
 // 声明才能解析 node:fs/node:path/process/import.meta（避免整文件按 error 类型
 // 误报 unsafe）。
 
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { rolldown } from "rolldown";
 import { canonicalizeRegionPaths } from "@jayyuen66/dsh-plugin-shared/lib/canonicalize-region-paths";
@@ -128,7 +128,21 @@ async function main() {
   console.info("client.js written:", out.length, "chars");
 }
 
-if (process.argv[1] === import.meta.filename) {
+/**
+ * 直跑守卫：argv[1] 与本文件按 **realpath** 逐字比。pnpm 等场景 argv[1] 可能是
+ * 符号链接路径，裸字符串比较会让直跑分支被静默跳过。
+ * argv[1] 缺席（node -e 一类）时 realpath 会抛，同样落进"非直跑"。
+ * @returns {boolean}
+ */
+function invokedDirectly() {
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(import.meta.filename);
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   try {
     await main();
   } catch (error) {
