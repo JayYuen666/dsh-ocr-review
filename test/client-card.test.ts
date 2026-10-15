@@ -24,6 +24,8 @@ import {
   binaryOf,
   binaryStatusText,
   cliBadgeText,
+  cliInstallText,
+  cliVersionText,
   isOwnSubject,
   loadCliStatus,
   runProbe,
@@ -44,8 +46,8 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 
 type Snap = ConfigFormSnapshot<Record<string, unknown>>;
 
-/** 官方 `ConfigFormSnapshot` 的合法形状（7 位全必选）：`value` 在首个快照受理前才是
- *  undefined，`mode: "memory"` 时 `writable` 恒假——桩件只能送官方真会送的那些形状。 */
+/** 官方 `ConfigFormSnapshot` 的合法形状（6 位全必选）：`value` 在首个快照受理前才是
+ *  undefined，`writable` 说的是宿主文档收不收写——桩件只能送官方真会送的那些形状。 */
 function snap(over: Partial<Snap> = {}): Snap {
   return {
     status: "ready",
@@ -54,7 +56,6 @@ function snap(over: Partial<Snap> = {}): Snap {
     user: {},
     revision: 7,
     writable: true,
-    mode: "host",
     ...over,
   };
 }
@@ -472,13 +473,13 @@ describe("cardStore 取官方快照的三态", () => {
     expect(store.getSnapshot()).toBe(store.getSnapshot());
   });
 
-  it("首个快照受理前 value 缺席 → 视图空对象；memory 模式 writable 恒假", () => {
+  it("首个快照受理前 value 缺席 → 视图空对象；宿主拒写时 writable 恒假", () => {
     const { form, emit } = scopeWith(
       snap({ status: "loading", value: undefined, revision: undefined }),
     );
     const store = cardStore(form);
     expect(store.getSnapshot()).toStrictEqual({ status: "loading", writable: true, value: {} });
-    emit(snap({ status: "unavailable", writable: false, mode: "memory" }));
+    emit(snap({ status: "unavailable", writable: false }));
     expect(store.getSnapshot()).toStrictEqual({
       status: "unavailable",
       writable: false,
@@ -779,6 +780,47 @@ const PROBE_URL = "/_dsh/ocr-review/probe";
 /** 传输层失败时那条 TypeError 的消息（替身与断言共用，写两遍就成了各漂各的期望值）。 */
 const REFUSAL = "connection refused";
 
+/** host 送来的核对版本样本（不引 lib/cli.ts 的那枚常量：卡片只认载荷，写独立字面量才测得到「读到什么报什么」）。 */
+const VIEW_EXPECTED = "1.13.0";
+/** 装法那句由 host 组好，卡片只原样显示：这里用一段可辨认的样本。 */
+const VIEW_INSTALL = "两条命令任选：brew install open-code-review";
+/** 「核对版本」那一行的中文原文（多处断言共用，写几遍就成了各漂各的期望值）。 */
+const ZH_VERSION_EXPECTED = "本插件的契约按 ocr 1.13.0 逐条核对";
+/** 徽标「来自 PATH」那档短文案（同样多处共用）。 */
+const ZH_BADGE_PATH = "ocr 来自 PATH";
+
+/**
+ * `OcrBinaryView` 的夹具构造口。`measuredVersion` 是必填的（null = 还没测过），
+ * 逐处手写容易漏成一侧有、一侧没有，集中一处才漂不了。
+ *
+ * 三个可选键用 `null` 表「宿主没报这一档」（键必须整个缺席，`exactOptionalPropertyTypes`
+ * 不许写 `path: undefined`），缺省则给出「PATH 上 brew 装的那一份、按 VIEW_EXPECTED 核对」
+ * 这套最常测的形状。
+ */
+function viewOf(
+  over: {
+    source?: string;
+    path?: string | null;
+    channel?: string | null;
+    expectedVersion?: string | null;
+    measuredVersion?: string | null;
+    installHint?: string | null;
+  } = {},
+): OcrBinaryView {
+  const path = over.path === undefined ? PATH_LAUNCHER : over.path;
+  const channel = over.channel === undefined ? "brew" : over.channel;
+  const expectedVersion = over.expectedVersion === undefined ? VIEW_EXPECTED : over.expectedVersion;
+  const installHint = over.installHint === undefined ? VIEW_INSTALL : over.installHint;
+  return {
+    source: over.source ?? "path",
+    ...(path === null ? {} : { path }),
+    ...(channel === null ? {} : { channel }),
+    ...(expectedVersion === null ? {} : { expectedVersion }),
+    ...(installHint === null ? {} : { installHint }),
+    measuredVersion: over.measuredVersion ?? null,
+  };
+}
+
 /** 一段 GET providers 的应答（状态码 + 那坨 JSON），loadCliStatus 真读的就这两件。 */
 interface Reply {
   ok: boolean;
@@ -814,39 +856,87 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
   });
 
   it("binaryOf 只认 host 送的那三种 source，其余一律「没报」", () => {
-    expect(binaryOf({ source: "bundled", path: BUNDLED_LAUNCHER })).toStrictEqual({
+    expect(
+      binaryOf({
+        source: "bundled",
+        path: BUNDLED_LAUNCHER,
+        channel: "npm",
+        expectedVersion: VIEW_EXPECTED,
+        measuredVersion: null,
+        installHint: VIEW_INSTALL,
+      }),
+    ).toStrictEqual({
       source: "bundled",
       path: BUNDLED_LAUNCHER,
+      channel: "npm",
+      expectedVersion: VIEW_EXPECTED,
+      measuredVersion: null,
+      installHint: VIEW_INSTALL,
     });
-    // path 缺席时不落一个空串键：卡片那档文案用不到它。
-    expect(binaryOf({ source: "path" })).toStrictEqual({ source: "path" });
+    // 空串一律不落键（host 那侧缺字段时给的就是空串）：留着键等于让文案里出现一句空话。
+    expect(binaryOf({ source: "path" })).toStrictEqual({
+      source: "path",
+      measuredVersion: null,
+    });
+    // 旧宿主不带 measuredVersion：按「没测过」处理，而不是把整行判定作废。
+    expect(
+      binaryOf({ source: "path", path: PATH_LAUNCHER, measuredVersion: "1.2.3" }),
+    ).toStrictEqual({ source: "path", path: PATH_LAUNCHER, measuredVersion: "1.2.3" });
     expect(binaryOf({ source: "weird" })).toBeNull();
     expect(binaryOf(null)).toBeNull();
     expect(binaryOf("bundled")).toBeNull();
   });
 
   it("四档状态文本（中文那一份逐字对齐行动性最高的两档）", () => {
-    expect(binaryStatusText(tZh, { source: "bundled" })).toBe("随本插件分发已就位，无需再全局安装");
-    expect(binaryStatusText(tZh, { source: "none" })).toContain("brew install open-code-review");
-    expect(binaryStatusText(tZh, { source: "path", path: PATH_LAUNCHER })).toContain(PATH_LAUNCHER);
-    expect(binaryStatusText(tZh, null)).not.toBe(binaryStatusText(tZh, { source: "none" }));
+    expect(binaryStatusText(tZh, viewOf({ source: "bundled", path: BUNDLED_LAUNCHER }))).toContain(
+      BUNDLED_LAUNCHER,
+    );
+    // 装法与版本都在这一行：用户要的是「哪一份、谁装的」，而不是「有一个 ocr」。
+    expect(binaryStatusText(tZh, viewOf({ channel: "brew" }))).toContain("brew formula");
+    expect(binaryStatusText(tZh, viewOf({ channel: "npm" }))).toContain("npm 全局包");
+    expect(binaryStatusText(tZh, viewOf({ channel: null }))).toContain("装法未识别");
+    expect(binaryStatusText(tZh, viewOf({ source: "none", path: null }))).toContain("未找到 ocr");
+    expect(binaryStatusText(tZh, viewOf({ source: "path" }))).toContain(PATH_LAUNCHER);
+    expect(binaryStatusText(tZh, null)).not.toBe(binaryStatusText(tZh, viewOf()));
   });
 
   it("英文那一份整行不含汉字，且随包/未找到两档各自成话", () => {
-    const bundled = binaryStatusText(tEn, { source: "bundled" });
-    const missing = binaryStatusText(tEn, { source: "none" });
-    expect(bundled).not.toMatch(/[\u4E00-\u9FFF]/u);
-    expect(missing).toContain("npm i -g @alibaba-group/open-code-review");
+    const bundled = binaryStatusText(tEn, viewOf({ source: "bundled", path: BUNDLED_LAUNCHER }));
+    const missing = binaryStatusText(tEn, viewOf({ source: "none", path: null }));
+    expect(bundled).not.toMatch(HAN);
+    expect(missing).not.toMatch(HAN);
     expect(bundled).not.toBe(missing);
   });
 
-  it("状态行把标题、状态文本与检测按钮画齐", () => {
+  it("版本那一行：没测过只说核对版本，测过再补一句一致/不一致", () => {
+    expect(cliVersionText(tZh, viewOf({ measuredVersion: null }))).toBe(ZH_VERSION_EXPECTED);
+    expect(cliVersionText(tZh, viewOf({ measuredVersion: "1.13.0" }))).toContain(
+      "本机实测 1.13.0，与核对版本一致",
+    );
+    const diverged = cliVersionText(tZh, viewOf({ measuredVersion: "1.12.13" }));
+    expect(diverged).toContain("本机实测 1.12.13");
+    expect(diverged).toContain("与核对版本 1.13.0 不一致");
+    // 宿主没报或没给核对版本 ⇒ 整行不说（不编一句「版本未知」的结论）。
+    expect(cliVersionText(tZh, null)).toBe("");
+    expect(cliVersionText(tZh, viewOf({ expectedVersion: null }))).toBe("");
+  });
+
+  it("装法那一行只在两条路都没有候选时出现", () => {
+    expect(cliInstallText(viewOf({ source: "none", path: null }))).toBe(VIEW_INSTALL);
+    // 已装着的时候这句是噪音：那种场合用户要的是版本核对，那一句已经说了。
+    expect(cliInstallText(viewOf())).toBe("");
+    expect(cliInstallText(null)).toBe("");
+  });
+
+  it("状态行把标题、状态文本、版本行、装法与检测按钮画齐", () => {
     const node = buildCliStatusRow(
-      depsWith(tZh, { binary: { source: "bundled", path: BUNDLED_LAUNCHER } }),
+      depsWith(tZh, { binary: viewOf({ source: "none", path: null }) }),
     );
     const text = textOf(node);
     expect(text).toContain("外部 CLI（ocr）");
-    expect(text).toContain("随本插件分发已就位");
+    expect(text).toContain("未找到 ocr");
+    expect(text).toContain(VIEW_INSTALL);
+    expect(text).toContain("本插件的契约按 ocr 1.13.0 逐条核对");
     expect(text).toContain("检测版本");
     expect(fieldProps(node, "probe")).not.toBeNull();
   });
@@ -901,7 +991,11 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
       { ok: false, json: {} },
     ]);
     vi.stubGlobal("fetch", stub.fetch);
-    await expect(loadCliStatus()).resolves.toStrictEqual({ source: "path", path: PATH_LAUNCHER });
+    await expect(loadCliStatus()).resolves.toStrictEqual({
+      source: "path",
+      path: PATH_LAUNCHER,
+      measuredVersion: null,
+    });
     await expect(loadCliStatus()).resolves.toBeNull();
     await expect(loadCliStatus()).resolves.toBeNull();
     await expect(loadCliStatus()).resolves.toBeNull();
@@ -949,54 +1043,77 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
   });
 
   it("徽标短文案四档齐全，且英文那份不残留汉字", () => {
-    expect(cliBadgeText(tZh, { source: "bundled" })).toBe("ocr 随包就位");
-    expect(cliBadgeText(tZh, { source: "path" })).toBe("ocr 来自 PATH");
-    expect(cliBadgeText(tZh, { source: "none" })).toBe("未找到 ocr");
+    expect(cliBadgeText(tZh, viewOf({ source: "bundled" }))).toBe("ocr 走随包兜底");
+    expect(cliBadgeText(tZh, viewOf({ source: "path" }))).toBe(ZH_BADGE_PATH);
+    expect(cliBadgeText(tZh, viewOf({ source: "none", path: null }))).toBe("未找到 ocr");
     expect(cliBadgeText(tZh, null)).toBe("ocr 状态未取到");
     for (const status of [
-      { source: "bundled" },
-      { source: "path" },
-      { source: "none" },
+      viewOf({ source: "bundled" }),
+      viewOf({ source: "path" }),
+      viewOf({ source: "none", path: null }),
       null,
-    ] as (OcrBinaryView | null)[]) {
+    ] satisfies (OcrBinaryView | null)[]) {
       expect(cliBadgeText(tEn, status)).not.toMatch(HAN);
     }
     // 短文案与整句状态文本共用同一份判据，但必须各说各的话（标题旁放不下整句）。
-    expect(cliBadgeText(tZh, { source: "none" })).not.toBe(
-      binaryStatusText(tZh, { source: "none" }),
+    expect(cliBadgeText(tZh, viewOf({ source: "none", path: null }))).not.toBe(
+      binaryStatusText(tZh, viewOf({ source: "none", path: null })),
     );
   });
 
+  it("实测过且版本不一致时徽标改口说版本，来源那一档让位", () => {
+    expect(cliBadgeText(tZh, viewOf({ measuredVersion: "1.12.13" }))).toBe("ocr 版本不一致");
+    // 没测过时不许抢话：那时「不一致」与否根本没有依据。
+    expect(cliBadgeText(tZh, viewOf({ measuredVersion: null }))).toBe(ZH_BADGE_PATH);
+    expect(cliBadgeText(tZh, viewOf({ measuredVersion: VIEW_EXPECTED }))).toBe(ZH_BADGE_PATH);
+    expect(cliBadgeText(tEn, viewOf({ measuredVersion: "1.12.13" }))).not.toMatch(HAN);
+  });
+
   it("buildCliBadge 落出徽标元素并带上短文案", () => {
-    const node = buildCliBadge(tZh, { source: "bundled" });
+    const node = buildCliBadge(tZh, viewOf({ source: "bundled" }));
     expect(String(fieldProps(node, "cli-badge")?.className)).toContain("ocr-hint");
     // textOf 会把 className/data-field 一起拼进来，所以按「含短文案」断言而不是整串相等。
-    expect(textOf(node)).toContain("ocr 随包就位");
+    expect(textOf(node)).toContain("ocr 走随包兜底");
     expect(textOf(buildCliBadge(tEn, null))).toContain("ocr status unavailable");
   });
 
-  it("buildCliSection 画齐标题、状态与「版本要去卡片点检测」的指路", () => {
-    const node = buildCliSection(tZh, { source: "path", path: PATH_LAUNCHER });
+  it("buildCliSection 画齐标题、状态、版本核对与「版本要去卡片点检测」的指路", () => {
+    const node = buildCliSection(tZh, viewOf());
     expect(fieldProps(node, "cli-section")).not.toBeNull();
     const text = textOf(node);
     expect(text).toContain("外部 CLI（ocr）");
     expect(text).toContain(PATH_LAUNCHER);
+    expect(text).toContain(ZH_VERSION_EXPECTED);
     expect(text).toContain("检测版本");
-    expect(textOf(buildCliSection(tEn, { source: "none" }))).not.toMatch(HAN);
+    // 没装时那一句装法要在区块里看得见（详情页是用户读文档之外的第二个入口）。
+    const missingZh = textOf(buildCliSection(tZh, viewOf({ source: "none", path: null })));
+    expect(missingZh).toContain(VIEW_INSTALL);
+    // 那句是 host 按当前语言组好的原文，卡片只原样显示：英文界面下样本也按英文给，
+    // 这里断的是「卡片自己那一半文案不带汉字」，不是替 host 翻它给的那句。
+    const missingEn = textOf(
+      buildCliSection(tEn, viewOf({ source: "none", path: null, installHint: "brew install" })),
+    );
+    expect(missingEn).not.toMatch(HAN);
   });
 
-  it("buildCliActivation 给缺失说明配两个动作，各自接宿主的回调", () => {
+  it("buildCliActivation 给缺失说明配上带版本的装法与两个动作", () => {
     const clicked: string[] = [];
-    const node = buildCliActivation(tZh, {
-      onOpenDetails: () => {
-        clicked.push("details");
+    const node = buildCliActivation(
+      tZh,
+      {
+        onOpenDetails: () => {
+          clicked.push("details");
+        },
+        onDismiss: () => {
+          clicked.push("dismiss");
+        },
       },
-      onDismiss: () => {
-        clicked.push("dismiss");
-      },
-    });
+      VIEW_INSTALL,
+    );
     expect(fieldProps(node, "cli-activation")).not.toBeNull();
-    expect(textOf(node)).toContain("brew install open-code-review");
+    // 装法原文来自 host（带核对版本），卡片不再自己写一遍命令：两处各写一份就会漂成
+    // 「卡片教的版本与插件核对的版本不是一版」。
+    expect(textOf(node)).toContain(VIEW_INSTALL);
     const details = fieldProps(node, "guide-details");
     const dismiss = fieldProps(node, "guide-dismiss");
     expect(details?.onClick).toBeTypeOf("function");
@@ -1005,9 +1122,9 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
     dismiss?.onClick?.();
     expect(clicked).toStrictEqual(["details", "dismiss"]);
     // 英文那份同样不含汉字（指引出现在启用那一刻，是最外侧的可见文本）。
-    expect(textOf(buildCliActivation(tEn, { onOpenDetails: noop, onDismiss: noop }))).not.toMatch(
-      HAN,
-    );
+    expect(
+      textOf(buildCliActivation(tEn, { onOpenDetails: noop, onDismiss: noop }, "brew install x")),
+    ).not.toMatch(HAN);
   });
 });
 
@@ -1078,6 +1195,23 @@ describe("检测版本这条动作：URL、回执文本与忙位回收", () => {
   it("只有版本号时不补空行（output 缺席就只写版本行）", async () => {
     const run = await probeOnce({ ok: true, version: "1.12.13" });
     expect(run.messages[1]).toStrictEqual({ ok: true, text: "ocr 版本：1.12.13" });
+  });
+
+  it("host 给了换版命令就插在版本行与 output 之间，没给就不许多嘴", async () => {
+    const withCommand = await probeOnce({
+      ok: true,
+      version: "1.12.13",
+      changeText: "brew 那条命令：`brew upgrade open-code-review`",
+      output: "open-code-review 1.12.13 darwin/arm64",
+    });
+    expect(withCommand.messages[1]?.text.split("\n")).toStrictEqual([
+      "ocr 版本：1.12.13",
+      "brew 那条命令：`brew upgrade open-code-review`",
+      "open-code-review 1.12.13 darwin/arm64",
+    ]);
+    // 一致那一档 host 交回空串：多一行「怎么换版」是噪音。
+    const without = await probeOnce({ ok: true, version: "1.13.0", changeText: "" });
+    expect(without.messages[1]?.text).toBe("ocr 版本：1.13.0");
   });
 
   it("host 报失败时把原因写进回执，并把 ok 落成假", async () => {

@@ -7,6 +7,7 @@
 // 命令构造走 lib/cli.ts——与生产侧的引用关系一致。
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -31,6 +32,9 @@ import {
   parseOcrVersion,
   withHomeEnv,
   resolveOcrAvailability,
+  inferOcrInstallChannel,
+  ocrCommandsFor,
+  EXPECTED_OCR_CLI_VERSION,
 } from "../lib/cli.ts";
 import type {
   BuiltCommand,
@@ -45,9 +49,11 @@ import type { OcrReviewMessages } from "../lib/messages.ts";
 const { zh } = MESSAGES;
 
 const REPO_ABS = "/Users/me/repo";
+/** brew 那条装法命令的原文（多处断言共用）。 */
+const BREW_INSTALL = "brew install open-code-review";
 
-/** 随包 launcher 的入口是否「在盘上」的可切换替身：lib/cli.ts 的定位口经 existsSync
- *  判入口，缺了它就只有「装上了」这一档分支——而那取决于本机装没装 optionalDependencies。 */
+/** 随包兜底那一份的入口是否「在盘上」的可切换替身：lib/cli.ts 的定位口经 existsSync 判入口，
+ *  缺了它就只有「在盘上」这一档分支——而那取决于这台机器的依赖树里有没有那枚包。 */
 const fsStub = vi.hoisted(() => ({ exists: true }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -117,6 +123,37 @@ function unwrapReaper(wrapped: string): string {
     throw new Error(`not reaper-wrapped: ${wrapped.slice(0, 40)}`);
   }
   return shqUnwrap(wrapped.slice(prefix.length));
+}
+
+/* ── 临时目录夹具（可用性判据与装法判据都只问文件系统）───────────────────── */
+
+const tempDirs: string[] = [];
+
+/** 造一只临时目录，在里面放几个普通文件（名字逐个给）。 */
+function makeBinDir(names: string[]): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
+  tempDirs.push(dir);
+  for (const name of names) {
+    writeFileSync(path.join(dir, name), "#!/bin/sh\n");
+  }
+  return dir;
+}
+
+/** 按 `/` 分隔的相对段落建一棵目录树，末端是普通文件；返回该文件的绝对路径。
+ *  装法判据读的是路径里的 `node_modules` / `Cellar` 这些段落，只能靠真目录树构造。 */
+function makeNestedFile(segments: string[]): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ocr-chan-"));
+  tempDirs.push(dir);
+  const target = path.join(dir, ...segments);
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, "#!/bin/sh\n");
+  return target;
+}
+
+function makeEmptyDir(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
+  tempDirs.push(dir);
+  return dir;
 }
 
 describe("commaList 的边界闸", () => {
@@ -207,37 +244,53 @@ describe("clampEffort / commaList", () => {
 /** 守护包装用例共用的最小命令（字面量散在多处改一处就漏）。 */
 const REVIEW_CMD = "ocr review --audience agent";
 
-describe("ocrCommand：命令词解析", () => {
-  it("定位到随包 launcher → 命令词是它的绝对路径（shq 已转义）", () => {
+describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判据）", () => {
+  it("PATH 上有候选 ⇒ 命令词是它的绝对路径，随包入口不再抢在它前面", () => {
+    // 这条顺序就是「卡片报的版本 = 用户终端里跑的那一份」的全部保障：反过来的时候，
+    // 用户升级了 PATH 上的 CLI，插件仍跑随包那份旧版，两处永远对不上。
+    const bin = makeBinDir(["ocr"]);
+    const launcher = makeBinDir(["ocr.js"]);
     const memo = {};
-    const command = ocrCommand(() => "/opt/pkg/bin/ocr.js", memo);
-    expect(command).toBe("'/opt/pkg/bin/ocr.js'");
-    // 记忆生效：第二次即便定位口给出别的答案也不重解析。
-    expect(ocrCommand(() => "/other/bin/ocr.js", memo)).toBe("'/opt/pkg/bin/ocr.js'");
+    expect(ocrCommand(() => path.join(launcher, "ocr.js"), memo, { PATH: bin })).toBe(
+      shq(path.join(bin, "ocr")),
+    );
   });
 
-  it("定位不到（依赖没随包装上）→ 回落到 PATH 上的裸 ocr，同样只解析一次", () => {
+  it("PATH 没有候选才取随包 launcher；两处都没有 ⇒ 裸 ocr", () => {
+    const launcher = makeBinDir(["ocr.js"]);
+    const empty = makeEmptyDir();
     const memo = {};
-    // 定位口交出 null 表示「没找到」：与「抛错/找不到模块」同一档回落。
-    expect(ocrCommand(() => null, memo)).toBe("ocr");
-    expect(ocrCommand(() => "/other/bin/ocr.js", memo)).toBe("ocr");
+    expect(ocrCommand(() => path.join(launcher, "ocr.js"), memo, { PATH: empty })).toBe(
+      shq(path.join(launcher, "ocr.js")),
+    );
+    const bare = {};
+    expect(ocrCommand(() => null, bare, { PATH: empty })).toBe("ocr");
+  });
+
+  it("解析结果每进程记忆一次：第二次即便判据给出别的答案也不重解析", () => {
+    const bin = makeBinDir(["ocr"]);
+    const other = makeBinDir(["ocr"]);
+    const memo = {};
+    expect(ocrCommand(() => null, memo, { PATH: bin })).toBe(shq(path.join(bin, "ocr")));
+    expect(ocrCommand(() => null, memo, { PATH: other })).toBe(shq(path.join(bin, "ocr")));
   });
 
   it("生产那一档解析出的命令词可直接执行两种装法之一", () => {
-    // 不注入：走默认定位口。装上 optionalDependencies 时是 launcher 绝对路径，
-    // 否则是裸 ocr——两者都是可执行命令词，这里只钉住这个不变量。
-    expect(ocrCommand()).toMatch(/^(?:'.*ocr\.js'|ocr)$/u);
+    // 不注入：走默认定位口与真实 PATH。命中时是绝对路径，两处都没有时是裸 ocr——
+    // 两者都是可执行命令词，这里只钉住这个不变量（本机装没装 CLI 不该让用例变脸）。
+    expect(ocrCommand()).toMatch(/^(?:'.*'|ocr)$/u);
   });
 
-  it("win32 不取随包 launcher：shebang 脚本 pwsh/cmd 无法直执行，恒走 PATH 裸 ocr", () => {
-    // 与 wrapWithHostReaper / withHomeEnv 的 win32 放行同一口径；README 的平台承诺
-    // （Windows 跑裸命令）由此兑现。platform 与定位口都换成 stub，记忆槽用局部盒。
+  it("win32 恒走裸 ocr：绝对路径带反斜杠与空格在 cmd 里不可靠，随包 launcher 又是 shebang 脚本", () => {
+    // 与 resolveOcrAvailability 的 win32 分支同一口径；README 的平台承诺（Windows 跑裸命令）
+    // 由此兑现。platform 换成 stub，记忆槽用局部盒。
     const real = Object.getOwnPropertyDescriptor(process, "platform");
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
+      const bin = makeBinDir(["ocr"]);
       const memo = {};
-      expect(ocrCommand(() => "/opt/pkg/bin/ocr.js", memo)).toBe("ocr");
-      expect(ocrCommand(() => null, memo)).toBe("ocr");
+      expect(ocrCommand(() => null, memo, { PATH: bin })).toBe("ocr");
+      expect(ocrCommand(() => null, {})).toBe("ocr");
     } finally {
       if (real === undefined) {
         Reflect.deleteProperty(process, "platform");
@@ -247,14 +300,37 @@ describe("ocrCommand：命令词解析", () => {
     }
   });
 
-  it("定位口两档：入口在盘上给出绝对路径，不在盘上给 null（依赖装了一半那一档）", () => {
-    expect(locateLauncher()).toMatch(/ocr\.js$/u);
+  it("定位口三档：入口在盘上给出绝对路径，不在盘上或解析抛错都给 null", () => {
+    // 默认那一档（createRequire）在此不可测——它取决于这台机器装没装那枚依赖；注入解析口
+    // 才能把三条分支都摆出来。「依赖装了一半」（package.json 在、bin 入口不在）正是
+    // 当初 optionalDependencies 平台上二进制装不上时的那个形态。
+    const pkgDir = mkdtempSync(path.join(tmpdir(), "ocr-pkg-"));
+    tempDirs.push(pkgDir);
+    writeFileSync(path.join(pkgDir, "package.json"), "{}");
+    const binDir = path.join(pkgDir, "bin");
+    mkdirSync(binDir);
+    const launcher = path.join(binDir, "ocr.js");
+    writeFileSync(launcher, "#!/usr/bin/env node\n");
+    const resolveEntry = (): string => path.join(pkgDir, "package.json");
+    expect(locateLauncher(resolveEntry)).toBe(launcher);
     fsStub.exists = false;
     try {
-      expect(locateLauncher()).toBeNull();
+      expect(locateLauncher(resolveEntry)).toBeNull();
     } finally {
       fsStub.exists = true;
     }
+    expect(
+      locateLauncher(() => {
+        throw new Error("cannot find module");
+      }),
+    ).toBeNull();
+  });
+
+  it("生产那一档：本包不再随包分发 CLI，默认定位口恒给 null", () => {
+    // 与 test/publish-manifest.test.ts 那条「没有 optionalDependencies」的门禁同一条事实，
+    // 从代码侧再钉一次：这里若哪天不再是 null，就说明随包那份又回来了、PATH 上的用户自装
+    // 那份又要被它遮蔽。
+    expect(locateLauncher()).toBeNull();
   });
 });
 
@@ -891,107 +967,175 @@ describe("拒绝理由双语（注入 en 那份）", () => {
 
 /* ── 只问文件系统、不 spawn 的可用性判据 ─────────────────────────────────── */
 
-const tempDirs: string[] = [];
-
-/** 造一只临时目录，在里面放几个普通文件（名字逐个给）。 */
-function makeBinDir(names: string[]): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
-  tempDirs.push(dir);
-  for (const name of names) {
-    writeFileSync(path.join(dir, name), "#!/bin/sh\n");
-  }
-  return dir;
-}
-
-function makeEmptyDir(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
-  tempDirs.push(dir);
-  return dir;
-}
-
-describe("resolveOcrAvailability：来源三档与它的假命中防线", () => {
+describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁装的", () => {
   afterAll(() => {
     for (const dir of tempDirs) {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("随包入口在盘 ⇒ bundled，并且优先于 PATH 上的候选", () => {
-    const launcherDir = makeBinDir(["ocr.js"]);
-    const launcher = path.join(launcherDir, "ocr.js");
-    const bin = makeBinDir(["ocr"]);
-    expect(resolveOcrAvailability({ PATH: bin }, () => launcher, "darwin")).toStrictEqual({
-      source: "bundled",
-      path: launcher,
+  describe("resolveOcrAvailability：来源三档与它的假命中防线", () => {
+    it("PATH 上有候选 ⇒ path，且随包入口在盘也不抢在它前面", () => {
+      // 反序是这版修掉的缺陷：随包绝对路径先命中的话，用户升级了自己装在 PATH 上的 CLI，
+      // 插件却仍跑随包那份，卡片报的版本与他终端里跑的永远对不上。
+      const bin = makeBinDir(["ocr"]);
+      const launcher = path.join(makeBinDir(["ocr.js"]), "ocr.js");
+      expect(resolveOcrAvailability({ PATH: bin }, () => launcher, "darwin")).toStrictEqual({
+        source: "path",
+        path: path.join(bin, "ocr"),
+        channel: "unknown",
+      });
+    });
+
+    it("PATH 没有候选、随包入口在盘 ⇒ bundled（那一档只剩兜底的意义）", () => {
+      const empty = makeEmptyDir();
+      const launcher = path.join(makeBinDir(["ocr.js"]), "ocr.js");
+      expect(resolveOcrAvailability({ PATH: empty }, () => launcher, "darwin")).toStrictEqual({
+        source: "bundled",
+        path: launcher,
+        channel: "unknown",
+      });
+    });
+
+    it("假命中不算数：PATH 里那个 ocr 是目录，或那段目录里根本没有", () => {
+      const dirAsBin = makeEmptyDir();
+      mkdirSync(path.join(dirAsBin, "ocr"));
+      const nothing = makeEmptyDir();
+      expect(resolveOcrAvailability({ PATH: dirAsBin }, () => null, "darwin").source).toBe("none");
+      expect(resolveOcrAvailability({ PATH: nothing }, () => null, "darwin").source).toBe("none");
+    });
+
+    it("PATH 的空段不当 cwd：滤掉之后在真实目录里命中", () => {
+      // shell 把空段解释成**当前工作目录**，跟着这条语义走就会把被审查仓库里恰好叫
+      // ocr 的文件报成「PATH 上有」——而工作目录正是本包每次评审都在用的那个。
+      const bin = makeBinDir(["ocr"]);
+      expect(resolveOcrAvailability({ PATH: `:${bin}` }, () => null, "linux")).toStrictEqual({
+        source: "path",
+        path: path.join(bin, "ocr"),
+        channel: "unknown",
+      });
+      expect(resolveOcrAvailability({ PATH: ":" }, () => null, "linux").source).toBe("none");
+    });
+
+    it("按 PATH 顺序找：前一个目录没有就继续往下一个", () => {
+      const empty = makeEmptyDir();
+      const bin = makeBinDir(["ocr"]);
+      expect(
+        resolveOcrAvailability({ PATH: `${empty}:${bin}` }, () => null, "darwin"),
+      ).toStrictEqual({
+        source: "path",
+        path: path.join(bin, "ocr"),
+        channel: "unknown",
+      });
+    });
+
+    it("PATH 与 Path 都缺席 ⇒ 空串回落、判 none，不抛（也没了来源可报）", () => {
+      expect(resolveOcrAvailability({}, () => null, "darwin")).toStrictEqual({ source: "none" });
+    });
+
+    it("win32 即便定位口给得出入口也只走 PATH，并按 PATHEXT 命中", () => {
+      // 与 ocrCommand() 的 win32 跳过同一口径：两处不一致时，状态说「随包可用」而命令
+      // 却走另一条路，用户按状态做的决定就落在空处。后缀按字面比，大小写折叠是 Windows
+      // 文件系统的事，在 POSIX 上照做就错了，本判据不替平台改写语义。
+      const bin = makeBinDir(["ocr.cmd"]);
+      const launcher = makeBinDir(["ocr.js"]);
+      expect(
+        resolveOcrAvailability(
+          { PATH: bin, PATHEXT: ".COM;.cmd" },
+          () => path.join(launcher, "ocr.js"),
+          "win32",
+        ),
+      ).toStrictEqual({ source: "path", path: path.join(bin, "ocr.cmd"), channel: "unknown" });
+    });
+
+    it("win32 的 PATHEXT 缺席时认裸名；Path 这种环境变量名也读", () => {
+      const bin = makeBinDir(["ocr"]);
+      expect(resolveOcrAvailability({ Path: bin }, () => null, "win32")).toStrictEqual({
+        source: "path",
+        path: path.join(bin, "ocr"),
+        channel: "unknown",
+      });
+    });
+
+    it("win32 的 PATHEXT 里空段与重复段都不生出多余候选", () => {
+      const bin = makeBinDir(["ocr"]);
+      expect(
+        resolveOcrAvailability({ PATH: bin, PATHEXT: ";;.cmd;" }, () => null, "win32").source,
+      ).toBe("path");
     });
   });
 
-  it("随包入口缺席、PATH 上有普通文件 ⇒ path，交回的是绝对路径", () => {
-    const bin = makeBinDir(["ocr"]);
-    expect(resolveOcrAvailability({ PATH: bin }, () => null, "darwin")).toStrictEqual({
-      source: "path",
-      path: path.join(bin, "ocr"),
+  describe("inferOcrInstallChannel：那份是谁装上的", () => {
+    it("真身在 Cellar 下 ⇒ brew", () => {
+      expect(
+        inferOcrInstallChannel(
+          makeNestedFile(["opt", "homebrew", "Cellar", "open-code-review", "1.13.0", "bin", "ocr"]),
+        ),
+      ).toBe("brew");
+    });
+
+    it("真身在 node_modules 下 ⇒ npm（nvm、brew 装的 node、Windows 的 npm 全局目录都算）", () => {
+      expect(
+        inferOcrInstallChannel(
+          makeNestedFile(["root", ".nvm", "versions", "node", "v24", "lib", "node_modules", "ocr"]),
+        ),
+      ).toBe("npm");
+    });
+
+    it("brew 前缀下的 npm 全局包判 npm：node_modules 先判，否则 homebrew 那段把它抢成 brew", () => {
+      // 这条是两条判据的**顺序**测试，不是内容测试：用 brew 装的 node 跑 `npm i -g` 时，
+      // 路径同时含 homebrew 与 node_modules。判反了，用户拿到的就是一条动他包管理器的命令。
+      expect(
+        inferOcrInstallChannel(
+          makeNestedFile(["opt", "homebrew", "lib", "node_modules", "@alibaba-group", "ocr.js"]),
+        ),
+      ).toBe("npm");
+    });
+
+    it("bin 目录里那条软链要按真身判：只看链接路径时 brew 与 npm 长得一模一样", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "ocr-link-"));
+      tempDirs.push(dir);
+      const cellar = makeNestedFile([
+        "homebrew",
+        "Cellar",
+        "open-code-review",
+        "1.13.0",
+        "bin",
+        "ocr",
+      ]);
+      const link = path.join(dir, "ocr");
+      await symlink(cellar, link);
+      expect(inferOcrInstallChannel(link)).toBe("brew");
+    });
+
+    it("两种典型布局都不命中 ⇒ unknown（手工 cp / npx / 别的前缀，不猜）", () => {
+      expect(inferOcrInstallChannel(makeNestedFile(["Users", "me", "bin", "ocr"]))).toBe("unknown");
+    });
+
+    it("路径已经不在盘上 ⇒ 退回字面值判，不抛", () => {
+      // 解不开符号链接这一档在真实机器上是「候选刚被移走」：判据退化成按字面路径读，
+      // 结果仍指向正确的装法，而不是因为一次 ENOENT 就没有来源。
+      expect(inferOcrInstallChannel("/opt/homebrew/Cellar/open-code-review/9.9.9/bin/ocr")).toBe(
+        "brew",
+      );
+      expect(inferOcrInstallChannel("/Users/me/nowhere/ocr")).toBe("unknown");
     });
   });
 
-  it("假命中不算数：PATH 里那个 ocr 是目录，或那段目录里根本没有", () => {
-    const dirAsBin = makeEmptyDir();
-    mkdirSync(path.join(dirAsBin, "ocr"));
-    const nothing = makeEmptyDir();
-    expect(resolveOcrAvailability({ PATH: dirAsBin }, () => null, "darwin").source).toBe("none");
-    expect(resolveOcrAvailability({ PATH: nothing }, () => null, "darwin").source).toBe("none");
-  });
-
-  it("PATH 的空段不当 cwd：滤掉之后在真实目录里命中", () => {
-    // shell 把空段解释成**当前工作目录**，跟着这条语义走就会把被审查仓库里恰好叫
-    // ocr 的文件报成「PATH 上有」——而工作目录正是本包每次评审都在用的那个。
-    const bin = makeBinDir(["ocr"]);
-    expect(resolveOcrAvailability({ PATH: `:${bin}` }, () => null, "linux")).toStrictEqual({
-      source: "path",
-      path: path.join(bin, "ocr"),
+  describe("ocrCommandsFor：给人照抄的两条命令", () => {
+    it("npm 那条恒带核对版本，且与 install/upgrade 无关（覆盖安装即换版）", () => {
+      const npm = `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`;
+      expect(ocrCommandsFor("npm", false).npm).toBe(npm);
+      expect(ocrCommandsFor("npm", true).npm).toBe(npm);
+      expect(ocrCommandsFor("brew", true).npm).toBe(npm);
     });
-    expect(resolveOcrAvailability({ PATH: ":" }, () => null, "linux").source).toBe("none");
-  });
 
-  it("按 PATH 顺序找：前一个目录没有就继续往下一个", () => {
-    const empty = makeEmptyDir();
-    const bin = makeBinDir(["ocr"]);
-    expect(resolveOcrAvailability({ PATH: `${empty}:${bin}` }, () => null, "darwin")).toStrictEqual(
-      { source: "path", path: path.join(bin, "ocr") },
-    );
-  });
-
-  it("PATH 与 Path 都缺席 ⇒ 空串回落、判 none，不抛", () => {
-    expect(resolveOcrAvailability({}, () => null, "darwin")).toStrictEqual({ source: "none" });
-  });
-
-  it("win32 即便定位口给得出入口也只走 PATH，并按 PATHEXT 命中", () => {
-    // 与 ocrCommand() 的 win32 跳过同一口径：两处不一致时，状态说「随包可用」而命令
-    // 却走另一条路，用户按状态做的决定就落在空处。后缀按字面比，大小写折叠是 Windows
-    // 文件系统的事，在 POSIX 上照做就错了，本判据不替平台改写语义。
-    const bin = makeBinDir(["ocr.cmd"]);
-    const launcher = makeBinDir(["ocr.js"]);
-    expect(
-      resolveOcrAvailability(
-        { PATH: bin, PATHEXT: ".COM;.cmd" },
-        () => path.join(launcher, "ocr.js"),
-        "win32",
-      ),
-    ).toStrictEqual({ source: "path", path: path.join(bin, "ocr.cmd") });
-  });
-
-  it("win32 的 PATHEXT 缺席时认裸名；Path 这种环境变量名也读", () => {
-    const bin = makeBinDir(["ocr"]);
-    expect(resolveOcrAvailability({ Path: bin }, () => null, "win32")).toStrictEqual({
-      source: "path",
-      path: path.join(bin, "ocr"),
+    it("brew 那条按装没装过换 install/upgrade，但恒不带版本（formula 只有一份 stable）", () => {
+      expect(ocrCommandsFor("brew", false).brew).toBe(BREW_INSTALL);
+      expect(ocrCommandsFor("brew", true).brew).toBe("brew upgrade open-code-review");
+      // 来源判不出来时不赌：`brew upgrade` 对没装过的包名会直接报错，install 才是幂等那条。
+      expect(ocrCommandsFor("unknown", true).brew).toBe(BREW_INSTALL);
+      expect(ocrCommandsFor("npm", true).brew).toBe(BREW_INSTALL);
     });
-  });
-
-  it("win32 的 PATHEXT 里空段与重复段都不生出多余候选", () => {
-    const bin = makeBinDir(["ocr"]);
-    expect(
-      resolveOcrAvailability({ PATH: bin, PATHEXT: ";;.cmd;" }, () => null, "win32").source,
-    ).toBe("path");
   });
 });

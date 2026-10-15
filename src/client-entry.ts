@@ -115,8 +115,14 @@ function providerOf(raw: unknown): DshProvider {
 /** 可得性来源的合法域（与 host 侧 `OcrBinarySource` 同一份取值）。形状不合即「没报」。 */
 const BINARY_SOURCES = new Set(["bundled", "path", "none"]);
 
-/** 解析宿主送的可得性对象。导出是为了让「wire 键名」这条契约能被钉住：卡片与 host
- *  两处各写一份键名时，写错了的症状是状态行永远显示「未取到」，而不是任何报错。 */
+/**
+ * 解析宿主送的可得性对象。导出是为了让「wire 键名」这条契约能被钉住：卡片与 host
+ *  两处各写一份键名时，写错了的症状是状态行永远显示「未取到」，而不是任何报错。
+ *
+ * 只有 `source` 是必需的：其余四样各管一句附加信息，缺了就少说那一句，而不是把整行判定
+ * 作废——「宿主报了 PATH 却没报版本」仍然是一条用户要看的事实。`measuredVersion` 例外，
+ * 它恒在（null = 还没测过），因为「没测过」与「旧宿主不带这字段」在卡片上是同一句话。
+ */
 export function binaryOf(raw: unknown): OcrBinaryView | null {
   if (!isRecord(raw)) {
     return null;
@@ -126,7 +132,18 @@ export function binaryOf(raw: unknown): OcrBinaryView | null {
     return null;
   }
   const path = strOf(raw["path"]);
-  return path === "" ? { source } : { source, path };
+  const channel = strOf(raw["channel"]);
+  const expectedVersion = strOf(raw["expectedVersion"]);
+  const installHint = strOf(raw["installHint"]);
+  const measured = raw["measuredVersion"];
+  return {
+    source,
+    ...(path === "" ? {} : { path }),
+    ...(channel === "" ? {} : { channel }),
+    ...(expectedVersion === "" ? {} : { expectedVersion }),
+    ...(installHint === "" ? {} : { installHint }),
+    measuredVersion: typeof measured === "string" ? measured : null,
+  };
 }
 
 /**
@@ -227,13 +244,23 @@ export interface ProviderSource {
   message: string;
 }
 /**
- * 外部 `ocr` 的可得性（`lib/cli.ts` 的 resolveOcrAvailability 那一档）。
- * 只有文件系统的事实，不含版本号——版本要 spawn，归「检测」按钮那条动作。
+ * 外部 `ocr` 的可得性（`lib/cli.ts` 的 resolveOcrAvailability 那一档）+ 版本核对所需的两样。
+ * 卡片自己不起进程也不判来源：`measuredVersion` 是宿主那边最近一次 `ocr version` 的落态值，
+ * 没测过就是 null；现测归「检测」按钮那条 POST。
  */
 export interface OcrBinaryView {
   /** "bundled" | "path" | "none"；wire 上一切未知取值按「未报」处理（见 binaryOf）。 */
   source: string;
+  /** 命中的绝对路径，宿主没给（none 档）即缺席。 */
   path?: string;
+  /** 那份的装法："brew" | "npm" | "unknown"；判不出来源时缺席。 */
+  channel?: string;
+  /** 本插件契约核对所依据的版本（`lib/cli.ts` 的 EXPECTED_OCR_CLI_VERSION）。 */
+  expectedVersion?: string;
+  /** 最近一次实测到的版本；null = 还没测过。 */
+  measuredVersion: string | null;
+  /** 装法那一句（含命令原文与版本），由 host 按来源/部署偏好组好。 */
+  installHint?: string;
 }
 export interface ProvidersPayload {
   providers: DshProvider[];
@@ -679,6 +706,17 @@ export function currentConfigText(t: Translate, current: ProvidersPayload["curre
   });
 }
 
+/** 装法枚举到文案键：查表而不是嵌套三元（本仓 lint 禁嵌套三元），查不到就是「未识别」那一档。 */
+const CHANNEL_KEYS: Record<string, "channelBrew" | "channelNpm" | "channelUnknown"> = {
+  brew: "channelBrew",
+  npm: "channelNpm",
+};
+
+/** 那份 CLI 是怎么装上的，翻成人话。判不出来源（含 host 没报这一档）不猜。 */
+function channelText(t: Translate, channel: string | undefined): string {
+  return t(CHANNEL_KEYS[channel ?? ""] ?? "channelUnknown");
+}
+
 /**
  * 外部 CLI 可得性那一行的文本。三档来源与「宿主没报」四种说法，判据全在 host 侧
  * （`lib/cli.ts` 的 resolveOcrAvailability），卡片只翻译结论——两处各算各的就会漂。
@@ -688,12 +726,46 @@ export function binaryStatusText(t: Translate, binary: OcrBinaryView | null): st
     return t("binaryUnknown");
   }
   if (binary.source === "bundled") {
-    return t("binaryBundled");
+    return t("binaryBundled", {
+      path: binary.path ?? "",
+      channel: channelText(t, binary.channel),
+    });
   }
   if (binary.source === "path") {
-    return t("binaryPath", { path: binary.path ?? "" });
+    return t("binaryPath", { path: binary.path ?? "", channel: channelText(t, binary.channel) });
   }
   return t("binaryNone");
+}
+
+/**
+ * 版本核对那一行：「插件按哪一版核对」恒说，「本机是哪一版」只在测过之后才说。
+ * 没测过时不编造任何结论，也不在这里重复「点检测」——那句在按钮本身与区块指路里已经有了。
+ */
+export function cliVersionText(t: Translate, binary: OcrBinaryView | null): string {
+  if (binary?.expectedVersion === undefined) {
+    return "";
+  }
+  const expected = binary.expectedVersion;
+  const lines = [t("versionExpected", { expected })];
+  if (binary.measuredVersion !== null) {
+    lines.push(
+      binary.measuredVersion === expected
+        ? t("versionMatched", { actual: binary.measuredVersion })
+        : t("versionDiverged", { actual: binary.measuredVersion, expected }),
+    );
+  }
+  return lines.join(" · ");
+}
+
+/**
+ * 装法那一行：只在两条路都没有候选时出现。已装着的时候这条是噪音——那种情况下用户要的是
+ * 「哪一份、什么版本、要不要换」，那两行已经说了。
+ */
+export function cliInstallText(binary: OcrBinaryView | null): string {
+  if (binary?.source !== "none") {
+    return "";
+  }
+  return binary.installHint ?? "";
 }
 
 /** 一条错误提示行的类名（多处在用；sonarjs 的重复字面量门禁要求收成常量）。 */
@@ -734,6 +806,12 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
   );
   const statusText = binaryStatusText(t, deps.binary);
   const status = createElement("div", { className: "ocr-hint" }, statusText);
+  const versionText = cliVersionText(t, deps.binary);
+  const versionLine =
+    versionText === "" ? null : createElement("div", { className: "ocr-hint" }, versionText);
+  const hintText = cliInstallText(deps.binary);
+  const installLine =
+    hintText === "" ? null : createElement("div", { className: "ocr-hint" }, hintText);
   const probe = deps.probeMsg
     ? createElement(
         "div",
@@ -746,6 +824,8 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
     { style: { padding: "2px 0" }, "data-field": "cli-status" },
     row,
     status,
+    versionLine,
+    installLine,
     probe,
   );
 }
@@ -753,10 +833,20 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
 /**
  * 徽标用的短文案（标题旁那只标签放不下整句装法）。与 `binaryStatusText` 同一判据、
  * 不同长度：两处各算一份「哪一档」就会漂，所以入参仍是 host 送的那份 `OcrBinaryView`。
+ *
+ * 「实测过且与核对版本不一致」压过来源那一档：用户扫一眼列表要看到的结论是「这份 CLI
+ * 与本插件不同版本」，来源在哪一行里已经写了。没实测过就不压——那时不一致与否无从谈起。
  */
 export function cliBadgeText(t: Translate, binary: OcrBinaryView | null): string {
   if (binary === null) {
     return t("badgeUnknown");
+  }
+  const diverged =
+    binary.expectedVersion !== undefined &&
+    binary.measuredVersion !== null &&
+    binary.measuredVersion !== binary.expectedVersion;
+  if (diverged) {
+    return t("badgeDiverged");
   }
   if (binary.source === "bundled") {
     return t("badgeBundled");
@@ -834,16 +924,24 @@ export function OcrCliBadge(props: CliStatusShare & PluginDetailProps): ReactNod
   return buildCliBadge(props.t, status);
 }
 
-/** 区块体：标题 + 完整状态那一行 + 指路那一句。 */
+/** 区块体：标题 + 完整状态那一行 + 版本核对那一行 + 装法（没装时）+ 指路那一句。 */
 export function buildCliSection(t: Translate, status: OcrBinaryView | null): ReactNode {
   const title = createElement("div", { className: CARD_NAME_CLASS }, t("binaryTitle"));
   const body = createElement("div", { className: "ocr-hint" }, binaryStatusText(t, status));
+  const versionText = cliVersionText(t, status);
+  const versionLine =
+    versionText === "" ? null : createElement("div", { className: "ocr-hint" }, versionText);
+  const hintText = cliInstallText(status);
+  const installLine =
+    hintText === "" ? null : createElement("div", { className: "ocr-hint" }, hintText);
   const hint = createElement("div", { className: "ocr-hint" }, t("binaryProbeHint"));
   return createElement(
     "div",
     { style: { padding: "8px 0" }, "data-field": "cli-section" },
     title,
     body,
+    versionLine,
+    installLine,
     hint,
   );
 }
@@ -859,14 +957,20 @@ export function OcrCliSection(props: CliStatusShare & PluginDetailProps): ReactN
 }
 
 /**
- * 启用指引的内容：一句「两条路都没找到」+ 去详情页 / 收起这两个动作。
+ * 启用指引的内容：一句「两条路都没找到」+ 带版本的装法 + 去详情页 / 收起这两个动作。
  * 动作回调由宿主给（`onOpenDetails` 顺带把用户送到本包配置页，那里才有「检测」按钮）。
+ * @param t - 文案口。
+ * @param props - 只取那两个动作回调。
+ * @param install - 装法那一句（host 按核对版本与部署偏好组好的原文）。
  */
 export function buildCliActivation(
   t: Translate,
   props: Pick<PluginActivationOwnerProps, "onOpenDetails" | "onDismiss">,
+  install: string,
 ): ReactNode {
   const text = createElement("div", { className: STATUS_ERROR_CLASS }, t("binaryNone"));
+  const installLine =
+    install === "" ? null : createElement("div", { className: "ocr-hint" }, install);
   const details = createElement(
     "button",
     {
@@ -891,6 +995,7 @@ export function buildCliActivation(
     "div",
     { style: { padding: "8px 0", display: "flex", gap: 8 }, "data-field": "cli-activation" },
     text,
+    installLine,
     details,
     dismiss,
   );
@@ -909,7 +1014,7 @@ export function OcrCliActivation(props: CliStatusShare & PluginActivationOwnerPr
   if (!mine || status?.source !== "none") {
     return null;
   }
-  return buildCliActivation(props.t, props);
+  return buildCliActivation(props.t, props, cliInstallText(status));
 }
 
 /** 数据齐（source.status === "ready"）那一支：provider/model 两行 + 三个动作按钮 +
@@ -1433,7 +1538,11 @@ export async function runProbe(deps: ProbeActionDeps): Promise<void> {
       ? t("probeVersion", { version: strOf(fieldOf(json, "version")) })
       : t("probeReason", { reason: strOf(fieldOf(json, "reason")) });
     const output = strOf(fieldOf(json, "output"));
-    deps.setProbeMsg({ ok, text: output === "" ? head : `${head}\n${output}` });
+    // `changeText` 是宿主按「实测版本 ≠ 核对版本」或「压根没装」才给的那句换版命令；
+    // 一致时它是空串，这里就不许多嘴。
+    const change = strOf(fieldOf(json, "changeText"));
+    const lines = [head, change, output].filter((line) => line !== "");
+    deps.setProbeMsg({ ok, text: lines.join("\n") });
     // 走完一次来回就重读载荷：状态那一行是页面装载时读的，而探测吃的是**此刻**的文件系统。
     // 用户在页面开着的时候装上（或拆掉）CLI，就会出现「ocr 版本：1.2.3」与「未找到 ocr」
     // 同屏自相矛盾——两处必须落到同一时刻的事实上。

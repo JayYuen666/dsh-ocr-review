@@ -84,7 +84,7 @@ const HOST_SCRUBBED_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN|^DSH_/iu;
  *
  * 宿主侧 resolve() 的 source 是「dsh 进程自己的取值层」，不等于「OCR 子进程够得到的
  * 层」——少了这道判定就是「select 成功 → OCR 401」的假绿：
- *   - `file`（$DSH_HOME/.credentials.yaml）→ get-cred 第 2 层，可达；
+ *   - `file`（$DSH_HOME/.credentials.yaml）→ get-cred 第 1 层，可达；
  *   - `user-env`（$DSH_HOME/.env）→ get-cred 第 3 层，可达；
  *   - `env`（dsh 进程继承的环境）→ 只有 ref 名**不**命中宿主净化模式时才可达
  *     （API key 类 ref 几乎全含 KEY/TOKEN，实际常不可达）；

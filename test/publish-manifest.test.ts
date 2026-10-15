@@ -14,6 +14,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 
 const pkgDir = path.join(import.meta.dirname, "..");
 
@@ -29,14 +30,15 @@ const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [/\b(?:19|20)\d{2}-\d{2}-\d{2}\
 /**
  * `publishConfig` 里允许出现的字段：可见性、源，与发布用的 dist-tag。三者都不是入口面。
  *
- * `tag` 之所以必须在仓库里而不是靠发布者记旗标：npm 对带 prerelease 段的版本（`0.1.5-rc`）
- * 在没有 `--tag` 也没有 `publishConfig.tag` 时**直接拒绝发布**（installed
- * npm/lib/commands/publish.js 的 isDefaultTag/isPreRelease 那道检查），漏旗标不是"发错标签"
- * 而是"发不出去"。而它不属于本门禁守的那类字段——本门禁管的是「入口字段不得只写在
- * publishConfig 里」（npm 不合并 main/exports，换个发布器就发出一个 import 必失败的包），
- * `tag` 没有这个风险：npm 读它，pnpm 侧还有 `--tag` 旗标可覆盖。
+ * `tag` 是**允许**写在这里、但本包刻意不写：npm 对带 prerelease 段的版本在既没有 `--tag`
+ * 也没有 `publishConfig.tag` 时**直接拒绝发布**（installed npm/lib/commands/publish.js 的
+ * isDefaultTag/isPreRelease 那道检查），所以漏旗标的后果是「发不出去」而不是「发错标签」——
+ * 响亮失败比把预发布版推上 latest 好。不带这一位时稳定版照默认走 latest，发预发布版就得
+ * 显式表态。它与本门禁守的那类字段不同：门禁管的是「入口字段不得只写在 `publishConfig`
+ * 里」（npm 不合并 main/exports，换个发布器就发出一个 import 必失败的包），`tag` 没有这个
+ * 风险：npm 读它，pnpm 侧还有 `--tag` 旗标可覆盖。
  */
-const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry", "tag"]);
+const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry"]);
 
 /** 遍历时跳过的目录：依赖、产物、以及本门禁刻意不管的面。 */
 const SKIP_DIRS = new Set([
@@ -63,6 +65,8 @@ interface Manifest {
   readonly dependencies?: Record<string, string>;
   readonly devDependencies?: Record<string, string>;
   readonly peerDependencies?: Record<string, string>;
+  readonly optionalDependencies?: Record<string, string>;
+  readonly ocrCliVersion?: unknown;
 }
 
 /** 一条 `files` 模式的两种形态。 */
@@ -246,6 +250,28 @@ describe("发布形态", () => {
     for (const key of Object.keys(manifest.publishConfig ?? {})) {
       expect(ALLOWED_PUBLISH_CONFIG.has(key), `publishConfig.${key} 会被 npm 忽略`).toBe(true);
     }
+  });
+});
+
+describe("外部 CLI 的版本声明与依赖边界", () => {
+  it("package.json 的 ocrCliVersion 与代码里的核对常量逐字相等", async () => {
+    // 版本声明只有 package.json 一处是人写的：代码常量与两侧 README 都据本条对齐。
+    // 少了这道门，「README 教用户装 A 版本、插件按 B 版本核对」是自洽的——两端各自绿，
+    // 用户照着装完才发现提示里那句「与核对版本不一致」永真。
+    const { manifest } = await readSurface();
+    expect(
+      manifest.ocrCliVersion,
+      "package.json 的 ocrCliVersion 必须与 lib/cli.ts 的 EXPECTED_OCR_CLI_VERSION 同值",
+    ).toBe(EXPECTED_OCR_CLI_VERSION);
+  });
+
+  it("没有 optionalDependencies：外部 CLI 由用户自选安装方式", async () => {
+    // 曾经那枚 @alibaba-group/open-code-review 的 consequences 有两层：装本插件顺带改了
+    // 用户的全局工具链，且解析出的随包绝对路径比 PATH 上用户自装那份更先命中，于是用户
+    // 升级了 CLI、插件仍跑随包那份旧版，卡片报的版本与他终端里跑的永远对不上。
+    // 判据只断「这张表为空」：它守的是整类「装上本插件就顺带装别的东西」，不是某一个包名。
+    const { manifest } = await readSurface();
+    expect(manifest.optionalDependencies, "本包不随包分发外部 CLI").toBeUndefined();
   });
 });
 

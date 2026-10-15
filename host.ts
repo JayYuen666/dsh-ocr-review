@@ -148,8 +148,10 @@ import {
   withHomeEnv,
   describeValue,
   resolveRoot,
+  EXPECTED_OCR_CLI_VERSION,
+  ocrCommandsFor,
 } from "./lib/cli.ts";
-import type { OcrBinaryStatus } from "./lib/cli.ts";
+import type { OcrBinaryStatus, OcrInstallChannel, OcrInstallPreference } from "./lib/cli.ts";
 import { clampEffort } from "./lib/argv-guard.ts";
 import {
   parseReviewOutput,
@@ -157,6 +159,7 @@ import {
   parseDelegateRules,
   summarizeReview,
 } from "./lib/parse.ts";
+import type { ReviewSummaryView } from "./lib/parse.ts";
 import { ROUTING_NAME, ROUTING_ORDER } from "./lib/routing.ts";
 import {
   providersForCard,
@@ -259,7 +262,8 @@ export type ShellService = Pick<ShellExecutor, "resolve" | "execute">;
 /**
  * 官方 JobRegistry（@deepseek-ai/dsh-jobs，abstract Service + protected ctx → 名义比较）
  * 的方法面投影：本包用这五位，缺一位都跑不通——
- *  - `start`：把后台评审的子进程登记成作业（`kind: "ocr-review"` ⇒ id `ocr-review-N`）；
+ *  - `start`：把后台评审的子进程登记成作业（`kind: "ocr-review"` ⇒ id `ocr-review-<16 位 hex>`，
+ *   注册表按 randomUUID 截短发号，不是递增序号）；
  *  - `kill`：工具调用被中止时经注册表收，而不是绕过它直接杀进程（否则官方名册里那条
  *   永远停在 running，环也一直不关——实测同 zvec-grep）；
  *  - `attachController`：实测官方件在「没有 controller 服务这个 owner」时**拒绝 start**，
@@ -277,7 +281,7 @@ type JobsService = Pick<
   "start" | "list" | "get" | "kill" | "remove" | "wait" | "attachController"
 >;
 
-/** 官方注册表里本包作业的 kind；宿主据此签发的 id 形如 `ocr-review-N`。 */
+/** 官方注册表里本包作业的 kind；宿主据此签发的 id 形如 `ocr-review-<16 位 hex>`。 */
 const OCR_JOB_KIND = "ocr-review";
 
 /**
@@ -639,7 +643,7 @@ const BACKGROUND_RECEIPT_SCHEMA = {
     repo: { type: "string" },
     // ShellProcessStatus（dsh-shell）：注册表收尾后进程的落定态只有这三种。
     processStatus: { type: "string", enum: ["running", "completed", "killed"] },
-    // 官方作业 id（ctx.jobs 发号，形如 `ocr-review-N`）。这是后台评审**一定有结果**
+    // 官方作业 id（ctx.jobs 发号，形如 `ocr-review-<16 位 hex>`）。这是后台评审**一定有结果**
     // 的句柄：`job_output` 按 id 读得到增量 stdout/stderr 与最终结局；而 polling 里
     // 那条 `ocr_session(action=list)` 路线依赖会话已落盘且 --repo 能对上，启动早期
     // 这两件事都可能还不成立，于是模型手里就只剩一个查不出东西的 running 回执。
@@ -925,8 +929,8 @@ const SESSION_OUTPUT_SCHEMA = {
  * owner 口径是「状态归 ocr 自己，围栏由本包显式放开」，故直接要 `danger-full-access`。
  *
  * **「能不能只放开需要写的那一条路径」：不能。** 官方按调用携带的 `SandboxPolicyRequest`
- * 只有 `session` 与 `mode` 两个字段（dsh-sandbox-policy 0.2.1-alpha.2 的
- * lib/types/index.d.ts:50），**没有**附加可写路径、没有自定义 HOME、没有目录级豁免。
+ * 只有 `session` 与 `mode` 两个字段（dsh-sandbox-policy 0.2.1-alpha.3 的
+ * `SandboxPolicyRequest` 声明），**没有**附加可写路径、没有自定义 HOME、没有目录级豁免。
  * 可选的收紧路径只有「改 ocr 自己的状态落点」或「等上游加字段」，两者都不是本包能在
  * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
  * 文件系统写权限，不是宿主其它能力；且 ocr 读什么、写什么仍由上面那条 argv 闸与
@@ -1521,6 +1525,14 @@ export interface Config {
    * 这件事就把它开起来；设置页的状态探测不受本项影响，恒定带该变量。
    */
   ocrNoAutoUpdate: boolean;
+  /**
+   * 没装 ocr 时先推哪一条装法：`both` = 两条都给（缺省），`brew` / `npm` = 按部署偏好。
+   * 只在**来源判不出来**时才起作用——本机已经有一份候选时，文案按那一份的真实来源说
+   * （brew 装的提示 brew，npm 装的提示 npm），部署偏好不会被它盖掉。
+   * npm 那条恒带 `EXPECTED_OCR_CLI_VERSION` 那一版（npm 能钉版本，brew 的 formula 不能），
+   * 所以选 `npm` 的部署拿到的是「装完就和插件契约同版本」的命令。
+   */
+  ocrInstallHint: OcrInstallPreference;
   /** shell 执行器的 stdout 缓冲上限（字节）：前台与后台共用同一字段。 */
   stdoutMaxBytes: number;
 }
@@ -1551,6 +1563,8 @@ const configSchema = Schema.object({
   stdoutMaxBytes: Schema.natural().min(1).default(STDOUT_MAX_BYTES),
   // 默认关：维持上游行为（CLI 的 npm 包装层会自行 `npm i -g` 升到 latest）。
   ocrNoAutoUpdate: Schema.boolean().default(false),
+  // 缺省 both：把两条装法都给用户，替他选装法是部署的决定而不是本包的偏好。
+  ocrInstallHint: Schema.union(["both", "brew", "npm"]).default("both"),
 });
 export { configSchema as Config };
 
@@ -1687,10 +1701,100 @@ async function runVersionProbe(
   };
 }
 
+/** 三条装法文案的键，按「来源 / 部署偏好」这个联合取值挑。收成一张表是因为
+ *  `variant === "brew" ? … : variant === "npm" ? … : …` 那种嵌套三元在本仓是 lint 级禁令。 */
+const INSTALL_HINT_KEYS = {
+  both: "installHintBoth",
+  brew: "installHintBrew",
+  npm: "installHintNpm",
+} as const satisfies Record<OcrInstallPreference, keyof OcrReviewMessages>;
+
+/**
+ * 「怎么把外部 CLI 装/换成核对过的这一版」那一句文案。
+ *
+ * 两条判据的分工是刻意的：本机已有一份候选时**按那份的真实来源说**（brew 装的提示 brew，
+ * npm 装的提示 npm），因为用户要执行的是替换他手上那一份的命令；判不出来源（unknown）或
+ * 压根没装时才退到部署偏好 `ocrInstallHint`。反过来让偏好盖来源，就会给 brew 装的用户端出
+ * 一条 `npm i -g`，装完机器上出现第二份 ocr 而 PATH 上那条还是旧的。
+ * @param status - 现读口交回的可用性判定（来源、命中路径与那份的渠道）。
+ * @param config - 本次 apply 的配置（取 `ocrInstallHint`）。
+ * @param messages - 文案表。
+ * @returns 给人照抄的那一句（含命令原文）。
+ */
+function ocrInstallText(
+  status: OcrBinaryStatus,
+  config: Config,
+  messages: OcrReviewMessages,
+): string {
+  const channel: OcrInstallChannel = status.channel ?? "unknown";
+  const variant: OcrInstallPreference = channel === "unknown" ? config.ocrInstallHint : channel;
+  const commands = ocrCommandsFor(channel, status.path !== undefined);
+  return format(messages[INSTALL_HINT_KEYS[variant]], {
+    brewCmd: commands.brew,
+    npmCmd: commands.npm,
+    version: EXPECTED_OCR_CLI_VERSION,
+  });
+}
+
+/**
+ * GET providers 里 `ocrBinary` 那半份载荷：文件系统的事实 + 版本核对所需的两样 + 装法文案。
+ * 三个显示面（卡片状态行、详情页徽标/区块、启用指引）都读这一份，凑不出两处口径差。
+ * @param status - 现读口交回的可用性判定。
+ * @param config - 本次 apply 的配置（装法文案的部署偏好）。
+ * @param messages - 文案表。
+ * @param measured - 最近一次实测到的版本；null = 还没测过。
+ * @returns 给卡片的对象。
+ */
+function cliStatusPayload(
+  status: OcrBinaryStatus,
+  config: Config,
+  messages: OcrReviewMessages,
+  measured: string | null,
+): OcrBinaryStatus & {
+  expectedVersion: string;
+  measuredVersion: string | null;
+  installHint: string;
+} {
+  return {
+    ...status,
+    expectedVersion: EXPECTED_OCR_CLI_VERSION,
+    measuredVersion: measured,
+    installHint: ocrInstallText(status, config, messages),
+  };
+}
+
+/**
+ * 把版本核对提示追加到摘要的 `hint` 尾部，让模型读得到「这份结果不是按插件核对的版本跑的」。
+ *
+ * 为什么写在 hint 里而不是新增一枚字段：output schema 是 `additionalProperties: false` +
+ * 逐字段 `required`，加一枚要同时动 schema、必填表和 lib/output.ts 的形态闸三处；而这条信息
+ * 的全部价值就是「模型读到它」，hint 那段本来就是教模型怎么读这份结果。
+ * 没实测值（装载期自检关着、或那条命令跑砸了）就原样交回：不知道就是不知道，
+ * 编一句「版本可能不一致」会让模型把没发生过的事转述给用户。
+ * @param summary - summarizeReview 的产物。
+ * @param measured - 最近一次实测到的外部 CLI 版本；null = 还没测过。
+ * @param messages - 文案表。
+ * @returns 同一份摘要，或 hint 尾部多了一句的副本。
+ */
+function withCliVersionNote(
+  summary: ReviewSummaryView,
+  measured: string | null,
+  messages: OcrReviewMessages,
+): ReviewSummaryView {
+  if (measured === null || measured === EXPECTED_OCR_CLI_VERSION) {
+    return summary;
+  }
+  const note = format(messages.versionMismatch, {
+    actual: measured,
+    expected: EXPECTED_OCR_CLI_VERSION,
+  });
+  return { ...summary, hint: `${summary.hint}\n${note}` };
+}
+
 /** 运行 ocr llm test 校验当前配置（select 后自动验证 / 手动测试共用）。
- *  命令词与五个工具同一解析源（buildLlmTestCommand：随包 launcher 装法下 PATH 上
- *  没有裸 `ocr`），HOME 随 ocrConfigPath 重定向。墙钟与输出上限都是 entry config
- *  字段（非 volatile，改值随重启生效）。 */
+ *  命令词与五个工具同一解析源（buildLlmTestCommand 走 ocrCommand()：卡片验的那一份与评审
+ *  吃的那一份必须同一个二进制），HOME 随 ocrConfigPath 重定向。墙钟与输出上限都是 entry
+ *  config 字段（非 volatile，改值随重启生效）。 */
 async function runLlmTest(host: HostCtx, config: Config): Promise<{ ok: boolean; output: string }> {
   const { exitCode, output } = await runCollect(
     host,
@@ -1866,8 +1970,8 @@ async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string>
  * `%zone` 后缀剥掉再比，对齐宿主 isLoopbackHost 的判定域）。
  *
  * 为什么不是 `host === "0.0.0.0"`：宿主 webserver 的 Config 在装载期就**拒绝通配
- * 地址**（0.2.1-alpha.2 packages/host/webserver/src/index.ts:263-267 —— 0.0.0.0/::
- * 一律 throw，要求绑定本机某个具体接口的 IP 字面量），所以那个等式是永假死分支，
+ * 地址**（dsh-host-webserver 0.2.1-alpha.3 的 `Config.host` 文档：IPv4/IPv6 any 及其
+ * 映射形态 rejected at load，要求绑定本机某个具体接口的 IP 字面量），所以那个等式是永假死分支，
  * 唯一需要 trust 闸放行局域网 Host 头的场景（绑定 LAN IP，容器/远端部署的正路）
  * 反而被当成回环、整批 403。host 经 config 校验必为具体 IP 字面量，故本函数
  * 不必处理主机名与通配，只枚举回环字面量的常见书写。
@@ -1936,6 +2040,10 @@ interface ProbeEndpointDeps {
   config: Config;
   host: HostCtx;
   messages: () => OcrReviewMessages;
+  /** 外部 CLI 可用性的现读口（与五个工具同一个）：换版命令要按那份候选的真实来源说。 */
+  availability: OcrAvailabilityProbe;
+  /** 实测版本的落态口：检测一次就覆盖装载期那一次，卡片与工具回执从此读同一份。 */
+  versionSink: { value: string | null };
 }
 
 /**
@@ -1945,15 +2053,27 @@ interface ProbeEndpointDeps {
  * 已按码元截断），那句「自动更新没成功，请手工执行 npm i -g …」就原样活在里面——本包
  * 不去正则它，因为那句措辞归上游改，抄一份判据就多一处会跟着漂的地方；卡片把整段
  * 显示出来供人选中文本复制即可。`reason` 只说这一路为什么没取到版本。
+ *
+ * `consistent` 是三态而不是布尔：`null` = 压根没读出版本（未发布构建、超时、没装），
+ * 这时对用户宣称「不一致」是把没证据的事说成结论。`changeText` 只在**有把握给出命令**
+ * 时才非空——实测到别的版本，或文件系统那边根本没有候选。
  */
 async function sendProbeResponse(res: ServerResponse, deps: ProbeEndpointDeps): Promise<void> {
   try {
-    const probe = await runVersionProbe(deps.host, deps.config, deps.messages());
+    const messages = deps.messages();
+    const probe = await runVersionProbe(deps.host, deps.config, messages);
+    deps.versionSink.value = probe.version;
+    const status = deps.availability();
+    const consistent = probe.version === null ? null : probe.version === EXPECTED_OCR_CLI_VERSION;
+    const showCommand = consistent === false || status.source === "none";
     sendJson(res, 200, {
       ok: probe.ok,
       version: probe.version,
+      expectedVersion: EXPECTED_OCR_CLI_VERSION,
+      consistent,
       output: probe.output,
       reason: probe.reason,
+      changeText: showCommand ? ocrInstallText(status, deps.config, messages) : "",
     });
   } catch (error) {
     // shell 服务本身抛错（不是非零退出）也要回可读 JSON，理由同 /migrate。
@@ -1961,13 +2081,61 @@ async function sendProbeResponse(res: ServerResponse, deps: ProbeEndpointDeps): 
   }
 }
 
-/** 端点组要额外现读的两口：装载期自检结论、外部 CLI 可用性。收成对象是因为
- *  registerConfigEndpoints 再加一位就撞 max-params，而这两口本来就是同一类东西。 */
+/** 端点组要额外现读的三口：装载期自检结论、外部 CLI 可用性、最近一次实测版本。收成对象是因为
+ *  registerConfigEndpoints 再加一位就撞 max-params，而这几口本来就是同一类东西。 */
 interface EndpointExtras {
   /** 装载期端点自检结果的现读口（apply 的闭包变量，见 probeEndpointAtApply）。 */
   readonly verifyOf: () => EndpointVerify | null;
   /** 外部 CLI 可用性的现读口（与五个工具同一个），设置页据此显示装没装。 */
   readonly availability: OcrAvailabilityProbe;
+  /** 实测版本的落态口（本包只有跑过 `ocr version` 才有值：装载期自检或人按下「检测」）。
+   *  给对象而不是给读口，是因为 POST probe 这一侧要往里写。 */
+  readonly versionSink: { value: string | null };
+}
+
+/** GET providers 的处理依赖（与 select/probe 同一取舍：>5 参数会撞 max-params）。 */
+interface ProvidersEndpointDeps {
+  config: Config;
+  gateway: DshConfigGateway;
+  messages: () => OcrReviewMessages;
+  csrf: string;
+  extras: EndpointExtras;
+}
+
+/**
+ * 组好设置页那份载荷并写出去。
+ *
+ * `ocrBinary` 只用文件系统的事实（不起进程），卡片据此显示「装没装、走的哪条路、那一份是什么
+ * 装法」。实测版本不在这里 spawn——这里只交最近一次检测落在闭包里的那个值（没测过就是 null）；
+ * 现跑一次 `ocr version` 归 POST probe，由人按下「检测」才拿。
+ */
+async function sendProvidersResponse(
+  res: ServerResponse,
+  deps: ProvidersEndpointDeps,
+): Promise<void> {
+  try {
+    const msgs = deps.messages();
+    const payload = await providersForCard(
+      deps.gateway,
+      pluginPaths(deps.config, msgs),
+      msgs,
+      deps.extras.verifyOf(),
+    );
+    sendJson(res, 200, {
+      ...payload,
+      ocrBinary: cliStatusPayload(
+        deps.extras.availability(),
+        deps.config,
+        msgs,
+        deps.extras.versionSink.value,
+      ),
+      csrf: deps.csrf,
+    });
+  } catch (error) {
+    // 装配期之后的意外（设置项里的路径不合法、宿主服务抛错）也要回可读 JSON：
+    // 卡片读的是 error 文本，让它卡在「加载 providers…」比让它报错更难排查。
+    sendJson(res, 500, { ok: false, error: errorText(error) });
+  }
 }
 
 /** 注册 webServer 配置端点（卡片专用：providers/select/migrate/test/probe）。
@@ -2008,22 +2176,7 @@ export function registerConfigEndpoints(
       // 闸门之后这一段本包的 isCrossOrigin 已不可达（trust 的 sec-fetch-site 白名单更严、
       // 且给出同一句错误文本），留着它就是一条永不被执行的分支 ⇒ 删。既有那条
       // 「跨源 403」用例仍然通过：拒它的换成了 trust，文案一字不差。
-      try {
-        const msgs = messages();
-        const payload = await providersForCard(
-          gateway,
-          pluginPaths(config, msgs),
-          msgs,
-          extras.verifyOf(),
-        );
-        // `ocrBinary` 只用文件系统的事实（不起进程），卡片据此显示「装没装、装的哪条路」；
-        // 版本号不在这里——那要 spawn，归 POST probe，由人按下「检测」才拿。
-        sendJson(res, 200, { ...payload, ocrBinary: extras.availability(), csrf });
-      } catch (error) {
-        // 装配期之后的意外（设置项里的路径不合法、宿主服务抛错）也要回可读 JSON：
-        // 卡片读的是 error 文本，让它卡在「加载 providers…」比让它报错更难排查。
-        sendJson(res, 500, { ok: false, error: errorText(error) });
-      }
+      await sendProvidersResponse(res, { config, gateway, messages, csrf, extras });
     },
   });
 
@@ -2106,7 +2259,13 @@ export function registerConfigEndpoints(
       if (text === null) {
         return;
       }
-      await sendProbeResponse(res, { config, host, messages });
+      await sendProbeResponse(res, {
+        config,
+        host,
+        messages,
+        availability: extras.availability,
+        versionSink: extras.versionSink,
+      });
     },
   });
 
@@ -2148,24 +2307,34 @@ export type OcrAvailabilityProbe = () => OcrBinaryStatus;
 export const productionProbe: OcrAvailabilityProbe = () => resolveOcrAvailability();
 
 /**
- * 两条路都没有候选时就地抛，让模型与用户看到的是「哪条路都没找到 + 怎么装」，
+ * 两条路都没有候选时就地抛，让模型与用户看到的是「哪条路都没找到 + 怎么装（带核对版本）」，
  * 而不是子进程 exit 127 之后那句反推出来的「ocr 命令不存在」。
  * 判据只回答「找不找得到」：丢执行位、随包平台二进制缺失这些「找到了但跑不起来」的事实
  * 仍由真实 spawn 报（lib/cli.ts 的 resolveOcrAvailability 头注释写了同一口径），
  * 所以 `execNotFound` 那条兜底文案必须留着。
  * @param status - 现读口交回的可用性判定。
  * @param messages - 文案表（拒绝理由是人读文本，随官方 locale 偏好走）。
+ * @param install - 那条装法文案（`ocrInstallText` 现组；只有真要拒时才付这次拼接）。
  */
-export function assertOcrPresent(status: OcrBinaryStatus, messages: OcrReviewMessages): void {
+export function assertOcrPresent(
+  status: OcrBinaryStatus,
+  messages: OcrReviewMessages,
+  install: string,
+): void {
   if (status.source === "none") {
-    throw new Error(messages.ocrBinaryMissing);
+    throw new Error(format(messages.ocrBinaryMissing, { install }));
   }
 }
 
 // ── 5 个工具各自的注册函数（apply 只做编排，否则单个函数会长过
 //    max-lines-per-function 上限）────────────────────────────────────────────
 
-function registerReviewTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
+function registerReviewTool(
+  host: HostCtx,
+  config: Config,
+  probe: OcrAvailabilityProbe,
+  versionSink: { value: string | null },
+): void {
   // 注册期快照一份文案（工具 description 随注册进 tools 服务，换语言要重新 apply）；
   // 执行期每次现取，回显文本立即跟随设置页偏好。
   const msgs = localeMessages(host);
@@ -2209,7 +2378,8 @@ function registerReviewTool(host: HostCtx, config: Config, probe: OcrAvailabilit
       const runMsgs = localeMessages(host);
       // 先问文件系统再决定要不要起进程：两条路都没有候选时，这里就给模型「哪条路都没
       // 找到 + 怎么装」，而不是让 bash 跑到 exit 127 再反推。
-      assertOcrPresent(probe(), runMsgs);
+      const cliStatus = probe();
+      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       // 归一化到 git 顶层：OCR 内部本就如此锚定（审查范围不变），但会话目录由
       // RepoDir 编码而来——不归一化，ocr_session 就查不到（见 canonicalReviewRoot）。
       const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
@@ -2261,7 +2431,8 @@ function registerReviewTool(host: HostCtx, config: Config, probe: OcrAvailabilit
           });
         }
         // summarizeReview 的结构化对象直返（canonical value，不再 stringify 进 {text}）。
-        return summarizeReview(parsed, runMsgs, { maxComments: readMaxComments(config) });
+        const summary = summarizeReview(parsed, runMsgs, { maxComments: readMaxComments(config) });
+        return withCliVersionNote(summary, versionSink.value, runMsgs);
       } finally {
         if (tmp !== undefined) {
           rmSync(tmp, { recursive: true, force: true });
@@ -2271,7 +2442,12 @@ function registerReviewTool(host: HostCtx, config: Config, probe: OcrAvailabilit
   });
 }
 
-function registerScanTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
+function registerScanTool(
+  host: HostCtx,
+  config: Config,
+  probe: OcrAvailabilityProbe,
+  versionSink: { value: string | null },
+): void {
   const msgs = localeMessages(host);
   // ocr_scan：无 git diff 的全文件扫描。
   define(host, {
@@ -2311,7 +2487,8 @@ function registerScanTool(host: HostCtx, config: Config, probe: OcrAvailabilityP
       const runMsgs = localeMessages(host);
       // 先问文件系统再决定要不要起进程：两条路都没有候选时，这里就给模型「哪条路都没
       // 找到 + 怎么装」，而不是让 bash 跑到 exit 127 再反推。
-      assertOcrPresent(probe(), runMsgs);
+      const cliStatus = probe();
+      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       const repo = ocrRepo(args, exec, runMsgs);
       // wait=false = 后台：无 tmp、无 --output，结果以会话记录为准（ocr_session 轮询）。
       const wait = waitOf(args["wait"], runMsgs);
@@ -2350,7 +2527,8 @@ function registerScanTool(host: HostCtx, config: Config, probe: OcrAvailabilityP
           });
         }
         // 结构化摘要直返（同 ocr_review 的 canonical 契约）。
-        return summarizeReview(parsed, runMsgs, { maxComments: readMaxComments(config) });
+        const summary = summarizeReview(parsed, runMsgs, { maxComments: readMaxComments(config) });
+        return withCliVersionNote(summary, versionSink.value, runMsgs);
       } finally {
         if (tmp !== undefined) {
           rmSync(tmp, { recursive: true, force: true });
@@ -2392,7 +2570,8 @@ function registerDelegatePreviewTool(
       const runMsgs = localeMessages(host);
       // 先问文件系统再决定要不要起进程：两条路都没有候选时，这里就给模型「哪条路都没
       // 找到 + 怎么装」，而不是让 bash 跑到 exit 127 再反推。
-      assertOcrPresent(probe(), runMsgs);
+      const cliStatus = probe();
+      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       const repo = ocrRepo(args, exec, runMsgs);
       // 指针自愈先行：api_key_cmd 指向已不存在的安装目录时，ocr 会在解析 LLM 端点
       // 那一步就失败，五个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
@@ -2464,7 +2643,8 @@ function registerDelegateRuleTool(
       const runMsgs = localeMessages(host);
       // 先问文件系统再决定要不要起进程：两条路都没有候选时，这里就给模型「哪条路都没
       // 找到 + 怎么装」，而不是让 bash 跑到 exit 127 再反推。
-      assertOcrPresent(probe(), runMsgs);
+      const cliStatus = probe();
+      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       const repo = ocrRepo(args, exec, runMsgs);
       const { command, workdir } = buildDelegateRuleCommand(
         { repo, paths: args["paths"] },
@@ -2529,7 +2709,8 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
       const runMsgs = localeMessages(host);
       // 先问文件系统再决定要不要起进程：两条路都没有候选时，这里就给模型「哪条路都没
       // 找到 + 怎么装」，而不是让 bash 跑到 exit 127 再反推。
-      assertOcrPresent(probe(), runMsgs);
+      const cliStatus = probe();
+      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       // 与 ocr_review 同一个归一化：两侧必须落在同一个会话目录，否则 review 写进去、
       // 这里查的是另一个目录（缺陷 1）。
       const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
@@ -2590,12 +2771,36 @@ async function probeEndpointAtApply(
     : { ok: false, message: result.output.trim().slice(0, ENDPOINT_VERIFY_CHARS) };
 }
 
+/**
+ * 装载期版本自检（fire-and-forget）：跑一次 `ocr version`，把实测版本落在本次 apply 的闭包里。
+ *
+ * 为什么要有这一次：工具回执里那句「实测与核对版本不一致」只能来自一次真实测量，而按下
+ * 「检测」是人在页面上的动作——把它留给用户，模型侧的版本提示就永远晚一步。与端点自检同批、
+ * 同受 `startupVerify` 管：那条设置的判据就是「装载期允不允许起进程」，这里起的同样是进程。
+ * 关掉它的部署退化成「页面上点过检测之后，工具才开始报」，那也是一句实话。
+ * @param host 宿主服务面
+ * @param config 本次 apply 的配置
+ * @param sink 本次 apply 的闭包槽（与 POST probe 写的是同一个）
+ */
+async function probeVersionAtApply(
+  host: HostCtx,
+  config: Config,
+  sink: { value: string | null },
+): Promise<void> {
+  const probe = await runVersionProbe(host, config, localeMessages(host));
+  sink.value = probe.version;
+}
+
 export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe): void {
   const host = resolveHost(ctx);
-  // 装载期自检：autoVerify 开着时顺手验一次端点（结论落在本次 apply 的闭包里，无常驻状态）。
+  // 装载期自检：startupVerify 开着时顺手验一次端点、测一次外部 CLI 版本（结论都落在本次
+  // apply 的闭包里，无常驻状态）。
   const endpointVerify: { value: EndpointVerify | null } = { value: null };
+  // 外部 CLI 的实测版本同样落在这次 apply 的闭包里：装载期填一次，之后每次「检测」覆盖它。
+  const versionSink: { value: string | null } = { value: null };
   if (config.startupVerify) {
     void probeEndpointAtApply(host, config, endpointVerify);
+    void probeVersionAtApply(host, config, versionSink);
   }
   // 本包的后台作业登记为**未拥有**的官方作业，controller 只在 start 那一瞬挂
   // （见 `startUnderOcrController`），所以这里没有需要在卸载时摘的 token；但**在跑的
@@ -2639,8 +2844,8 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     child.effect(() => child.settings.configure({ auto: false }, host.fiber));
   });
 
-  registerReviewTool(host, config, probe);
-  registerScanTool(host, config, probe);
+  registerReviewTool(host, config, probe, versionSink);
+  registerScanTool(host, config, probe, versionSink);
   registerDelegatePreviewTool(host, config, probe);
   registerDelegateRuleTool(host, config, probe);
   registerSessionTool(host, config, probe);
@@ -2666,6 +2871,7 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     registerConfigEndpoints(child, host, config, randomUUID(), {
       verifyOf: () => endpointVerify.value,
       availability: probe,
+      versionSink,
     });
   });
 }

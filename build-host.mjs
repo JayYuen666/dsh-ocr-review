@@ -60,10 +60,10 @@ function dependencyNames(pkgJson, field) {
  * dependencies / peerDependencies / optionalDependencies 一律外部化：它们由 pnpm 真实
  * 安装，产物里保留裸说明符才拿得到单例（内联会把 shared 的模块级状态复制成多份）。
  * 子路径说明符同样要外部化——external 的字符串项是精确匹配，所以按「包名段」判定
- * 而不是枚举子路径。optionalDependencies 必须一起算：@alibaba-group/open-code-review
- * 今天没被内联只是因为 lib/cli.ts 用 createRequire(import.meta.url).resolve() 取
- * launcher、rolldown 不解析这种形态——一旦有人改成动态 import，整包连同它的平台
- * 二进制选择逻辑会被内联进 host.js，import.meta.url 也随之从依赖目录变成包根。
+ * 而不是枚举子路径。optionalDependencies 也一起算，尽管本包当前**没有**任何 optional：
+ * 一旦有人把它加回来（例如重新随包分发外部 CLI），那张依赖表就是它进产物的唯一通道；
+ * 少了这一行，依赖会被内联进 host.js，`import.meta.url` 也随之从依赖目录变成包根，
+ * 依赖树里那条绝对路径就再也解析不出来。
  * @param {unknown} pkgJson
  * @returns {Set<string>}
  */

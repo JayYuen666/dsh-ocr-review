@@ -32,7 +32,11 @@ import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import type { JobId, JobKind } from "@deepseek-ai/dsh-jobs";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
 import { MESSAGES } from "../lib/messages.ts";
-import { buildLlmTestCommand, resolveOcrAvailability } from "../lib/cli.ts";
+import {
+  buildLlmTestCommand,
+  resolveOcrAvailability,
+  EXPECTED_OCR_CLI_VERSION,
+} from "../lib/cli.ts";
 import type { OcrAvailabilityProbe } from "../host.ts";
 import { shq } from "../lib/argv-guard.ts";
 
@@ -281,18 +285,10 @@ const PUMP_MS = 25;
 /** host.ts 的 `OCR_JOB_HISTORY_MAX`：本 kind 在册的已落定记录上限（本包政策，非宿主默认）。 */
 const HISTORY_MAX = 10;
 
-/** 本包作业的官方 id 序列（`<kind>-N`：kind 是 `ocr-review`，计数器按**注册表实例**从 1 起，
- *  字形由下面作业面那段那条 `toBe("ocr-review-1")` 钉着，少一根连字符即红）。
- *  @param from 起始序号（含）
- *  @param to 结束序号（含）
- *  @returns 形如 `["ocr-review-2", "ocr-review-3"]` 的 id 表 */
-function ocrIds(from: number, to: number): string[] {
-  const ids: string[] = [];
-  for (let index = from; index <= to; index += 1) {
-    ids.push(`ocr-review-${index}`);
-  }
-  return ids;
-}
+/** 官方作业 id 的字形：kind 前缀 + 注册表按 randomUUID 截短的 16 位 hex。
+ *  用例靠它钉「宿主换了发号方式我们立刻知道」，而断「哪几条在册」靠
+ *  `startBackgroundRuns` 当场交回的 id，不拼字面量。 */
+const OCR_JOB_ID = /^ocr-review-[0-9a-f]{16}$/u;
 
 /**
  * 官方注册表的**实现本身**，不是假件：替身若按"我以为的官方语义"写，测的就是我的理解。
@@ -305,7 +301,7 @@ function makeJobRegistry(pumpPollMs = PUMP_MS): LocalJobRegistry {
 
 /**
  * 评审进行中 `ctx.jobs` 那一行被重载/关掉的那一档：读侧全部转给真件，只有 `kill` 照官方
- * 对陌生 id 的字形抛（installed dsh-jobs-local/lib/index.js:554-558 的 `expect`）。
+ * 对陌生 id 的字形抛（dsh-jobs-local 里 `expect` 那一处，文本就是 `unknown job <id>`）。
  * 不复用真注册表来造这一档，是因为"我们不认这条 id"只在**另一枚实例**的名册里成立，
  * 而 `startBackground` 闭包攥着的是起作业那一枚——换 `host.jobs` 换不进闭包，只能在这一位兜一手。
  * @param real 真件（除 kill 外七个方法都原样转给它）
@@ -317,7 +313,7 @@ function registryWithThrowingKill(real: LocalJobRegistry): LocalJobRegistry {
     list: () => real.list(),
     get: (...args: Parameters<LocalJobRegistry["get"]>) => real.get(...args),
     kill: () => {
-      throw new Error("unknown job ocr-review-1");
+      throw new Error("unknown job ocr-review-0000000000000000");
     },
     remove: (...args: Parameters<LocalJobRegistry["remove"]>) => {
       real.remove(...args);
@@ -828,10 +824,11 @@ const EDITABLE = [
   "timeoutMinutes",
 ];
 
-/** 字段化的三个部署值：在 Config 里但**不标** volatile ⇒ 只在行 config 上改。 */
+/** 字段化的部署值：在 Config 里但**不标** volatile ⇒ 只在行 config 上改。 */
 const DEPLOYMENT = [
   "llmTestTimeoutMs",
   "ocrBackgroundMaxMs",
+  "ocrInstallHint",
   "ocrNoAutoUpdate",
   "startupVerify",
   "stdoutMaxBytes",
@@ -908,13 +905,18 @@ function patchEntryId(): string {
 const presentProbe: OcrAvailabilityProbe = () => ({
   source: "bundled",
   path: "/fake/node_modules/@alibaba-group/open-code-review/bin/ocr.js",
+  channel: "npm",
 });
 
 /** 前置短路那一档的现读口替身：两条路都没有候选。 */
 const noneProbe: OcrAvailabilityProbe = () => ({ source: "none" });
 
 /** PATH 命中那一档的现读口替身：随包入口缺席，PATH 上有候选。 */
-const pathProbe: OcrAvailabilityProbe = () => ({ source: "path", path: "/usr/local/bin/ocr" });
+const pathProbe: OcrAvailabilityProbe = () => ({
+  source: "path",
+  path: "/usr/local/bin/ocr",
+  channel: "unknown",
+});
 
 function applyPlugin(host: FakeHost, probe: OcrAvailabilityProbe = presentProbe): void {
   (
@@ -924,6 +926,27 @@ function applyPlugin(host: FakeHost, probe: OcrAvailabilityProbe = presentProbe)
       availability: OcrAvailabilityProbe,
     ) => void
   )(host, liveConfig(host), probe);
+}
+
+/** `ocr llm test` 跑通那句（装载期自检的多个用例共用，写四遍就成了各漂各的期望值）。 */
+/** brew 那条装法命令的原文（多处断言共用）。 */
+const BREW_INSTALL = "brew install open-code-review";
+const LLM_TEST_OK = { exitCode: 0, stdoutText: "Connection test successful" };
+/** `ocr version` 跑通且与核对版本同版那份回执。 */
+const VERSION_OK_OUT = `open-code-review ${EXPECTED_OCR_CLI_VERSION} darwin/arm64\n`;
+
+/**
+ * 装载期自检开着、且版本探测交出 `versionOut` 的宿主：apply 里两行调用的先后即 resolve
+ * 的先后（先端点自检、后版本探测），所以脚本队列要按这个次序喂两条。
+ * 版本核对相关的用例共用它，队列里剩下的余量留给工具调用本身。
+ */
+async function hostWithMeasuredVersion(versionOut: string): Promise<FakeHost> {
+  const host = makeHost();
+  host.settingsValue["startupVerify"] = true;
+  host.shell.scripts.push(LLM_TEST_OK, { exitCode: 0, stdoutText: versionOut });
+  applyPlugin(host);
+  await settledTick();
+  return host;
 }
 
 function toolOf(host: FakeHost, name: string): FakeTool {
@@ -1107,16 +1130,24 @@ function configDoc(): ConfigDoc {
 /**
  * 起 count 条后台评审（并发起是安全的：容量闸只管活的，count <= 10）。
  * 循环体里不许 await（oxlint no-await-in-loop），故先攒 Promise 再一次 all。
+ * 官方 id 是 `<kind>-<16 hex>`、由注册表当场按 randomUUID 截短发，拼不出字面量 ⇒
+ * 这里按登记顺序交回**本批新登记**的 id，用例握住它们才能断「哪几条还在册」。
  * @param host 宿主替身
  * @param count 条数
- * @returns {Promise<void>}
+ * @returns 本批登记的作业 id，按登记顺序
  */
-async function startBackgroundRuns(host: FakeHost, count: number): Promise<void> {
+async function startBackgroundRuns(host: FakeHost, count: number): Promise<string[]> {
+  const before = new Set(host.jobs.list().map((job) => String(job.id)));
   const runs: Promise<unknown>[] = [];
   for (let index = 0; index < count; index += 1) {
     runs.push(toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec()));
   }
   await Promise.all(runs);
+  // 这批全是 running，而裁剪只动已落定的记录 ⇒ 差集必然一条不漏。
+  return host.jobs
+    .list()
+    .map((job) => String(job.id))
+    .filter((id) => !before.has(id));
 }
 
 /**
@@ -1326,6 +1357,8 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
         startupVerify: true,
         // 自动更新默认不抑制：维持被封装 CLI 的既有行为，要关是部署的决定。
         ocrNoAutoUpdate: false,
+        // 装法默认两条都给：替他选装法是部署的决定，不是本包的偏好。
+        ocrInstallHint: "both",
       });
     });
 
@@ -1881,7 +1914,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       applyPlugin(host);
       await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
       const [job] = host.jobs.list();
-      expect(String(job?.id)).toBe("ocr-review-1");
+      expect(String(job?.id)).toMatch(OCR_JOB_ID);
       expect(job?.kind).toBe(OCR_JOB_KIND);
       // label 是给 job_list 看的一行字：哪个工具 + 哪个仓库（命令串本身不外销）。
       expect(job?.label).toBe("ocr_review /repo");
@@ -1913,22 +1946,23 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       applyPlugin(host);
       // 铺场顺序受两处闸约束：容量闸只管"活的"（一次并发起 10 条到顶），窗口裁剪又只看
       // 已落定的条数 ⇒ 先并发起满 10 条并落定，再单起两条各次触发一次裁剪。
-      await startBackgroundRuns(host, 10);
+      const firstBatch = await startBackgroundRuns(host, 10);
       await settleBackgroundRuns(host, 0);
       // 剪枝跑在 `start` **之前**，剪到 HISTORY_MAX-1 条 ⇒ 起完正好 HISTORY_MAX 条在册。
       // 按 HISTORY_MAX 剪就是 HISTORY_MAX+1 条：README 的"只留最近 10 条"与卡片 404 文案
       // 说的都是在册上限，那一格是实现与文案的分歧（此前修的是剪枝边界，这条用例回到不变量）。
-      await startBackgroundRuns(host, 1);
-      expect(host.jobs.list().map((job) => String(job.id))).toStrictEqual(
-        ocrIds(2, HISTORY_MAX + 1),
-      );
+      const eleventh = await startBackgroundRuns(host, 1);
+      expect(host.jobs.list().map((job) => String(job.id))).toStrictEqual([
+        ...firstBatch.slice(1),
+        ...eleventh,
+      ]);
       await settleBackgroundRuns(host, 10);
       // 第 12 条登记时最老那条才走。注册表只在显式 remove 前保留落定记录 ⇒ 本包不剪就是
       // 每次评审永久留一条记录外加一只最多 256 KiB 的环。
-      await startBackgroundRuns(host, 1);
+      const twelfth = await startBackgroundRuns(host, 1);
       await settleBackgroundRuns(host, 11);
       const ids = host.jobs.list().map((job) => String(job.id));
-      expect(ids).toStrictEqual(ocrIds(3, HISTORY_MAX + 2));
+      expect(ids).toStrictEqual([...firstBatch.slice(2), ...eleventh, ...twelfth]);
       expect(ids.length, "在册条数任何时刻都不越界").toBeLessThanOrEqual(HISTORY_MAX);
     });
 
@@ -1951,7 +1985,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       await startBackgroundRuns(host, 1);
       await settleBackgroundRuns(host, 11);
       const ids = host.jobs.list().map((job) => `${String(job.id)}:${job.status}`);
-      expect(ids).toContain("ocr-review-1:stopping");
+      expect(ids).toContain(`${String(firstJob.id)}:stopping`);
       expect(running?.killCount, "取消只发过一次，裁剪不许再杀它").toBe(1);
     });
 
@@ -2049,13 +2083,17 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
     it("卸载也 remove 已落定的记录：用户直接禁用本包时没有下一次 apply 来剪窗口", async () => {
       const host = makeHost();
       applyPlugin(host);
-      await startBackgroundRuns(host, 1);
+      const settledRun = await startBackgroundRuns(host, 1);
       await settleBackgroundRuns(host, 0);
-      await startBackgroundRuns(host, 1);
+      const liveRun = await startBackgroundRuns(host, 1);
+      const [liveId] = liveRun;
+      if (liveId === undefined) {
+        throw new Error("第二条评审作业未登记");
+      }
       // 卸载前的名册：一条已落定 + 一条在跑（窗口剪枝在登记前跑，1 条远没到上限）。
       expect(host.jobs.list().map((job) => String(job.id))).toStrictEqual([
-        "ocr-review-1",
-        "ocr-review-2",
+        ...settledRun,
+        ...liveRun,
       ]);
       for (const dispose of host.effectDisposers) {
         dispose();
@@ -2064,7 +2102,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       // remove（连带那只最多 256 KiB 的环）。只 kill 不 remove 的后果——本包不留常驻
       // 状态，禁用后再没有 apply，留下的记录就是永久的。
       expect(host.jobs.list().map((job) => `${String(job.id)}:${job.status}`)).toStrictEqual([
-        "ocr-review-2:stopping",
+        `${liveId}:stopping`,
       ]);
       expect(host.shell.procs[1]?.killCount, "在跑那条由 cancel() 收到进程").toBe(1);
       expect(host.shell.procs[0]?.killCount, "自然落定的那条不该被再杀一遍").toBe(0);
@@ -3044,6 +3082,52 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       // 这条断言是那道墙钟唯一的针。
       expect(spec?.timeoutMs).toBe(15_000);
       expect(String(spec?.command)).toContain(" version");
+      // 版本核对随回执一起走：卡片要能当场说「这与你机器上那份是不是同一版」，
+      // 而不是把两个数字丢给用户自己去比。
+      expect(body["expectedVersion"]).toBe(EXPECTED_OCR_CLI_VERSION);
+      expect(body["consistent"]).toBe(false);
+      // presentProbe 报的是 npm 渠道那份 ⇒ 命令说 npm，不给一条动他包管理器的 brew。
+      expect(String(body["changeText"])).toContain(
+        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
+      );
+    });
+
+    it("实测与核对版本同一版 ⇒ consistent:true 且不给换版命令", async () => {
+      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OK_OUT, stderrText: "" });
+      const body = bodyOf(await post(host, PROBE_PATH));
+      expect(body["ok"]).toBe(true);
+      expect(body["consistent"]).toBe(true);
+      // 一致的时候多嘴一句「怎么换版」是噪音，这条针挡的就是它。
+      expect(body["changeText"]).toBe("");
+    });
+
+    it("压根没装 ⇒ 读不出版本也给换版命令（那正是用户当下要做的事）", async () => {
+      const offline = makeHost();
+      applyPlugin(offline, noneProbe);
+      offline.shell.scripts.push({
+        exitCode: 127,
+        stdoutText: "",
+        stderrText: "bash: ocr: command not found",
+      });
+      const body = bodyOf(await post(offline, PROBE_PATH));
+      expect(body["consistent"]).toBeNull();
+      expect(String(body["changeText"])).toContain(BREW_INSTALL);
+    });
+
+    it("只是超时、候选还在 ⇒ 不给命令（那句装法回答的不是这个问题）", async () => {
+      host.shell.scripts.push({ exitCode: null, timedOut: true });
+      const body = bodyOf(await post(host, PROBE_PATH));
+      expect(body["consistent"]).toBeNull();
+      expect(body["changeText"]).toBe("");
+    });
+
+    it("检测一次就落进本次 apply 的闭包：providers 载荷读的是那份实测值", async () => {
+      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OK_OUT });
+      await post(host, PROBE_PATH);
+      const body = bodyOf(await get(host, PROVIDERS_PATH));
+      expect((body["ocrBinary"] as Record<string, unknown>)["measuredVersion"]).toBe(
+        EXPECTED_OCR_CLI_VERSION,
+      );
     });
 
     it("上游那句带颜色码的升级提示 ⇒ 回执里不留控制字符（那行是要复制进终端的）", async () => {
@@ -3234,8 +3318,8 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
         // host.ts 那侧的 Config 声明守住（这里按形参类型收口，不必逐字段造引用）。
         liveConfig(host) as unknown as Parameters<typeof registerConfigEndpoints>[2],
         "fixed-token",
-        // 装载期自检的现读口：本用例不关心，给恒空；可用性复用模块级替身。
-        { verifyOf: () => null, availability: presentProbe },
+        // 装载期自检与实测版本的现读口：本用例不关心，给恒空；可用性复用模块级替身。
+        { verifyOf: () => null, availability: presentProbe, versionSink: { value: null } },
       );
       const res = await get(host, PROVIDERS_PATH);
       expect(bodyOf(res)["csrf"]).toBe("fixed-token");
@@ -3262,7 +3346,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
     it("startupVerify=true 且端点通 ⇒ ok=true、message 为空串", async () => {
       const host = makeHost();
       host.settingsValue["startupVerify"] = true;
-      host.shell.scripts.push({ exitCode: 0, stdoutText: "Connection test successful" });
+      host.shell.scripts.push(LLM_TEST_OK);
       applyPlugin(host);
       await settledTick();
       const res = await get(host, PROVIDERS_PATH);
@@ -3289,6 +3373,62 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       expect(second).not.toBe(first);
       const stale = await post(host, MIGRATE_PATH, { token: second });
       expect(stale.statusCode).toBe(403);
+    });
+
+    it("startupVerify=true 时装载期也测一次版本：那条命令词与五个工具用的是同一个解析源", async () => {
+      const host = makeHost();
+      host.settingsValue["startupVerify"] = true;
+      // apply 里两行调用的先后即 resolve 的先后：先端点自检、后版本探测。
+      host.shell.scripts.push(LLM_TEST_OK, { exitCode: 0, stdoutText: VERSION_OK_OUT });
+      applyPlugin(host);
+      await settledTick();
+      expect(String(host.shell.resolveCalls[1]?.command)).toMatch(/ version$/u);
+      const body = bodyOf(await get(host, PROVIDERS_PATH));
+      expect((body["ocrBinary"] as Record<string, unknown>)["measuredVersion"]).toBe(
+        EXPECTED_OCR_CLI_VERSION,
+      );
+    });
+  });
+
+  describe("外部 CLI 版本核对：实测值让模型也看得见", () => {
+    it("实测与核对版本不同 ⇒ 摘要的 hint 尾部多出那一句，并把两个数字都写出来", async () => {
+      const host = await hostWithMeasuredVersion("open-code-review 9.9.9 darwin/arm64\n");
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const ok = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+        hint: string;
+      };
+      expect(ok.hint.startsWith(zh.reviewSummaryHint)).toBe(true);
+      expect(ok.hint).toContain("9.9.9");
+      expect(ok.hint).toContain(EXPECTED_OCR_CLI_VERSION);
+    });
+
+    it("实测就是核对的那一版 ⇒ hint 一字不多（不给模型编一个没发生过的问题）", async () => {
+      const host = await hostWithMeasuredVersion(VERSION_OK_OUT);
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const ok = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+        hint: string;
+      };
+      expect(ok.hint).toBe(zh.reviewSummaryHint);
+    });
+
+    it("没测过（自检关着又没点检测）⇒ 不报任何版本结论，也不因此少给一份摘要", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const ok = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+        hint: string;
+      };
+      expect(ok.hint).toBe(zh.reviewSummaryHint);
+      expect(host.shell.resolveCalls).toHaveLength(1);
+    });
+
+    it("ocr_scan 走同一句：两个自驱 LLM 的工具都吃同一份实测值", async () => {
+      const host = await hostWithMeasuredVersion("open-code-review 0.0.1 linux/amd64\n");
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const ok = (await toolOf(host, "ocr_scan").execute({ repo: "/repo" }, makeExec())) as {
+        hint: string;
+      };
+      expect(ok.hint).toContain("0.0.1");
     });
   });
 
@@ -3576,16 +3716,84 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
 
     it("GET providers 带 ocrBinary：只出文件系统的事实，不起进程", async () => {
       const body = bodyOf(await get(host, PROVIDERS_PATH));
-      expect(body["ocrBinary"]).toStrictEqual({ source: "bundled", path: presentProbe().path });
+      const binary = body["ocrBinary"] as Record<string, unknown>;
+      expect(binary["source"]).toBe("bundled");
+      expect(binary["path"]).toBe(presentProbe().path);
+      expect(binary["channel"]).toBe("npm");
+      expect(binary["expectedVersion"]).toBe(EXPECTED_OCR_CLI_VERSION);
+      // 这条 describe 的夹具 startupVerify 关着 ⇒ 没有实测值可报，null 而不是猜一个。
+      expect(binary["measuredVersion"]).toBeNull();
+      // 已装着的时候这句仍在载荷里（卡片按档决定显不显示），渠道是 npm 就说 npm 那条命令。
+      expect(String(binary["installHint"])).toContain("npm 那条命令：");
       // resolve 队列为空就是这条针：状态档不该为设置页起子进程，版本归 POST probe。
       expect(host.shell.resolveCalls).toStrictEqual([]);
     });
 
-    it("两条路都没有候选 ⇒ 载荷照说 none，不掩成 bundled", async () => {
+    it("两条路都没有候选 ⇒ 载荷照说 none，并给出带版本的装法", async () => {
       const offline = makeHost();
       applyPlugin(offline, noneProbe);
       const body = bodyOf(await get(offline, PROVIDERS_PATH));
-      expect(body["ocrBinary"]).toStrictEqual({ source: "none" });
+      const binary = body["ocrBinary"] as Record<string, unknown>;
+      expect(binary["source"]).toBe("none");
+      expect(binary).not.toHaveProperty("path");
+      expect(binary).not.toHaveProperty("channel");
+      expect(binary["measuredVersion"]).toBeNull();
+      // 没装时那句要能照着敲：默认偏好 both ⇒ 两条命令都在，npm 那条带核对版本。
+      expect(String(binary["installHint"])).toContain(BREW_INSTALL);
+      expect(String(binary["installHint"])).toContain(
+        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
+      );
+    });
+
+    it("装法文案按「来源优先、偏好兜底」挑", async () => {
+      // brew 装的那份必须先说 brew：给用户一条 `npm i -g` 会让他机器上多出第二份 ocr，
+      // 而 PATH 上那条还是旧的——症状与他抱怨的一模一样。
+      const brewHost = makeHost();
+      brewHost.settingsValue["ocrInstallHint"] = "npm";
+      applyPlugin(brewHost, () => ({
+        source: "path",
+        path: "/opt/homebrew/bin/ocr",
+        channel: "brew",
+      }));
+      const brewHint = String(
+        (bodyOf(await get(brewHost, PROVIDERS_PATH))["ocrBinary"] as Record<string, unknown>)[
+          "installHint"
+        ],
+      );
+      expect(brewHint).toContain("brew upgrade open-code-review");
+      expect(brewHint).toContain("钉不住");
+      // 来源已知时部署偏好让位：这条用例钉的就是这个优先次序——那句说的是 brew 那条命令。
+      expect(brewHint).not.toContain("npm 那条命令：");
+
+      // 来源判不出来才轮到偏好说话。
+      const unknownNpm = makeHost();
+      unknownNpm.settingsValue["ocrInstallHint"] = "npm";
+      applyPlugin(unknownNpm, () => ({ source: "path", path: "/Users/me/bin/ocr" }));
+      const npmHint = String(
+        (bodyOf(await get(unknownNpm, PROVIDERS_PATH))["ocrBinary"] as Record<string, unknown>)[
+          "installHint"
+        ],
+      );
+      expect(npmHint).toContain(
+        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
+      );
+      expect(npmHint).not.toContain("brew install");
+
+      // 偏好 brew 且压根没装 ⇒ 先说 brew，但「钉不住版本」那句必须在场，
+      // 否则用户以为 `brew install` 得到的是本包核对的那一版。
+      const prefBrew = makeHost();
+      prefBrew.settingsValue["ocrInstallHint"] = "brew";
+      applyPlugin(prefBrew, noneProbe);
+      const brewMissing = String(
+        (bodyOf(await get(prefBrew, PROVIDERS_PATH))["ocrBinary"] as Record<string, unknown>)[
+          "installHint"
+        ],
+      );
+      expect(brewMissing).toContain(BREW_INSTALL);
+      expect(brewMissing).toContain("钉不住");
+      expect(brewMissing).toContain(
+        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
+      );
     });
 
     it("开关关着（默认）⇒ 前台 spawn 不带 env，维持被封装 CLI 的既有行为", async () => {
@@ -3693,8 +3901,16 @@ describe("外部 CLI 可用性前置：两条路都没有候选时不起进程",
           .catch((error: unknown): string => (error as Error).message),
       ),
     );
-    expect(reasons).toStrictEqual(Object.keys(TOOL_ARGS).map(() => zh.ocrBinaryMissing));
-    // 短路的全部意义在这里：没找到候选就不该有 shell 请求。
+    expect(
+      reasons.every((message) => message === reasons[0]),
+      "五处拒绝理由该是同一句",
+    ).toBe(true);
+    // 拒绝里必须带着**能照着敲**的装法，而且 npm 那条带版本：用户（或模型）拿到这句话
+    // 就能装对，不必再去翻文档核对「哪个版本才是插件按着写的」。
+    const npm = `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`;
+    expect(reasons[0]).toContain(npm);
+    expect(reasons[0]).toContain(BREW_INSTALL);
+    // 钉的是这条短路自己的契约：没找到候选就不该有 shell 请求。
     expect(host.shell.resolveCalls).toStrictEqual([]);
   });
 
@@ -3707,16 +3923,17 @@ describe("外部 CLI 可用性前置：两条路都没有候选时不起进程",
     expect(host.shell.resolveCalls).toHaveLength(1);
   });
 
-  it("assertOcrPresent：bundled 与 path 放行，none 抛", () => {
+  it("assertOcrPresent：bundled 与 path 放行，none 抛并把装法原文带进消息", () => {
+    const install = BREW_INSTALL;
     expect(() => {
-      assertOcrPresent({ source: "bundled", path: "/x" }, zh);
+      assertOcrPresent({ source: "bundled", path: "/x", channel: "npm" }, zh, install);
     }).not.toThrow();
     expect(() => {
-      assertOcrPresent({ source: "path", path: "/x" }, zh);
+      assertOcrPresent({ source: "path", path: "/x", channel: "brew" }, zh, install);
     }).not.toThrow();
     expect(() => {
-      assertOcrPresent({ source: "none" }, zh);
-    }).toThrow(zh.ocrBinaryMissing);
+      assertOcrPresent({ source: "none" }, zh, install);
+    }).toThrow(format(zh.ocrBinaryMissing, { install }));
   });
 
   it("生产现读口逐字等于 lib/cli.ts 那份 fs 判据", () => {

@@ -135,12 +135,26 @@ export interface UiMessages {
   readonly binaryTitle: string;
   /** 宿主没报可得性（载荷缺字段或形状不合）。 */
   readonly binaryUnknown: string;
-  /** 随包入口在盘上。 */
+  /** 随包兜底入口在盘上：{path} 绝对路径，{channel} 装法。 */
   readonly binaryBundled: string;
-  /** PATH 上的全局安装：{path} 是命中的绝对路径。 */
+  /** PATH 上的全局安装：{path} 是命中的绝对路径，{channel} 是那份的装法。 */
   readonly binaryPath: string;
   /** 两条路都没有候选。 */
   readonly binaryNone: string;
+  /** 命中那份是 brew formula 装的。 */
+  readonly channelBrew: string;
+  /** 命中那份是 npm 一类的包管理器装的。 */
+  readonly channelNpm: string;
+  /** 路径落在两种典型布局之外（手工 cp、npx、别的前缀），不猜。 */
+  readonly channelUnknown: string;
+  /** 本插件契约核对所依据的版本那一行：{expected}。 */
+  readonly versionExpected: string;
+  /** 实测版本与核对版本一致：{actual}。 */
+  readonly versionMatched: string;
+  /** 实测版本与核对版本不一致：{actual} 实测、{expected} 核对。 */
+  readonly versionDiverged: string;
+  /** 徽标在「实测过且不一致」时改口的那句短文案。 */
+  readonly badgeDiverged: string;
   /** 「检测」按钮（空闲态）。 */
   readonly detectCli: string;
   /** 「检测」按钮（进行中）。 */
@@ -270,15 +284,22 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     keyScriptMissing: "⚠ get-cred 脚本缺失，api_key_cmd 无法工作",
     binaryTitle: "外部 CLI（ocr）",
     binaryUnknown: "状态未取到：刷新本页，或确认 dsh 的 web 服务已起来",
-    binaryBundled: "随本插件分发已就位，无需再全局安装",
-    binaryPath: "用 PATH 上的全局安装：{path}",
+    binaryBundled: "随本插件分发的兜底入口已就位：{path}（{channel}）",
+    binaryPath: "用 PATH 上的全局安装：{path}（{channel}）",
     binaryNone:
-      "未找到 ocr：`brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review`",
+      "未找到 ocr：PATH 与随包兜底两条路都没有可执行候选。装法与版本看下一行（由插件按核对版本给出）",
+    channelBrew: "brew formula",
+    channelNpm: "npm 全局包",
+    channelUnknown: "装法未识别",
+    versionExpected: "本插件的契约按 ocr {expected} 逐条核对",
+    versionMatched: "本机实测 {actual}，与核对版本一致",
+    versionDiverged: "本机实测 {actual}，与核对版本 {expected} 不一致：评论口径可能随版本漂移",
+    badgeDiverged: "ocr 版本不一致",
     detectCli: "检测版本",
     detecting: "检测中…",
     probeVersion: "ocr 版本：{version}",
     probeReason: "未取到版本号：{reason}",
-    badgeBundled: "ocr 随包就位",
+    badgeBundled: "ocr 走随包兜底",
     badgePath: "ocr 来自 PATH",
     badgeNone: "未找到 ocr",
     badgeUnknown: "ocr 状态未取到",
@@ -354,15 +375,23 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     keyScriptMissing: "⚠ get-cred script missing, api_key_cmd cannot work",
     binaryTitle: "External CLI (ocr)",
     binaryUnknown: "status not reported: reload this page, or check that the dsh web server is up",
-    binaryBundled: "bundled with this plugin, no global install needed",
-    binaryPath: "using the global install on PATH: {path}",
+    binaryBundled: "bundled fallback entry in place: {path} ({channel})",
+    binaryPath: "using the global install on PATH: {path} ({channel})",
     binaryNone:
-      "ocr not found: `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`",
+      "ocr not found: neither PATH nor the bundled fallback has an executable candidate. The install command and version are on the next line (this plugin states the version its contract was verified against)",
+    channelBrew: "brew formula",
+    channelNpm: "npm global package",
+    channelUnknown: "install method unrecognised",
+    versionExpected: "this plugin's contract was verified against ocr {expected}",
+    versionMatched: "this machine reports {actual}, matching it",
+    versionDiverged:
+      "this machine reports {actual}, which is not the verified {expected}: comment wording and severity may drift between versions",
+    badgeDiverged: "ocr version differs",
     detectCli: "Detect version",
     detecting: "Detecting...",
     probeVersion: "ocr version: {version}",
     probeReason: "no version read: {reason}",
-    badgeBundled: "ocr bundled",
+    badgeBundled: "ocr from bundled fallback",
     badgePath: "ocr from PATH",
     badgeNone: "ocr not found",
     badgeUnknown: "ocr status unavailable",

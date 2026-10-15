@@ -2,8 +2,9 @@
 // 只能按「另起进程 → 看 stdout/exit code」的契约来验。
 //
 // 重点验的是**不写死路径**之后的数据目录优先级（参数 > $DSH_HOME > homedir()/.dsh）
-// 与三层取值顺序（进程环境 > 托管 .credentials.yaml > $DSH_HOME/.env）：
-// 这三条正是本包从「手解宿主文件」改成「官方通道」之后，脚本必须继续对齐的规则。
+// 与三层取值顺序（托管 .credentials.yaml > 进程环境 > $DSH_HOME/.env）。层序不是本地偏好：
+// 它就是官方 credentials-local 的优先级，宿主按它认「哪个 key 是有效的」，脚本排得不一样
+// 就等于同一 ref 两边取到不同的 key。
 import { describe, it, expect, afterAll, beforeEach } from "vitest";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -75,6 +76,10 @@ const DOC = 'version: 1\nrefs:\n  OCR_TEST_KEY: sk-from-managed-doc\n  OCR_BLANK
  *  三条「从哪一层取到 key」的用例都断这同一个值，抽出来免得改 DOC 时漏改断言。 */
 const MANAGED_DOC_STDOUT = "sk-from-managed-doc\n";
 
+/** 进程环境层喂给子进程的那一枚 key：两条用例（一层被压、一层顶上）都用它，
+ *  所以它既出现在 env 里也出现在期望的 stdout 里。 */
+const PROCESS_ENV_KEY = "sk-from-process-env";
+
 describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
   // 每个用例从空的 ROOT 开始（用例里自建 home-*），整文件跑完再删掉整个临时目录。
   beforeEach(() => {
@@ -143,14 +148,24 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     expect(res.stdout).toBe(MANAGED_DOC_STDOUT);
   });
 
-  it("进程环境优先于托管文档（对齐官方 env 层最高的规则）", async () => {
+  it("托管文档优先于进程环境（层序照抄官方：存下来的凭据才是有效的那一份）", async () => {
     const home = homeWith({ credentialsYaml: DOC });
     const res = await runCred(["OCR_TEST_KEY", home], {
       HOME: ROOT,
       DSH_HOME: undefined,
-      OCR_TEST_KEY: "sk-from-process-env",
+      OCR_TEST_KEY: PROCESS_ENV_KEY,
     });
-    expect(res.stdout).toBe("sk-from-process-env\n");
+    expect(res.stdout).toBe(MANAGED_DOC_STDOUT);
+  });
+
+  it("托管文档没有该 ref ⇒ 进程环境顶上（换的是先后，不是删档位）", async () => {
+    const home = homeWith({ credentialsYaml: DOC });
+    const res = await runCred(["OCR_OTHER_KEY", home], {
+      HOME: ROOT,
+      DSH_HOME: undefined,
+      OCR_OTHER_KEY: PROCESS_ENV_KEY,
+    });
+    expect(res.stdout).toBe(`${PROCESS_ENV_KEY}\n`);
   });
 
   it("托管文档没有该 ref ⇒ 回退 $DSH_HOME/.env（含 export 前缀与引号）", async () => {

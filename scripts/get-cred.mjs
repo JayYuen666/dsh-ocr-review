@@ -24,15 +24,18 @@
 //   本脚本的 homedir() 兜底随之读 X/.dsh 就跑偏了；部署若以非 env 方式指定 dsh home，
 //   env 档同样不可靠。
 //
-// 取值的层序镜像官方 credentials-local 的优先级里**够得到**的那两层：
-//   1. 继承来的进程环境。注意：dsh 起 shell 会经 scrubbedParentEnv 剥掉名字命中
+// 取值的层序必须与宿主**同源**：官方 credentials-local 的 LocalCredentialProvider
+// 按「托管文件 > 继承环境 > .env」取值，本脚本只要排得不一样，同一 ref 在两处都有值
+// 时 OCR 拿到的 key 就和宿主卡片认下的有效 key 分叉——两边都"成功"，打的是不同账号。
+// 照抄官方优先级里本脚本**够得到**的那三层：
+//   1. `$DSH_HOME/.credentials.yaml` 的 `refs.<REF>`（version: 1 托管文档，格式来源
+//      packages/credentials/credentials-local 的 parseCredentialsDocument）；
+//   2. 继承来的进程环境。注意：dsh 起 shell 会经 scrubbedParentEnv 剥掉名字命中
 //      KEY/PASSWORD/SECRET/TOKEN 或 DSH_ 前缀的变量——凭据 ref 几乎全中招，所以对
 //      经 dsh shell 起的 OCR，这一层对凭据 ref 实际常为空；它只在 ref 名不被净化
 //      模式命中、或调用链不经 dsh shell（手工在终端跑 ocr）时才有值。宿主侧的
 //      select/migrate 已按同一事实加闸（keyReachableAtOcrRuntime）：key 只存在于
 //      环境层/项目 .env 的配置会在写盘前被拒绝，而不是等 OCR 401。
-//   2. `$DSH_HOME/.credentials.yaml` 的 `refs.<REF>`（version: 1 托管文档，
-//      格式来源 packages/credentials/credentials-local/src/index.ts:169-216）；
 //   3. `$DSH_HOME/.env`（用户级回退层）。
 //   **项目 .env 刻意不读**：本脚本的 cwd 是 OCR 当时所在的仓库，跟 dsh 的启动工作区
 //   不是一回事，去读它等于把「被审查仓库」里的键当成用户的凭据。
@@ -209,6 +212,16 @@ function unquotedValue(raw) {
 }
 
 /**
+ * 继承来的进程环境层：去首尾空白，空白按「这一层没有值」处理。
+ * @param {string | undefined} raw
+ * @returns {string | undefined}
+ */
+function fromInheritedEnv(raw) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  return value === "" ? undefined : value;
+}
+
+/**
  * $DSH_HOME/.env 的 KEY=VALUE（去掉可选引号；文件不存在按「该层没有值」处理）。
  * @param {string} envPath
  * @param {string} refName
@@ -244,11 +257,10 @@ if (!REF_PATTERN.test(refName)) {
   process.exit(1);
 }
 
-const inherited = process.env[refName];
 const home = dataDirFrom(process.argv[3]);
 const found =
-  (typeof inherited === "string" && inherited.trim().length > 0 ? inherited.trim() : undefined) ??
   fromCredentialsDoc(path.join(home, CREDENTIALS_FILENAME), refName) ??
+  fromInheritedEnv(process.env[refName]) ??
   fromUserDotEnv(path.join(home, ".env"), refName);
 
 if (found === undefined) {
@@ -256,7 +268,7 @@ if (found === undefined) {
   // 各层的坏消息），否则用户只能看到「llm 请求 401」这种隔了一层的症状。
   const notes = problems.length === 0 ? "" : `；${problems.join("；")}`;
   process.stderr.write(
-    `[get-cred] 取不到 ${refName}：查过进程环境、${path.join(home, CREDENTIALS_FILENAME)} 与 ${path.join(home, ".env")}${notes}\n`,
+    `[get-cred] 取不到 ${refName}：查过 ${path.join(home, CREDENTIALS_FILENAME)}、进程环境与 ${path.join(home, ".env")}${notes}\n`,
   );
   process.exit(1);
 } else {

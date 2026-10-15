@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-ocr-review",
-  "version": "0.1.5-rc",
+  "version": "0.1.5",
   "description": "dsh 工作区代码审查插件：把 open-code-review（ocr CLI）封装为 5 个模型工具 + 设置卡片（从宿主设置服务的 provider 清单选 provider/model 应用到 OCR 配置）。",
   "keywords": [
     "AI code review",
@@ -44,8 +44,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "registry": "https://registry.npmjs.org",
-    "tag": "next"
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "build:client": "node build-client.mjs",
@@ -64,36 +63,36 @@
     "js-yaml": "^5.4.3"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.5-alpha.1",
-    "@deepseek-ai/dsh-agent": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-api-remotes": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-atomic-write": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-locale": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-store": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-ui-layout": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-credentials": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-home-paths": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-host-webserver": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-jobs": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-jobs-local": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-output-retention": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-package-manifest": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-ptc-runtime": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-sandbox": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-scope": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-session-projection": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-settings": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-shell": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-subprocess": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-system-prompt": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-tools": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-user-approval": "0.2.1-alpha.2",
-    "@deepseek-ai/schemastery": "3.18.5-alpha.1",
+    "@deepseek-ai/cordis": "4.0.5-alpha.2",
+    "@deepseek-ai/dsh-agent": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-api-remotes": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-atomic-write": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-client-locale": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-client-store": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-credentials": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-jobs": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-jobs-local": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-output-retention": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-package-manifest": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-ptc-runtime": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-sandbox": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-scope": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-session": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-settings": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-shell": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-subprocess": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-tools": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-user-approval": "0.2.1-alpha.3",
+    "@deepseek-ai/schemastery": "3.18.5-alpha.2",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@vitest/coverage-v8": "catalog:",
@@ -108,17 +107,14 @@
     "vitest": "catalog:"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-atomic-write": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-credentials": "0.2.1-alpha.2",
-    "@deepseek-ai/dsh-home-paths": "0.2.1-alpha.2",
-    "@deepseek-ai/schemastery": "3.18.5-alpha.1"
-  },
-  "optionalDependencies": {
-    "@alibaba-group/open-code-review": "^1.12.13"
+    "@deepseek-ai/dsh-atomic-write": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-credentials": "0.2.1-alpha.3",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-alpha.3",
+    "@deepseek-ai/schemastery": "3.18.5-alpha.2"
   },
   "icon": "icon.svg",
   "engines": {
-    "dsh": ">=0.2.1-alpha.2",
+    "dsh": ">=0.2.1-alpha.3",
     "node": ">=22.12.0"
   },
   "dsh": {
@@ -130,5 +126,6 @@
       "platform": "web",
       "immediately": true
     }
-  }
+  },
+  "ocrCliVersion": "1.13.0"
 }

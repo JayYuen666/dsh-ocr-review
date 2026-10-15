@@ -33,11 +33,20 @@ export interface OcrReviewMessages {
   readonly execTimedOut: string;
   /** 调用被取消。 */
   readonly execAborted: string;
-  /** exit 127：外部 ocr CLI 未安装。 */
+  /** exit 127：命令词交下去没被系统找到（候选文件在 fs 判据之后消失了）。 */
   readonly execNotFound: string;
   /** 前置短路的拒绝理由：随包依赖与 PATH 两条路都没有候选，连进程都不起。
-   *  与 `execNotFound` 的分工是「找都没找到」对「找到了但跑不起来」，两条都留着。 */
+   *  与 `execNotFound` 的分工是「找都没找到」对「找到了但跑不起来」，两条都留着。
+   *  `{install}` = 下面三条形装法文案之一（host 按来源/部署偏好挑）。 */
   readonly ocrBinaryMissing: string;
+  /** 装法文案：两条都给，让用户自己选（部署偏好 `ocrInstallHint=both` 或来源判不出来时用）。 */
+  readonly installHintBoth: string;
+  /** 装法文案：已判定是 brew 装的，或部署偏好 brew。 */
+  readonly installHintBrew: string;
+  /** 装法文案：已判定是 npm 全局装的，或部署偏好 npm。 */
+  readonly installHintNpm: string;
+  /** 工具回显里的版本核对提示（`{actual}`/`{expected}`）：实测与契约核对版本不一致时追加。 */
+  readonly versionMismatch: string;
   /** 非零退出（不含详情）。 */
   readonly execFailed: string;
   /** 详情前的分隔符（中文全角冒号、英文半角冒号 + 空格）。 */
@@ -223,12 +232,25 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "或改用 wait=false 后台模式（默认不设时限）",
     execAborted: "ocr 执行被中止",
     execNotFound:
-      "ocr 命令不存在：请先 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review`",
+      "ocr 命令不存在：命令词交下去没被系统找到（PATH 上那份可能刚被移走或改名）。" +
+      "请到「设置 → 插件 → ocr-review」的外部 CLI 那一行看与本插件核对版本一致的装法，装完直接重试本工具即可",
     ocrBinaryMissing:
-      "两条路都没找到 ocr：随包的 optionalDependencies 没装上（被跳过或没安装），" +
-      "PATH 上也没有可执行候选。装法：`brew install open-code-review` 或 " +
-      "`npm i -g @alibaba-group/open-code-review`；装完直接重试本工具即可，不必重启 dsh" +
+      "两条路都没找到 ocr：PATH 上没有可执行候选，本插件也不随包分发它（装法由你选，" +
+      "免得装上本插件就顺带改了全局工具链）。{install} 装完直接重试本工具即可，不必重启 dsh" +
       "（每次调用都重新判一次，结果不缓存）。",
+    installHintBoth:
+      "两条命令任选：brew 那条 `{brewCmd}`；npm 那条 `{npmCmd}`（brew 的 formula 只跟上游" +
+      "最新版，钉不住 {version}；要严格装上这一版只能走 npm）",
+    installHintBrew:
+      "brew 那条命令：`{brewCmd}`。brew 的 formula 只跟上游最新版，钉不住 {version}——" +
+      "本机装的那一版与本插件核对的版本不一致时，结论口径可能有差异；" +
+      "要严格这一版请用 npm 那条：`{npmCmd}`",
+    installHintNpm:
+      "npm 那条命令：`{npmCmd}`（版本钉在本插件核对过的那一版，换版要显式改这条命令）",
+    versionMismatch:
+      "版本核对：外部 ocr CLI 实测 {actual}，而本插件的契约按 {expected} 逐条核对。" +
+      "两个版本之间的评论口径、字段形态与 flag 语义都可能漂移，别把这份摘要的结构当作" +
+      "「与插件同版本」的结果；换版命令见「设置 → 插件 → ocr-review」的外部 CLI 那一行。",
     execFailed: "ocr 执行失败（exit={exitCode}）",
     detailSeparator: "：",
     stdoutTruncated: "[ocr-review] 注意：输出超过 {limit} 字节上限已截断{spill}",
@@ -433,12 +455,31 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "or switch to background mode with wait=false (no time limit by default)",
     execAborted: "ocr execution aborted",
     execNotFound:
-      "ocr command not found: install it first with `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`",
+      "ocr command not found: the command word was handed to the shell and nothing answered it " +
+      "(the PATH candidate may have just been moved or renamed). Open the External CLI row in " +
+      "Settings → Plugins → ocr-review for an install that matches the version this plugin was " +
+      "verified against, then retry this call",
     ocrBinaryMissing:
-      "no ocr candidate on either path: the bundled optionalDependencies were skipped or not " +
-      "installed, and PATH has no executable candidate. Install it with " +
-      "`brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`, then just " +
-      "retry this call - the verdict is re-read per call, so no dsh restart is needed",
+      "no ocr candidate on either path: PATH has none, and this plugin no longer ships the CLI " +
+      "(installing the plugin should not silently change your global toolchain). {install} Once " +
+      "installed, just retry this call - the verdict is re-read per call, so no dsh restart is needed",
+    installHintBoth:
+      "either command works: the brew one `{brewCmd}`; the npm one `{npmCmd}` (the brew formula " +
+      "only tracks the newest upstream release and cannot pin {version}; npm is the only way to " +
+      "install exactly that version)",
+    installHintBrew:
+      "the brew command: `{brewCmd}`. The brew formula only tracks the newest upstream release and " +
+      "cannot pin {version} - when the version on this machine differs from the one this plugin was " +
+      "verified against, the reported conclusions may differ too. To get exactly {version} use the " +
+      "npm one: `{npmCmd}`",
+    installHintNpm:
+      "the npm command: `{npmCmd}` (the version is pinned to the one this plugin was verified " +
+      "against; changing it means editing this command)",
+    versionMismatch:
+      "Version check: the external ocr CLI reports {actual}, while this plugin's contract was " +
+      "verified against {expected}. Comment wording, output shapes and flag semantics can drift " +
+      "between versions, so do not treat this summary as if it came from the verified version - the " +
+      "upgrade command is on the External CLI row of Settings → Plugins → ocr-review",
     execFailed: "ocr failed (exit={exitCode})",
     detailSeparator: ": ",
     stdoutTruncated:

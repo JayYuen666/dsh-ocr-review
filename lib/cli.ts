@@ -12,8 +12,8 @@
 // 注入防线与此并行，不受语言影响：拼进 argv 的值全部经 shq()，枚举一律白名单钳制，
 // 校验闸的调用位置与抛错先后次序都不因文案迁移而改变。
 //
-// 契约依据（open-codereview.ai/docs，判据以 CLI 侧源码逐条核对，钉的版本号见
-// package.json 的 optionalDependencies，本注释不重述它，以免两处数字各自漂移）：
+// 契约依据（open-codereview.ai/docs，判据以 CLI 侧源码逐条核对）：核对所依据的那一版写在
+// EXPECTED_OCR_CLI_VERSION，本注释不重述数字，以免两处各自漂移。
 //   - ocr review：workspace（默认）/ commit（-c）/ range（--from/--to）三模式互斥。
 //   - ocr scan：--path 逗号分隔；二者都接受 --format/--output/--audience/--exclude。
 //   - ocr delegate preview / rule：--format json 机器可读，reviewable_files
@@ -22,7 +22,7 @@
 //     effort=low 的评审约 19k input tokens），宿主 stdout 有 400KB 截断上限，
 //     落盘读取可避免「截断当完整」误判（zvec-grep 同款思路）。
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { format } from "./messages.ts";
@@ -38,6 +38,17 @@ import {
 /** `ocr review|scan|delegate preview` 的背景说明 flag（三处命令构造共用一条）。
  *  pushTextFlag 按 `flag.slice(2)` 反推报错用的参数名，故值必须带 `--` 前缀。 */
 const BACKGROUND_FLAG = "--background";
+
+/**
+ * 本包的契约是按外部 `ocr` CLI 的哪一版核对的（README 的前置条件、装法建议与工具回显里
+ * 的核对提示都读这一枚）。
+ *
+ * 声明归 package.json 的 `ocrCliVersion`（发布出去的包页面上看得到，用户据此装对应版本），
+ * 这里是它在本包代码里的唯一镜像：test/publish-manifest.test.ts 逐字断言两处相等，
+ * test/readme-parity.test.ts 再断言两侧 README 写的也是它。三处只有一处是人写的、
+ * 靠门禁钉住另两处，就不会出现「README 教用户装 A、代码按 B 校验」这种两边各自自洽的错。
+ */
+export const EXPECTED_OCR_CLI_VERSION = "1.13.0";
 
 /** root 解析：显式绝对路径优先；缺失/空串回退到当前会话工作区。 */
 export function resolveRoot(
@@ -320,18 +331,35 @@ export function wrapWithHostReaper(command: string, messages: OcrReviewMessages)
   return `bash -c ${shq(inner)}`;
 }
 
-/** 随包 launcher 的绝对路径；依赖缺席（或入口不在盘上）时给 undefined。
- *  默认实现用 createRequire 以本文件为基准解析**本插件自己**的依赖树（打包产物
- *  host.js 里即随包发布的那个），不走宿主 profile 的目录。做成入参是为了让回落那一档
- *  在单测里可构造——它平时只在「部署刻意不随包分发」时才发生。 */
+/** 随包 launcher 的绝对路径；依赖不在树里（或入口不在盘上）时给 undefined。
+ *  默认实现用 createRequire 以本文件为基准解析**本插件自己**的依赖树，不走宿主 profile
+ *  的目录。
+ *
+ *  本包不再随包分发 `@alibaba-group/open-code-review`：那枚 optionalDependencies 让「装上
+ *  本插件」顺带把外部 CLI 拖进 node_modules，而这条绝对路径又比用户自己装在 PATH 上的那份
+ *  更先命中，于是用户升级了 CLI、本插件仍在跑随包那一份旧版——卡片报的版本与用户终端里跑的
+ *  永远对不上，且没有任何线索指向「有两份」。装法交回用户自选，本函数只作兜底：部署自己把
+ *  它放进依赖树时仍然可用，但排在 PATH 之后。做成入参是为了让两条分支在单测里都能构造。 */
 export type LauncherLocator = () => string | null;
 
-export function locateLauncher(): string | null {
+/** 把说明符解析成绝对路径的口：默认按**本插件自己**的依赖树解析（打包产物 host.js 里
+ *  即随包发布的那一份），不走宿主 profile 的目录。做成入参是因为默认那一档的结果取决于
+ *  「这台机器装没装」，而这一档的三条分支必须在单测里都可构造。 */
+export type SpecifierResolver = (specifier: string) => string;
+
+/** 随包兜底那一份的 package.json 说明符：解析到它才谈得上取它的 bin 入口。 */
+const OCR_PACKAGE_JSON = "@alibaba-group/open-code-review/package.json";
+
+function resolveFromOwnTree(specifier: string): string {
+  return createRequire(import.meta.url).resolve(specifier);
+}
+
+export function locateLauncher(
+  resolveEntry: SpecifierResolver = resolveFromOwnTree,
+): string | null {
   let launcher: string | null = null;
   try {
-    const entry = createRequire(import.meta.url).resolve(
-      "@alibaba-group/open-code-review/package.json",
-    );
+    const entry = resolveEntry(OCR_PACKAGE_JSON);
     const candidate = path.join(path.dirname(entry), "bin", "ocr.js");
     // 走 launcher 的绝对路径而不是 `node <path>`：Electron 宿主里 process.execPath
     // 是 electron 自己，用它去跑脚本会拉起一个 Electron 窗口而不是 Node。
@@ -340,18 +368,23 @@ export function locateLauncher(): string | null {
       launcher = candidate;
     }
   } catch {
-    // 依赖缺席（optionalDependencies 没装上）：留在 PATH 那一档。
+    // 依赖不在本包的依赖树里：默认安装下这一档恒空（见 LauncherLocator 的说明）。
   }
   return launcher;
 }
 
-/** ocr 可执行体的来源：随包 JS 入口 / PATH 上的可执行 / 两处都没有。 */
+/** ocr 可执行体的来源：PATH 上用户自装的那份 / 随包 JS 入口（兜底）/ 两处都没有。 */
 export type OcrBinarySource = "bundled" | "path" | "none";
+
+/** 外部 CLI 的安装来源：只用来挑一条**对得上号的**换版命令，不参与「能不能跑」的判定。 */
+export type OcrInstallChannel = "brew" | "npm" | "unknown";
 
 export interface OcrBinaryStatus {
   readonly source: OcrBinarySource;
   /** 命中的绝对路径；`none` 时缺席。 */
   readonly path?: string;
+  /** 命中那份的来源；`none` 时缺席（压根没有候选，谈不上来源）。 */
+  readonly channel?: OcrInstallChannel;
 }
 
 /** 是不是一个普通文件（PATH 里恰好有个叫 ocr 的目录不算命中）。 */
@@ -364,13 +397,82 @@ function isRegularFile(candidate: string): boolean {
 }
 
 /**
+ * 符号链接解到底。brew 与 npm 全局都在 bin 目录留一条软链，真身分别在 Cellar 与
+ * node_modules 下：不解开就只看得到 `…/bin/ocr`，两种装法长得一模一样。
+ * 解不开（目标已消失、无权限）就用字面值判——来源最多退化成 `unknown`，
+ * 那一条只会让用户看到两条命令，不会报错误的命令。
+ */
+function realPathOrSelf(candidate: string): string {
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return candidate;
+  }
+}
+
+/**
+ * 从可执行体的位置推断装法。判据只有两条，且都是「真身在哪棵目录树下」这种事实：
+ *  - `node_modules` → npm 一类的包管理器装法（`~/.nvm/…/lib/node_modules`、
+ *    brew 装的 node 的 `/opt/homebrew/lib/node_modules`、Windows 的 `%APPDATA%\npm\node_modules`）。
+ *  - `Cellar` / `homebrew` → formula 装法（Apple Silicon `/opt/homebrew/Cellar`、
+ *    Intel `/usr/local/Homebrew/Cellar`、Linuxbrew `/home/linuxbrew/.linuxbrew/Cellar`）。
+ * `node_modules` 必须先判：brew 装的 node 把自己装出来的全局包也放在 `<brew 前缀>` 下，
+ * 那条路径同时含 homebrew，反过来判就把 npm 装法报成 brew。
+ * 两条都不命中就是 unknown（手工 `cp` 到 ~/bin、npx、别的前缀），不猜。
+ * @param candidate - 命中的绝对路径。
+ * @returns 安装来源。
+ */
+export function inferOcrInstallChannel(candidate: string): OcrInstallChannel {
+  const resolved = realPathOrSelf(candidate);
+  if (resolved.includes("node_modules")) {
+    return "npm";
+  }
+  return /(?:^|[/\\])(?:Cellar|Homebrew)(?:[/\\]|$)/iu.test(resolved) ? "brew" : "unknown";
+}
+
+/** 用户自选的装法偏好：没装时先推哪一条（部署级设置项 `ocrInstallHint`）。 */
+export type OcrInstallPreference = "both" | "brew" | "npm";
+
+/** brew 的 formula 名与 npm 的包名不同：formula 不带 scope。 */
+const OCR_BREW_FORMULA = "open-code-review";
+const OCR_NPM_PACKAGE = "@alibaba-group/open-code-review";
+
+/**
+ * 给人照抄的两条命令。两条不对称是有原因的，不是漏写：
+ *  - npm 那条恒带版本号（`npm i -g <包名>@<版本>` 覆盖安装即换版），因为本插件的契约
+ *    只按 EXPECTED_OCR_CLI_VERSION 那一版核对过，把版本钉住就不会出现「装完才发现对不上」。
+ *  - brew 那条不带版本：homebrew/core 只有一份 stable formula，没有 `open-code-review@x.y`
+ *    这种版本化 formula，装/升出来就是上游最新。所以它必须和一句「钉不住版本」的说明
+ *    一起出现（文案在 lib/messages.ts），不能让用户以为 `brew install` 得到的是这一版。
+ * @param channel - 已命中那份的来源；没命中时传 "unknown"。
+ * @param installed - 是否已有一份候选（决定 brew 那条说 install 还是 upgrade）。
+ * @returns 两条命令的字面串。
+ */
+export function ocrCommandsFor(
+  channel: OcrInstallChannel,
+  installed: boolean,
+): { readonly brew: string; readonly npm: string } {
+  return {
+    // 已知是 brew 装的且已有一份 ⇒ upgrade；其余一律 install——`brew upgrade` 对没装过的
+    // 包名直接报错，而 install 对已装的包是幂等升级，判不出来源时宁可走保守那一条。
+    brew:
+      channel === "brew" && installed
+        ? `brew upgrade ${OCR_BREW_FORMULA}`
+        : `brew install ${OCR_BREW_FORMULA}`,
+    npm: `npm i -g ${OCR_NPM_PACKAGE}@${EXPECTED_OCR_CLI_VERSION}`,
+  };
+}
+
+/**
  * 只用文件系统的事实回答：`ocr` 这个候选在哪条路上找得到。
  *
- * 为什么需要：`ocrCommand()` 在随包入口缺席时**假设** PATH 上有裸 `ocr`，而这个假设
+ * 为什么需要：`ocrCommand()` 在两条路都没有候选时**假设** PATH 上有裸 `ocr`，而这个假设
  * 过去只有等子进程 exit 127 才暴露——用户看到的是「ocr 命令不存在」而不是「哪条路都
  * 没找到」。本函数给设置页的状态行与工具的前置短路同一个可先问的判据。
  *
- * 四条口径：
+ * 口径：
+ *  - PATH 先、随包入口后：用户在终端里 `which ocr` 看到的那一份，就是本插件跑的与卡片
+ *    报的那一份。两处顺序一致是这条功能最基本的诚实性要求。
  *  - 只回答「找不找得到」，不回答「跑不跑得起来」：丢执行位、入口是符号链接指向空缺
  *    这类事实在真实 spawn 那一侧由子进程自己报（比 fs 侧猜权限准确得多），本判据也不
  *    为此引入 `accessSync` 或 mode 位运算。
@@ -384,7 +486,7 @@ function isRegularFile(candidate: string): boolean {
  * @param env - 进程环境（默认生产那一份；单测注入 stub 以构造 PATH 形态）。
  * @param locate - 随包 launcher 的定位口（默认即 `ocrCommand()` 用的那一个）。
  * @param platform - 平台（默认 `process.platform`；单测换成 stub 以覆盖分隔符与后缀）。
- * @returns 来源与命中路径。
+ * @returns 来源、命中路径与那份的安装渠道。
  */
 export function resolveOcrAvailability(
   env: NodeJS.ProcessEnv = process.env,
@@ -392,12 +494,6 @@ export function resolveOcrAvailability(
   platform: NodeJS.Platform = process.platform,
 ): OcrBinaryStatus {
   const windows = platform === "win32";
-  if (!windows) {
-    const launcher = locate();
-    if (launcher !== null) {
-      return { source: "bundled", path: launcher };
-    }
-  }
   // 空段在 shell 语义里是**当前工作目录**，跟着那条语义走就会把被审查仓库里恰好叫 ocr
   // 的文件报成「PATH 上有」，所以先滤掉再逐段试。
   const dirs = (env["PATH"] ?? env["Path"] ?? "")
@@ -410,8 +506,14 @@ export function resolveOcrAvailability(
     for (const suffix of suffixes) {
       const candidate = path.resolve(dir, `ocr${suffix}`);
       if (isRegularFile(candidate)) {
-        return { source: "path", path: candidate };
+        return { source: "path", path: candidate, channel: inferOcrInstallChannel(candidate) };
       }
+    }
+  }
+  if (!windows) {
+    const launcher = locate();
+    if (launcher !== null) {
+      return { source: "bundled", path: launcher, channel: inferOcrInstallChannel(launcher) };
     }
   }
   return { source: "none" };
@@ -420,33 +522,33 @@ export function resolveOcrAvailability(
 /** 进程级记忆槽（默认那一档）：整包共用一次解析结果。 */
 const memoBox: { value?: string } = {};
 
-/** 解析出的 `ocr` 命令词（已 shq 转义）：随包入口的绝对路径，或 PATH 上的裸 `ocr`。
- *  优先用**随包装上**的 `@alibaba-group/open-code-review` 入口：它经 optionalDependencies
- *  带进来（平台二进制再由它自己的 optionalDependencies 选一），于是「装上本插件 = 工具可用」，
- *  不必用户自己再 brew/npm i -g 一遍；解析不到（平台二进制装不上、或部署刻意不随包分发）才
- *  回落到 PATH 上的裸 `ocr`，与本包一直以来的形态完全一致——两种装法都继续支持。
- *  惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在装载期抛，
- *  否则整包会因为一个可选二进制而下线。
- *  导出给同包的命令构造单测——它们按同一个解析结果写期望值，测试与生产同源，
- *  而不是各自把「ocr 还是某个绝对路径」写死一遍。
+/**
+ * 解析出的 `ocr` 命令词（已 shq 转义）：PATH 上用户自装那份的绝对路径，退一步是随包入口
+ * 的绝对路径，两处都没有候选时才是裸 `ocr`。
+ * 命令词一律取自 `resolveOcrAvailability()`，与设置页状态行、工具前置短路同一份判据——
+ * 分成两套就会各说各话：卡片报「PATH 上那份」，实际跑的却是随包那份。
+ * 两条路都没有候选时仍交回裸 `ocr` 而不是抛错：装载期不许因为一个外部命令缺席把五个工具
+ * 一并拖下线（本包目标平台是 POSIX 优先，Windows 那半见下面）。
+ * 惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在装载期抛。
+ * 导出给同包的命令构造单测——它们按同一个解析结果写期望值，测试与生产同源，
+ * 而不是各自把「ocr 还是某个绝对路径」写死一遍。
  * @param locate 随包 launcher 的定位口（默认实现即生产那一档）。
  * @param memo 记忆槽（默认进程级单例；单测传自己的盒以便反复构造两条分支）。
+ * @param env 进程环境（默认生产那一份；单测注入 stub 以构造 PATH 形态）。
  */
 export function ocrCommand(
   locate: LauncherLocator = locateLauncher,
   memo: { value?: string } = memoBox,
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
   if (memo.value === undefined) {
-    // Windows 不取随包 launcher：bin/ocr.js 是 shebang 脚本，pwsh/cmd 无法直接执行
-    // （.js 会被交给 WSH/JScript 解释），与 wrapWithHostReaper/withHomeEnv 的 win32
-    // 放行同一口径——随包装法只在 macOS/Linux 生效，Windows 一直走 PATH 上的全局
-    // `ocr`（README 的平台承诺；此前代码并没有兑现这句话，launcher 在 win32 照取）。
-    if (process.platform === "win32") {
-      memo.value = "ocr";
-    } else {
-      const launcher = locate();
-      memo.value = launcher === null ? "ocr" : shq(launcher);
-    }
+    // Windows 不取绝对路径：`C:\dir\ocr.exe` 这种带反斜杠与空格的词在 cmd 里单引号不是
+    // 引号，交回裸 `ocr` 让 shell 自己按 PATHEXT 解析才可靠（与 wrapWithHostReaper/
+    // withHomeEnv 的 win32 放行同一口径）。随包 launcher 是 shebang 脚本，pwsh/cmd 也
+    // 无法直接执行，故 resolveOcrAvailability 在 Windows 上根本不报 bundled。
+    const windows = process.platform === "win32";
+    const hit = resolveOcrAvailability(env, locate, process.platform).path;
+    memo.value = windows || hit === undefined ? "ocr" : shq(hit);
   }
   return memo.value;
 }
@@ -474,10 +576,9 @@ export function withHomeEnv(command: string, home: string | undefined): string {
 
 /**
  * `ocr llm test` 命令词（select 的 autoVerify 与卡片「测试连接」共用）。
- * 必须与五个工具走同一个解析源（ocrCommand()）：随包 launcher 装法下 PATH 上没有
- * 裸 `ocr`，硬编码字符串会让 llm test 永远 exit 127 而评审照常工作——autoVerify
- * 从此没有一次能通过，还误导用户去装全局包。`--color` 是 root 持久 flag
- * （color.go:35-39），子命令合法。
+ * 必须与五个工具走同一个解析源（ocrCommand()）：卡片验的那一份与评审吃的那一份必须是同一
+ * 个二进制，否则「测试连接通过」这句回执毫无价值。硬编码裸 `ocr` 在随包兜底装法下还会永远
+ * exit 127。`--color` 是 root 持久 flag（color.go:35-39），子命令合法。
  */
 export function buildLlmTestCommand(): string {
   return `${ocrCommand()} llm test --color never`;
@@ -495,10 +596,9 @@ export function buildVersionCommand(): string {
 /**
  * 从 `ocr version` 的回执里取版本号。上游那句自述是 `open-code-review <Version> <os>/<arch>`
  * （`cmd/opencodereview/root.go` 的 versionString），而 `<Version>` 有两种**都在野外**的形态：
- * 随包的 Go 构建把 git tag 整个塞进去，带 `v`（`open-code-review v1.12.13 (fabbdb29) darwin/arm64`），
- * 包管理器装到 PATH 上那份没有（`open-code-review 1.12.13 darwin/arm64`）。上游自己那层 npm 包装
- * 的 parseVersionOutput 只认带 `v` 的一种，本包两种都得读——按 PATH 装法的用户按下「检测版本」
- * 却看到「没有版本号」，这个功能对他就是失效的。
+ * 上游自己那层 Go 构建把 git tag 整个塞进去、带 `v` 前缀与 commit 段，包管理器装到 PATH 上
+ * 那份只有裸数字。上游自己那层 npm 包装的 parseVersionOutput 只认带 `v` 的一种，本包两种都得
+ * 读——按包管理器装法的用户按下「检测版本」却看到「没有版本号」，这个功能对他就是失效的。
  * 锚在产品名上而不是「文本里第一个像版本号的串」：launcher 那句升级提示里也带一个版本号，
  * 那是**可用的新版本**而非本机装的这份，抓错就把建议读成了现状。
  * 读不出即 null：未发布构建的 `<Version>` 是 `dev`，没有版本号可报，猜一个等于编一个。

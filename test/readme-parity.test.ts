@@ -4,6 +4,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 
 const pkgDir = path.join(import.meta.dirname, "..");
 
@@ -28,6 +29,7 @@ const DEPLOYMENT_KEYS = [
   "ocrBackgroundMaxMs",
   "stdoutMaxBytes",
   "ocrNoAutoUpdate",
+  "ocrInstallHint",
 ] as const;
 
 /**
@@ -100,6 +102,20 @@ describe("readme 双语结构", () => {
     for (const route of ENDPOINT_PATHS) {
       expect(texts.en, `README.md 缺端点 ${route}`).toContain(route);
       expect(texts.zh, `README.zh-CN.md 缺端点 ${route}`).toContain(route);
+    }
+  });
+
+  it("两侧都写明核对所依据的外部 CLI 版本（装法建议与代码常量同源）", async () => {
+    // README 是用户挑安装命令时读的那一份。它写的版本与代码里核对用的那一版不是一版时，
+    // 用户照着装完就永远收到「实测与核对版本不一致」，而两边文档都自洽——只有并排断言才看得见。
+    const texts = {
+      en: await readReadme("en"),
+      zh: await readReadme("zh"),
+    } as const;
+    for (const [which, text] of Object.entries(texts)) {
+      expect(text, `${which} 侧 README 没写核对版本 ${EXPECTED_OCR_CLI_VERSION}`).toContain(
+        EXPECTED_OCR_CLI_VERSION,
+      );
     }
   });
 
