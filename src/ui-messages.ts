@@ -69,6 +69,8 @@ export interface UiMessages {
   readonly noReason: string;
   /** 数据源不可用整行（含宿主给的原因）。 */
   readonly readProvidersFailed: string;
+  /** 装载期端点自检失败的一行（含宿主给的原始输出）。 */
+  readonly endpointVerifyFailed: string;
   /** 回执：应用成功。 */
   readonly applied: string;
   /** 回执：未自动验证。 */
@@ -128,6 +130,35 @@ export interface UiMessages {
   readonly keyDynamicHint: string;
   /** get-cred 脚本缺失的警告。 */
   readonly keyScriptMissing: string;
+  // ── 外部 CLI 可得性与版本探测 ──────────────────────────────────────────────
+  /** 状态行的小标题。 */
+  readonly binaryTitle: string;
+  /** 宿主没报可得性（载荷缺字段或形状不合）。 */
+  readonly binaryUnknown: string;
+  /** 随包入口在盘上。 */
+  readonly binaryBundled: string;
+  /** PATH 上的全局安装：{path} 是命中的绝对路径。 */
+  readonly binaryPath: string;
+  /** 两条路都没有候选。 */
+  readonly binaryNone: string;
+  /** 「检测」按钮（空闲态）。 */
+  readonly detectCli: string;
+  /** 「检测」按钮（进行中）。 */
+  readonly detecting: string;
+  /** 探测成功：{version} 是从 `ocr version` 回执里取出的版本串。 */
+  readonly probeVersion: string;
+  /** 探测失败：{reason} 是宿主给的理由，原文另起一行附在其后。 */
+  readonly probeReason: string;
+  /** 详情页徽标（短文案，四档与 `binary*` 一一对应）。 */
+  readonly badgeBundled: string;
+  readonly badgePath: string;
+  readonly badgeNone: string;
+  readonly badgeUnknown: string;
+  /** 详情页区块里那句「版本号要在配置卡片里点检测」。 */
+  readonly binaryProbeHint: string;
+  /** 启用后指引上的两个按钮。 */
+  readonly binaryGuideDetails: string;
+  readonly binaryGuideDismiss: string;
 }
 
 /**
@@ -203,6 +234,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noProvider: "当前未配置 provider",
     noReason: "宿主未给出原因（重启 dsh 或重试可恢复）",
     readProvidersFailed: "未能从 dsh 配置服务读取 provider 列表：{reason}",
+    endpointVerifyFailed: "装载期端点自检失败（配置仍可修改）：{reason}",
     applied: "已应用：{provider} / {model}\n{test}",
     notVerified: "（未自动验证，可点「测试连接」手动验证）",
     llmTestPassed: "✓ ocr llm test 通过",
@@ -236,6 +268,23 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     settingsLoading: "设置加载中，稍候可改",
     keyDynamicHint: "key 走 get-cred.mjs 动态读取，OCR 配置不留明文",
     keyScriptMissing: "⚠ get-cred 脚本缺失，api_key_cmd 无法工作",
+    binaryTitle: "外部 CLI（ocr）",
+    binaryUnknown: "状态未取到：刷新本页，或确认 dsh 的 web 服务已起来",
+    binaryBundled: "随本插件分发已就位，无需再全局安装",
+    binaryPath: "用 PATH 上的全局安装：{path}",
+    binaryNone:
+      "未找到 ocr：`brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review`",
+    detectCli: "检测版本",
+    detecting: "检测中…",
+    probeVersion: "ocr 版本：{version}",
+    probeReason: "未取到版本号：{reason}",
+    badgeBundled: "ocr 随包就位",
+    badgePath: "ocr 来自 PATH",
+    badgeNone: "未找到 ocr",
+    badgeUnknown: "ocr 状态未取到",
+    binaryProbeHint: "版本号要在「配置」页点「检测版本」取——那要起一次 ocr 进程，不在本页顺手跑。",
+    binaryGuideDetails: "打开插件详情",
+    binaryGuideDismiss: "知道了",
   },
   en: {
     cardTitle: "open-code-review code review",
@@ -267,6 +316,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noProvider: "No provider configured yet",
     noReason: "the host gave no reason (restart dsh or retry to recover)",
     readProvidersFailed: "Could not read the provider list from the dsh settings service: {reason}",
+    endpointVerifyFailed: "Startup endpoint check failed (the config is still editable): {reason}",
     applied: "Applied: {provider} / {model}\n{test}",
     notVerified: "(not verified automatically — use “Test connection” to check manually)",
     llmTestPassed: "✓ ocr llm test passed",
@@ -302,5 +352,23 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     settingsLoading: "settings still loading — editable in a moment",
     keyDynamicHint: "Keys are read dynamically via get-cred.mjs; OCR config keeps no plain text",
     keyScriptMissing: "⚠ get-cred script missing, api_key_cmd cannot work",
+    binaryTitle: "External CLI (ocr)",
+    binaryUnknown: "status not reported: reload this page, or check that the dsh web server is up",
+    binaryBundled: "bundled with this plugin, no global install needed",
+    binaryPath: "using the global install on PATH: {path}",
+    binaryNone:
+      "ocr not found: `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`",
+    detectCli: "Detect version",
+    detecting: "Detecting...",
+    probeVersion: "ocr version: {version}",
+    probeReason: "no version read: {reason}",
+    badgeBundled: "ocr bundled",
+    badgePath: "ocr from PATH",
+    badgeNone: "ocr not found",
+    badgeUnknown: "ocr status unavailable",
+    binaryProbeHint:
+      "the version comes from the Detect action on the configuration page — that spawns an ocr process, so it is not run here",
+    binaryGuideDetails: "Open plugin details",
+    binaryGuideDismiss: "Got it",
   },
 };

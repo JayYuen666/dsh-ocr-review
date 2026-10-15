@@ -108,12 +108,6 @@ function isNotFound(error) {
 }
 
 /**
- * 托管 YAML 文档里的 refs.<REF>（形状不合一律回 undefined，不抛）。
- * @param {string} credPath
- * @param {string} refName
- * @returns {string | undefined}
- */
-/**
  * YAML 解析错误的**脱敏**描述：只留 reason + 行列定位，不带出错位置前后若干行的原文。
  *
  * 为什么必须自己拼：js-yaml 的 YAMLException 有两处会把 mark.snippet（出错点邻域的
@@ -154,6 +148,13 @@ function yamlErrorDetail(error) {
   return "";
 }
 
+/**
+ * 托管 YAML 文档里的 refs.<REF>（形状不合一律回 undefined，不抛）。
+ * 解析失败走 `yamlErrorDetail`，绝不把邻域原文带进 stderr。
+ * @param {string} credPath
+ * @param {string} refName
+ * @returns {string | undefined}
+ */
 function fromCredentialsDoc(credPath, refName) {
   let text;
   try {

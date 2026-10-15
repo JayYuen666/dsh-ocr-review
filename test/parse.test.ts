@@ -12,7 +12,7 @@ import {
 } from "../lib/parse.ts";
 import { aggregateComments } from "../lib/severity.ts";
 import type { OcrComment, ParsedReview, ReviewSummaryView, SummaryPlan } from "../lib/parse.ts";
-import { MESSAGES } from "../lib/messages.ts";
+import { MESSAGES, format } from "../lib/messages.ts";
 
 const FIXTURES = path.join(import.meta.dirname, "fixtures");
 const read = (name: string): string => readFileSync(path.join(FIXTURES, name), "utf8");
@@ -272,7 +272,7 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
         message: "Some files could not be reviewed.",
         comments: [{ path: "a.ts", content: "x", start_line: 1, end_line: 2, severity: "high" }],
         summary: { files_reviewed: 3, comments: 1, total_tokens: 100 },
-        warnings: [{ file: "b.ts", error: "boom" }],
+        warnings: [{ file: "b.ts", message: "boom" }],
         session_id: "sess-p",
       }),
     );
@@ -394,16 +394,18 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
 });
 
 describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
-  it("warnings 兼容字符串与 {file,error} 条目；读不出的条目留占位而非静默丢弃", () => {
-    // 修复前 42 / null 被 filter(Boolean) 丢掉，而 completed_with_errors 这类状态的
-    // 失败细节**只**走 warnings 字段：丢掉等于把「出了错」显示成「一切正常」。
+  it("warnings 按 OCR 的 {file,message,type} 解码；读不出的条目留占位而非静默丢弃", () => {
+    // 回归钉：照 {file,error} 读时 message 永远取不到，交给模型的是只剩文件名的告警，
+    // 而 completed_with_warnings 这类状态下失败细节本来只有这一个来源。
+    // 42 / null 这类不合形态的条目同样不许被 filter(Boolean) 静默丢掉。
     const parsed = parseOcr(
       JSON.stringify({
         status: "completed_with_warnings",
         warnings: [
           "纯文本告警",
-          { file: "a.ts", error: "timeout" },
-          { error: "仅错误" },
+          { file: "a.ts", message: "timeout", type: "subtask_error" },
+          { message: "仅有说明" },
+          { type: "note" },
           42,
           null,
           {},
@@ -414,11 +416,12 @@ describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
     expect(parsed.status).toBe("completed_with_warnings");
     expect(parsed.warnings).toStrictEqual([
       "纯文本告警",
-      "a.ts：timeout",
-      "仅错误",
+      "a.ts：timeout [subtask_error]",
+      "仅有说明",
+      "[note]",
       zh.warningUnreadable,
       zh.warningUnreadable,
-      // 对象但既无 file 也无 error：进 isRecord 分支却拼不出文案，同样落占位
+      // 对象但三个字段都读不出：落占位而不是空字符串
       zh.warningUnreadable,
     ]);
   });
@@ -464,6 +467,158 @@ describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
     expect(view.topComments[0]?.location).toBe("(path unknown):4");
     expect(view.sessionId).toBeNull();
     expect(view.summary).toBeNull();
+  });
+});
+
+describe("诊断字段：tool_calls / manifest.coverage / summary.budget_exceeded", () => {
+  it("真实 complete 夹具：调用数与覆盖度一起带出，模型能证明「这一场审完了」", () => {
+    const parsed = parseOcr(read("ocr-review-complete.json"));
+    expect(parsed.toolCalls).toStrictEqual({ total: 5, failure: 0, failures: [] });
+    expect(parsed.coverage).toStrictEqual({
+      selected: 1,
+      completed: 1,
+      reused: 0,
+      failed: 0,
+      waived: 0,
+      failedItems: [],
+    });
+    expect(parsed.budgetExceeded).toBe(false);
+  });
+
+  it("预算截断与 failed 条目：status 只写 partial，这两处补上「为什么没审完」", () => {
+    const parsed = parseOcr(
+      '{"status":"partial","summary":{"budget_exceeded":true},"manifest":{"coverage":{' +
+        '"selected":[{},{},{}],"completed":[{}],"reused":[],' +
+        '"failed":[{"path":"b.ts","classification":"budget","reason":"cap"},{"path":"c.ts"}],' +
+        '"waived":[]}}}',
+    );
+    expect(parsed.budgetExceeded).toBe(true);
+    expect(parsed.coverage).toMatchObject({ selected: 3, completed: 1, failed: 2 });
+    expect(parsed.coverage?.failedItems).toStrictEqual(["b.ts [budget] cap", "c.ts"]);
+  });
+
+  it("failure_details 逐条渲染：缺 tool_name 落占位，缺 file_path 不带 @ 段", () => {
+    const parsed = parseOcr(
+      '{"status":"complete","tool_calls":{"total":2,"failure":2,"failure_details":[' +
+        '{"error":"only error"},{"tool_name":"code_search","error":"x"}]}}',
+    );
+    expect(parsed.toolCalls?.failures).toStrictEqual([
+      `${zh.statusNone}: only error`,
+      "code_search: x",
+    ]);
+  });
+
+  it("明细超过上限：截到上限并补一条省略说明，别让截断读成「一共就这些」", () => {
+    const details = Array.from({ length: 11 }, (_unused, index) => ({
+      tool_name: `t${index}`,
+      error: "e",
+    }));
+    const parsed = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        tool_calls: { total: 11, failure: 11, failure_details: details },
+      }),
+    );
+    const lines = parsed.toolCalls?.failures ?? [];
+    // 上限行 + 一条说明；说明里给出被省略的条数。
+    expect(lines).toHaveLength(9);
+    expect(lines[8]).toBe(format(zh.diagnosticOmitted, { count: "3" }));
+  });
+
+  it("字段缺失即 null（不拿 0 冒充「零失败」）；形态不合即 null 并补一条读不出的说明", () => {
+    const absent = parseOcr('{"status":"complete"}');
+    expect(absent.toolCalls).toBeNull();
+    expect(absent.coverage).toBeNull();
+    expect(absent.warnings).toStrictEqual([]);
+    const badTool = parseOcr('{"status":"complete","tool_calls":{"total":"x","failure":0}}');
+    expect(badTool.toolCalls).toBeNull();
+    expect(badTool.warnings).toStrictEqual([
+      format(zh.diagnosticUnreadable, { field: "tool_calls" }),
+    ]);
+    const badDetails = parseOcr(
+      '{"status":"complete","tool_calls":{"total":1,"failure":0,"failure_details":{}}}',
+    );
+    expect(badDetails.toolCalls).toBeNull();
+    const badCoverage = parseOcr('{"status":"partial","manifest":{"coverage":{"selected":0}}}');
+    expect(badCoverage.coverage).toBeNull();
+    expect(badCoverage.warnings).toStrictEqual([
+      format(zh.diagnosticUnreadable, { field: "manifest.coverage" }),
+    ]);
+    const badManifest = parseOcr('{"status":"partial","manifest":42}');
+    expect(badManifest.coverage).toBeNull();
+    expect(badManifest.warnings).toHaveLength(1);
+  });
+
+  it("null 值算「没有这层数据」，不落读不出", () => {
+    const parsed = parseOcr('{"status":"skipped","tool_calls":null,"manifest":null}');
+    expect(parsed.toolCalls).toBeNull();
+    expect(parsed.coverage).toBeNull();
+    expect(parsed.warnings).toStrictEqual([]);
+  });
+
+  it("失败骨架与摘要视图同带这三字段（输出契约逐分支对齐）", () => {
+    const failed = parseOcr("not json");
+    expect(failed.toolCalls).toBeNull();
+    expect(failed.coverage).toBeNull();
+    expect(failed.budgetExceeded).toBe(false);
+    const view = summarizeView(
+      parseOcr('{"status":"complete","summary":{"budget_exceeded":true}}'),
+    );
+    expect(view.budgetExceeded).toBe(true);
+    expect(view.toolCalls).toBeNull();
+    expect(view.coverage).toBeNull();
+  });
+
+  it('budget_exceeded 只认真布尔：字符串 "true" 不算被截断', () => {
+    const parsed = parseOcr('{"status":"complete","summary":{"budget_exceeded":"true"}}');
+    expect(parsed.budgetExceeded).toBe(false);
+  });
+
+  it("计数字段的坏形态（负数、小数、非数字串）都算读不出，不被 num 折成 0", () => {
+    for (const total of ["-1", "1.5", "{}", "true"]) {
+      const parsed = parseOcr(`{"status":"complete","tool_calls":{"total":${total},"failure":0}}`);
+      expect(parsed.toolCalls, `total=${total}`).toBeNull();
+      expect(parsed.warnings).toStrictEqual([
+        format(zh.diagnosticUnreadable, { field: "tool_calls" }),
+      ]);
+    }
+  });
+
+  it("tool_calls 不是对象、coverage 不在 manifest 里：都判读不出而不是静默空", () => {
+    const scalar = parseOcr('{"status":"complete","tool_calls":"nope"}');
+    expect(scalar.toolCalls).toBeNull();
+    expect(scalar.warnings).toStrictEqual([
+      format(zh.diagnosticUnreadable, { field: "tool_calls" }),
+    ]);
+    const noCoverage = parseOcr('{"status":"partial","manifest":{"run_id":"r"}}');
+    expect(noCoverage.coverage).toBeNull();
+    expect(noCoverage.warnings).toStrictEqual([
+      format(zh.diagnosticUnreadable, { field: "manifest.coverage" }),
+    ]);
+  });
+
+  it("failure_details 缺席是合法的「零失败明细」，与读不出是两件事", () => {
+    const parsed = parseOcr('{"status":"complete","tool_calls":{"total":4,"failure":0}}');
+    expect(parsed.toolCalls).toStrictEqual({ total: 4, failure: 0, failures: [] });
+    expect(parsed.warnings).toStrictEqual([]);
+  });
+
+  it("failed 条目的字段缺哪个就让位哪个：无 classification、无 reason、无 path、非对象各成一形", () => {
+    const parsed = parseOcr(
+      '{"status":"partial","manifest":{"coverage":{"selected":[{}],"completed":[],"reused":[],' +
+        '"failed":[{"path":"a.ts"},{"path":"b.ts","classification":"git"},{"path":"c.ts","reason":"why"},' +
+        '{"reason":"no path"},42],"waived":[]}}}',
+    );
+    expect(parsed.coverage?.failed).toBe(5);
+    // 非对象那条渲染不出来：计数仍在 failed 里，明细以「已省略 1 条」收尾，
+    // 而不是把它悄悄吞掉、让模型以为已经看全。
+    expect(parsed.coverage?.failedItems).toStrictEqual([
+      "a.ts",
+      "b.ts [git]",
+      "c.ts why",
+      `${zh.statusNone} no path`,
+      format(zh.diagnosticOmitted, { count: "1" }),
+    ]);
   });
 });
 
@@ -593,7 +748,8 @@ describe("解析文案双语（消息表由调用方注入）", () => {
   });
 
   it("warnings 的连接器随语言走（中文全角冒号、英文半角）", () => {
-    const warned = '{"status":"completed_with_warnings","warnings":[{"file":"a.ts","error":"t"}]}';
+    const warned =
+      '{"status":"completed_with_warnings","warnings":[{"file":"a.ts","message":"t"}]}';
     expect(parseReviewOutput(warned, MESSAGES.zh).warnings).toStrictEqual(["a.ts：t"]);
     expect(parseReviewOutput(warned, MESSAGES.en).warnings).toStrictEqual(["a.ts: t"]);
   });

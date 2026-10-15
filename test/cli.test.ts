@@ -5,7 +5,10 @@
 // 一致），末尾一组用例注入 en 那份，证明同一批校验闸换语言只是换文案、不改判定。
 // 取值闸（转义/绝对路径/逗号列表/钳制）按这层边界直接取用 lib/argv-guard.ts，
 // 命令构造走 lib/cli.ts——与生产侧的引用关系一致。
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   shq,
   assertAbsoluteRoot,
@@ -24,7 +27,10 @@ import {
   buildDelegateRuleCommand,
   buildSessionCommand,
   buildLlmTestCommand,
+  buildVersionCommand,
+  parseOcrVersion,
   withHomeEnv,
+  resolveOcrAvailability,
 } from "../lib/cli.ts";
 import type {
   BuiltCommand,
@@ -40,9 +46,6 @@ const { zh } = MESSAGES;
 
 const REPO_ABS = "/Users/me/repo";
 
-/** 降级回落的目标子命令（action=show/comments 缺 id 时命令必须落回这一条）。 */
-/** 解析出的命令词：随包入口的绝对路径，或 PATH 上的裸 `ocr`。测试与生产同源。 */
-
 /** 随包 launcher 的入口是否「在盘上」的可切换替身：lib/cli.ts 的定位口经 existsSync
  *  判入口，缺了它就只有「装上了」这一档分支——而那取决于本机装没装 optionalDependencies。 */
 const fsStub = vi.hoisted(() => ({ exists: true }));
@@ -57,11 +60,13 @@ vi.mock("node:fs", async (importOriginal) => {
   return { ...patched, default: patched };
 });
 
+/** 解析出的命令词：随包入口的绝对路径，或 PATH 上的裸 `ocr`。测试与生产同源。 */
 const OCR = ocrCommand();
 /** 可控槽位数（决定命令里应有几段 shq 引号）：命令词另占一段。 */
 const REVIEW_SLOTS = 7;
 const SCAN_SLOTS = 5;
 
+/** 降级回落的目标子命令（action=show/comments 缺 id 时命令必须落回这一条）。 */
 const SESSION_LIST_CMD = `${OCR} session list`;
 
 /* ── 注入中文文案的薄封装（下面的用例因此与迁移前逐字同形）──────────────── */
@@ -508,6 +513,39 @@ describe("withHomeEnv / buildLlmTestCommand", () => {
   });
 });
 
+describe("version 探测：命令词与版本解析", () => {
+  it("与五个工具同一解析源，且不套宿主回收守护（秒级本地打印）", () => {
+    expect(buildVersionCommand()).toBe(`${OCR} version`);
+  });
+
+  it("两种真实自述形态都读得出来：随包构建带 v，包管理器装到 PATH 上那份不带", () => {
+    // 随包的 Go 构建把 git tag 整个塞进 Version，还夹一段 commit（这句是本机实跑取回的原文）。
+    expect(
+      parseOcrVersion("open-code-review v1.12.13 (fabbdb29) darwin/arm64\nbuilt at: x\n"),
+    ).toBe("1.12.13");
+    expect(parseOcrVersion("open-code-review v1.12.13 darwin/arm64\n")).toBe("1.12.13");
+    expect(parseOcrVersion("open-code-review 1.12.13 darwin/arm64")).toBe("1.12.13");
+    expect(parseOcrVersion("open-code-review v1.13.0-rc.1+build.7 linux/amd64")).toBe(
+      "1.13.0-rc.1+build.7",
+    );
+    expect(parseOcrVersion("open-code-review v1.14 darwin/arm64")).toBe("1.14");
+  });
+
+  it("读不出即 null，不猜：dev、空串、以及只有升级提示的那句", () => {
+    // 未发布构建的 Version 就是 "dev"。
+    expect(parseOcrVersion("open-code-review dev linux/amd64")).toBeNull();
+    expect(parseOcrVersion("")).toBeNull();
+    // launcher 的升级提示里也带一个版本号，但那是**可用的新版本**、不是本机装的这份；
+    // 判据锚在产品名上，所以这里必须是 null，而不是把建议读成现状。
+    expect(
+      parseOcrVersion(
+        "[ocr] A new version (v1.14.0) is available. Run to update:\n" +
+          "  npm i -g @alibaba-group/open-code-review@1.14.0\n",
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("delegate 命令", () => {
   it("preview：workspace 缺省、branch 带 merge-base 对", () => {
     const { command } = previewCmd({
@@ -848,5 +886,112 @@ describe("拒绝理由双语（注入 en 那份）", () => {
     expect(ruleCmd(ruleArgs, en).command).toBe(ruleCmd(ruleArgs, zh).command);
     const sessionArgs: SessionArgs = { repo: "/r", action: "comments", id: "s1" };
     expect(sessionCmd(sessionArgs, en).command).toBe(sessionCmd(sessionArgs, zh).command);
+  });
+});
+
+/* ── 只问文件系统、不 spawn 的可用性判据 ─────────────────────────────────── */
+
+const tempDirs: string[] = [];
+
+/** 造一只临时目录，在里面放几个普通文件（名字逐个给）。 */
+function makeBinDir(names: string[]): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
+  tempDirs.push(dir);
+  for (const name of names) {
+    writeFileSync(path.join(dir, name), "#!/bin/sh\n");
+  }
+  return dir;
+}
+
+function makeEmptyDir(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
+describe("resolveOcrAvailability：来源三档与它的假命中防线", () => {
+  afterAll(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("随包入口在盘 ⇒ bundled，并且优先于 PATH 上的候选", () => {
+    const launcherDir = makeBinDir(["ocr.js"]);
+    const launcher = path.join(launcherDir, "ocr.js");
+    const bin = makeBinDir(["ocr"]);
+    expect(resolveOcrAvailability({ PATH: bin }, () => launcher, "darwin")).toStrictEqual({
+      source: "bundled",
+      path: launcher,
+    });
+  });
+
+  it("随包入口缺席、PATH 上有普通文件 ⇒ path，交回的是绝对路径", () => {
+    const bin = makeBinDir(["ocr"]);
+    expect(resolveOcrAvailability({ PATH: bin }, () => null, "darwin")).toStrictEqual({
+      source: "path",
+      path: path.join(bin, "ocr"),
+    });
+  });
+
+  it("假命中不算数：PATH 里那个 ocr 是目录，或那段目录里根本没有", () => {
+    const dirAsBin = makeEmptyDir();
+    mkdirSync(path.join(dirAsBin, "ocr"));
+    const nothing = makeEmptyDir();
+    expect(resolveOcrAvailability({ PATH: dirAsBin }, () => null, "darwin").source).toBe("none");
+    expect(resolveOcrAvailability({ PATH: nothing }, () => null, "darwin").source).toBe("none");
+  });
+
+  it("PATH 的空段不当 cwd：滤掉之后在真实目录里命中", () => {
+    // shell 把空段解释成**当前工作目录**，跟着这条语义走就会把被审查仓库里恰好叫
+    // ocr 的文件报成「PATH 上有」——而工作目录正是本包每次评审都在用的那个。
+    const bin = makeBinDir(["ocr"]);
+    expect(resolveOcrAvailability({ PATH: `:${bin}` }, () => null, "linux")).toStrictEqual({
+      source: "path",
+      path: path.join(bin, "ocr"),
+    });
+    expect(resolveOcrAvailability({ PATH: ":" }, () => null, "linux").source).toBe("none");
+  });
+
+  it("按 PATH 顺序找：前一个目录没有就继续往下一个", () => {
+    const empty = makeEmptyDir();
+    const bin = makeBinDir(["ocr"]);
+    expect(resolveOcrAvailability({ PATH: `${empty}:${bin}` }, () => null, "darwin")).toStrictEqual(
+      { source: "path", path: path.join(bin, "ocr") },
+    );
+  });
+
+  it("PATH 与 Path 都缺席 ⇒ 空串回落、判 none，不抛", () => {
+    expect(resolveOcrAvailability({}, () => null, "darwin")).toStrictEqual({ source: "none" });
+  });
+
+  it("win32 即便定位口给得出入口也只走 PATH，并按 PATHEXT 命中", () => {
+    // 与 ocrCommand() 的 win32 跳过同一口径：两处不一致时，状态说「随包可用」而命令
+    // 却走另一条路，用户按状态做的决定就落在空处。后缀按字面比，大小写折叠是 Windows
+    // 文件系统的事，在 POSIX 上照做就错了，本判据不替平台改写语义。
+    const bin = makeBinDir(["ocr.cmd"]);
+    const launcher = makeBinDir(["ocr.js"]);
+    expect(
+      resolveOcrAvailability(
+        { PATH: bin, PATHEXT: ".COM;.cmd" },
+        () => path.join(launcher, "ocr.js"),
+        "win32",
+      ),
+    ).toStrictEqual({ source: "path", path: path.join(bin, "ocr.cmd") });
+  });
+
+  it("win32 的 PATHEXT 缺席时认裸名；Path 这种环境变量名也读", () => {
+    const bin = makeBinDir(["ocr"]);
+    expect(resolveOcrAvailability({ Path: bin }, () => null, "win32")).toStrictEqual({
+      source: "path",
+      path: path.join(bin, "ocr"),
+    });
+  });
+
+  it("win32 的 PATHEXT 里空段与重复段都不生出多余候选", () => {
+    const bin = makeBinDir(["ocr"]);
+    expect(
+      resolveOcrAvailability({ PATH: bin, PATHEXT: ";;.cmd;" }, () => null, "win32").source,
+    ).toBe("path");
   });
 });

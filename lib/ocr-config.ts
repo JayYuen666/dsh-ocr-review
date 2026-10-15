@@ -8,8 +8,8 @@
 // resolveOcrConfigPath 留在本文件：它是**设置项语义**（读配置值 → 决定默认路径 → 报错文案），
 // 而它调用的那条展开判据（expandHomeForSeparator）属落点判据，住在 lib/config-store.ts。
 //
-// 为什么不再自己读 settings.yaml / .credentials.yaml（改走官方通道的理由）：
-//   - 那两个文件的**位置与格式**都是宿主实现细节：$DSH_HOME 可被启动参数/环境变量改写，
+// 为什么不自己读宿主的配置文件与凭据文件（改走官方通道的理由）：
+//   - 它们的**位置与格式**都是宿主实现细节：$DSH_HOME 可被启动参数/环境变量改写，
 //     credentials 之上还压着进程环境与项目/用户 .env 三层回退。手解 YAML 等于把宿主的
 //     私有布局钉死在本包里——换 profile、换数据目录、换凭据后端都会静默失效。
 //   - 官方通道：ctx.settings.describe() 给出各命名空间**解析后的最终值**
@@ -161,12 +161,23 @@ export function ocrHomeOverride(configured: string | undefined): string | undefi
   return home ?? undefined;
 }
 
+/** 装载期端点自检的结果（apply 时跑一次 `ocr llm test`）。`null` = 没跑（autoVerify 关着）。
+ *  它回答的是「这条端点现在真的能通吗」——配置由卡片写盘时不校验端点能力，
+ *  等第一个文件 400 才发现（实测：网关缺能力头 ⇒ 逐文件 400）代价太高。 */
+export interface EndpointVerify {
+  ok: boolean;
+  /** 失败时的原始输出（已脱敏、已截断）；成功时为空串。 */
+  message: string;
+}
+
 /** 设置页数据：providers（含 hasKey）、当前 OCR 配置、get-cred 脚本存在性、降级原因。 */
 export interface CardPayload {
   providers: DshProviderWithKey[];
   current: OcrConfigCurrent;
   getCredReady: boolean;
   source: ProviderSource;
+  /** 装载期端点自检结果（见 EndpointVerify）；没跑就是 null。 */
+  endpointVerify: EndpointVerify | null;
 }
 
 /**
@@ -177,6 +188,7 @@ export async function providersForCard(
   gateway: DshConfigGateway,
   paths: OcrPaths,
   messages: OcrReviewMessages,
+  endpointVerify: EndpointVerify | null,
 ): Promise<CardPayload> {
   const { providers, source } = readProviders(gateway, messages);
   const keyed =
@@ -187,6 +199,7 @@ export async function providersForCard(
     current,
     getCredReady: existsSync(credentialScriptPath(paths)),
     source,
+    endpointVerify,
   };
 }
 

@@ -9,7 +9,7 @@
 //      字符串与 children 当「渲染文本」——en 那份整棵子树不得出现汉字。
 // 带插值的行（currentConfig / provider 标签）另按 helper 直断，
 // 等价于样板包对 sessionRow 的渲染断言。
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import {
   apply,
   inject,
@@ -17,10 +17,24 @@ import {
   SaveBar,
   buildProviderSection,
   buildSettingsSection,
+  buildCliStatusRow,
+  buildCliBadge,
+  buildCliSection,
+  buildCliActivation,
+  binaryOf,
+  binaryStatusText,
+  cliBadgeText,
+  isOwnSubject,
+  loadCliStatus,
+  runProbe,
   currentConfigText,
   providerOptionLabel,
 } from "../src/client-entry.ts";
-import type { OcrCardDeps } from "../src/client-entry.ts";
+import type { CardActionKind, OcrBinaryView, OcrCardDeps } from "../src/client-entry.ts";
+import type {
+  PluginPackageRef,
+  PluginsSubject,
+} from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 import { UI_MESSAGES } from "../src/ui-messages.ts";
 import type { LocaleNs, Translate } from "../src/ui-messages.ts";
 import type { Context } from "@deepseek-ai/cordis";
@@ -90,6 +104,13 @@ const noop = (): void => {
 /** 本包在 cordis.patch.yml 里声明的条目 id（0.1.7 起也就是设置命名空间）。
  *  测试侧独立声明，不 import 实现里那份同名常量——实现漂了这条断言才红得住。 */
 const PLUGIN_ENTRY_ID = "ocr-review";
+
+/** 本包贡献的四个槽位名（与 src/client-entry.ts 的注册一一对应；四处共用同一份常量，
+ *  槽位被改名时症状是那块表面静默不出现，常量在这里钉成断言）。 */
+const CARD_SLOT = "plugins.bundle.config";
+const BADGE_SLOT = "plugins.detail.badge";
+const SECTION_SLOT = "plugins.detail.section";
+const ACTIVATION_SLOT = "plugins.bundle.activation";
 
 // ── 最小 document 替身（node 环境没有 jsdom）────────────────────────────────
 // apply 的样式 effect 只用到 createElement / head.append / remove 三件事，
@@ -247,7 +268,11 @@ function makeCtx(options: { bound?: Translate } = {}): CardCtxHarness {
           inject?: () => Record<string, unknown>;
         };
         slotDescs.push({ name: desc.name, key: desc.key });
-        payload = { ...desc.inject?.(), component };
+        // payload 只记**卡片**那一条：本包还向详情页与启用指引贡献了三条注册，
+        // 一并覆盖会让「translator 以 t 经 payload 下发」那条断言变成看运气。
+        if (desc.name === CARD_SLOT) {
+          payload = { ...desc.inject?.(), component };
+        }
         return (): void => {
           payload = null;
         };
@@ -304,7 +329,7 @@ const BASE_DEPS: OcrCardDeps = {
   t: tZh,
   data: null,
   fetchError: null,
-  busy: false,
+  busy: null,
   actionMsg: null,
   ready: true,
   writable: true,
@@ -314,6 +339,8 @@ const BASE_DEPS: OcrCardDeps = {
   modelOptions: [],
   keyHint: "",
   statusHint: null,
+  binary: null,
+  probeMsg: null,
   effortValue: "medium",
   languageValue: "中文",
   autoVerifyValue: true,
@@ -328,6 +355,7 @@ const BASE_DEPS: OcrCardDeps = {
   onApply: noop,
   onTest: noop,
   onMigrate: noop,
+  onProbe: noop,
   onField: noop,
   onSave: noop,
   onDiscard: noop,
@@ -373,6 +401,10 @@ const READY_DATA = {
   source: { status: "ready", message: "" },
   csrf: "token",
 };
+
+/** 装载期自检提示的取文辅助（模块级：放 it / describe 里会被 sonarjs 判「每次调用重建」）。 */
+const withVerify = (verify: { ok: boolean; message: string } | null): string =>
+  textOf(buildProviderSection(depsWith(tZh, { data: { ...READY_DATA, endpointVerify: verify } })));
 
 const CURRENT = {
   provider: "sensenova",
@@ -472,7 +504,7 @@ describe("apply 的官方 locale 接线", () => {
     // 表单按 **profile 条目 id** 取（0.1.7 起设置命名空间即条目 id），本包那一行是
     // cordis.patch.yml 里的裸 id `ocr-review`（与下方装配用例同一条判据）。
     expect(harness.formEntryIds).toStrictEqual([PLUGIN_ENTRY_ID]);
-    expect(harness.slots).toStrictEqual(["plugins.bundle.config"]);
+    expect(harness.slots).toStrictEqual([CARD_SLOT, BADGE_SLOT, SECTION_SLOT, ACTIVATION_SLOT]);
     // 官方类型化 register：一次调用带齐两语，故 (命名空间, locale) 的展开结果与旧的两份
     // 逐语注册逐字相同——「两语都注册到本包命名空间」这条判据没有松动。
     expect(
@@ -501,7 +533,7 @@ describe("apply 的官方 locale 接线", () => {
     );
     // 三个 effect：apply claim + 样式 + locale 字典（locale 字典随 effect 回收）。
     expect(harness.effects).toHaveLength(3);
-    expect(harness.slotCleanups).toHaveLength(1);
+    expect(harness.slotCleanups).toHaveLength(4);
     expect(document.head.querySelector(CARD_STYLE_SELECTOR)).not.toBeNull();
     harness.cleanSlots();
     expect(harness.payloadOf()).toBeNull();
@@ -552,19 +584,26 @@ describe("apply 的官方 locale 接线", () => {
     // 解析；反过来也**不硬抄**那串包名——硬抄一个错值就会像之前那样一路绿到页面上什么都不渲染。
     // 这里只留反向漂移钉：key 必须是非空字符串，且绝不能再退回裸条目 id `ocr-review`
     //（installed dsh-client-ui-renderer/lib/client.js:1154 逐字相等，退回 = 卡片静默消失）。
-    expect(harness.slotDescs).toHaveLength(1);
-    // 从 map 回调里取值，而不是 `const [cardSlot] = …` 再点成员：client 工程开了
-    // noUncheckedIndexedAccess（下标/解构拿到的元素带 `| undefined`），同一枚 `?.` 在
-    // tsc 眼里必要、在 oxlint 的类型面眼里多余 —— 两条判据只有这里同时成立。
-    const slotNames = harness.slotDescs.map((one) => one.name);
-    const slotKeys = harness.slotDescs.map((one) => one.key);
-    expect(slotNames).toStrictEqual(["plugins.bundle.config"]);
-    expect(slotKeys).toStrictEqual([expect.any(String)]);
-    // key 的**值**在替身类型上是 `string | undefined`（宿主给不给 entryKey 说不准）⇒ 空串绊线保留。
-    expect(slotKeys.map((key) => key ?? "")).not.toContain("");
-    expect(slotKeys).not.toContain(PLUGIN_ENTRY_ID);
+    expect(harness.slotDescs).toHaveLength(4);
+    // 四条注册逐个点名（顺序即 apply 里的注册顺序）：槽位被改名的症状是那块表面静默
+    // 不出现，比只断言条数更能第一时间红。
+    expect(harness.slotDescs.map((one) => one.name)).toStrictEqual([
+      CARD_SLOT,
+      BADGE_SLOT,
+      SECTION_SLOT,
+      ACTIVATION_SLOT,
+    ]);
+    // 两条 keyed 槽（卡片、启用指引）必须同键，且那个键既不是空串也不是裸条目 id：
+    // renderer 按逐字相等匹配 entryKey，退回裸 id 就等于让表面静默消失。
+    const keyedSlots = harness.slotDescs.filter((one) => one.key !== undefined);
+    expect(keyedSlots.map((one) => one.name)).toStrictEqual([CARD_SLOT, ACTIVATION_SLOT]);
+    const cardKey = keyedSlots[0]?.key;
+    expect(keyedSlots[1]?.key).toBe(cardKey);
+    expect(cardKey).toBeTypeOf("string");
+    expect(cardKey).not.toBe("");
+    expect(cardKey).not.toBe(PLUGIN_ENTRY_ID);
     // disposer 只 unregister：0.1.7 的 ConfigForm 没有 dispose，跑到绊线就抛（→ 用例红）。
-    expect(harness.slotCleanups).toHaveLength(1);
+    expect(harness.slotCleanups).toHaveLength(4);
     harness.cleanSlots();
     expect(harness.disposedOf()).toBe(0);
   });
@@ -616,6 +655,14 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(zh).toContain("应用到 OCR 配置");
     expect(zh).toContain("（未配置 key）");
     expect(zh).toContain("⚠ get-cred 脚本缺失");
+  });
+
+  it("装载期自检失败 ⇒ ready 分支上方多一行提示；通过/未跑都不出这行", () => {
+    const failed = withVerify({ ok: false, message: "MissingSessionID" });
+    expect(failed).toContain("装载期端点自检失败");
+    expect(failed).toContain("MissingSessionID");
+    expect(withVerify({ ok: true, message: "" })).not.toContain("装载期端点自检失败");
+    expect(withVerify(null)).not.toContain("装载期端点自检失败");
   });
 
   it("Provider 区三条降级路径按语言（含宿主没给原因时的兜底）", () => {
@@ -682,5 +729,372 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(providerOptionLabel(tZh, SENSENOVA)).toBe("Sensenova");
     expect(providerOptionLabel(tZh, XKIRO)).toBe("xkiro（未配置 key）");
     expect(providerOptionLabel(tEn, XKIRO)).toBe("xkiro (no key configured)");
+  });
+});
+
+/** 元素 props 里本文件会读到的那几位。刻意用具体接口而不是 `Record<string, unknown>`：
+ *  TS 的 noPropertyAccessFromIndexSignature 要 `["children"]`，而 oxlint 的 dot-notation
+ *  要 `.children`，索引签名类型同时喂两条就必红一边——具名属性两边都 satisfied。
+ *  `data-field` 带连字符，本来就只能走方括号，两条规则对它都无话可说。 */
+interface ElementProps {
+  "data-field"?: string;
+  children?: unknown;
+  className?: string;
+  disabled?: boolean;
+  onClick?: (() => void) | undefined;
+}
+
+/** 元素树里按 data-field 找一位：文本断言看不出 class 与 disabled，属性得单独取。 */
+function fieldProps(node: unknown, field: string): ElementProps | null {
+  if (typeof node !== "object" || node === null) {
+    return null;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const hit = fieldProps(item, field);
+      if (hit !== null) {
+        return hit;
+      }
+    }
+    return null;
+  }
+  const { props } = node as { props?: ElementProps };
+  if (props === undefined) {
+    return null;
+  }
+  return props["data-field"] === field ? props : fieldProps(props.children, field);
+}
+
+/** 随包 launcher 的样本路径（三处断言共用，写三遍就成了会各漂各的期望值）。 */
+const BUNDLED_LAUNCHER = "/pkg/bin/ocr.js";
+/** PATH 上那份全局安装的样本路径。 */
+const PATH_LAUNCHER = "/usr/local/bin/ocr";
+/** 探测回执那条的 data-field。 */
+const PROBE_RESULT = "probe-result";
+/** GET providers 的 URL：与 src 里那份同源但**独立声明**（理由同 PLUGIN_ENTRY_ID——
+ *  实现漂到别的端点上时，这条断言才红得住，而跟着改期望值等于没测）。 */
+const PROVIDERS_URL = "/_dsh/ocr-review/providers";
+/** POST probe 的 URL：同样独立声明。 */
+const PROBE_URL = "/_dsh/ocr-review/probe";
+/** 传输层失败时那条 TypeError 的消息（替身与断言共用，写两遍就成了各漂各的期望值）。 */
+const REFUSAL = "connection refused";
+
+/** 一段 GET providers 的应答（状态码 + 那坨 JSON），loadCliStatus 真读的就这两件。 */
+interface Reply {
+  ok: boolean;
+  json: unknown;
+}
+
+/**
+ * fetch 的替身：按调用次序吐出 replies，并原样记下收到的第一个入参。
+ * Response 的其余门面（headers/status/text…）本口一概不读，故在此一处投影回官方类型，
+ * 而不是把整份 Response 桩齐——多桩的那几位反而会在宿主换实现时假绿。
+ */
+function fetchStub(replies: readonly Reply[]): { fetch: typeof fetch; calls: unknown[] } {
+  const calls: unknown[] = [];
+  const stub = (async (input: RequestInfo | URL): Promise<Response> => {
+    // 原样记录而不是 String(input)：断言要的是「传进来的就是那条 URL」，
+    // 转成字符串反而会把 [object Object] 这类漂移糊掉。
+    calls.push(input);
+    const reply = replies[calls.length - 1] ?? { ok: true, json: {} };
+    return { ok: reply.ok, json: async () => reply.json } as unknown as Response;
+  }) satisfies typeof fetch;
+  return { fetch: stub, calls };
+}
+
+/** 传输层就失败的 fetch（连接被拒、web 服务没起来）。 */
+const fetchRefused: typeof fetch = async (): Promise<Response> => {
+  throw new TypeError(REFUSAL);
+};
+
+describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () => {
+  afterEach(() => {
+    // 断言中途抛错也不能把替身留在 globalThis 上——同文件的后续用例会跟着读到假应答。
+    vi.unstubAllGlobals();
+  });
+
+  it("binaryOf 只认 host 送的那三种 source，其余一律「没报」", () => {
+    expect(binaryOf({ source: "bundled", path: BUNDLED_LAUNCHER })).toStrictEqual({
+      source: "bundled",
+      path: BUNDLED_LAUNCHER,
+    });
+    // path 缺席时不落一个空串键：卡片那档文案用不到它。
+    expect(binaryOf({ source: "path" })).toStrictEqual({ source: "path" });
+    expect(binaryOf({ source: "weird" })).toBeNull();
+    expect(binaryOf(null)).toBeNull();
+    expect(binaryOf("bundled")).toBeNull();
+  });
+
+  it("四档状态文本（中文那一份逐字对齐行动性最高的两档）", () => {
+    expect(binaryStatusText(tZh, { source: "bundled" })).toBe("随本插件分发已就位，无需再全局安装");
+    expect(binaryStatusText(tZh, { source: "none" })).toContain("brew install open-code-review");
+    expect(binaryStatusText(tZh, { source: "path", path: PATH_LAUNCHER })).toContain(PATH_LAUNCHER);
+    expect(binaryStatusText(tZh, null)).not.toBe(binaryStatusText(tZh, { source: "none" }));
+  });
+
+  it("英文那一份整行不含汉字，且随包/未找到两档各自成话", () => {
+    const bundled = binaryStatusText(tEn, { source: "bundled" });
+    const missing = binaryStatusText(tEn, { source: "none" });
+    expect(bundled).not.toMatch(/[\u4E00-\u9FFF]/u);
+    expect(missing).toContain("npm i -g @alibaba-group/open-code-review");
+    expect(bundled).not.toBe(missing);
+  });
+
+  it("状态行把标题、状态文本与检测按钮画齐", () => {
+    const node = buildCliStatusRow(
+      depsWith(tZh, { binary: { source: "bundled", path: BUNDLED_LAUNCHER } }),
+    );
+    const text = textOf(node);
+    expect(text).toContain("外部 CLI（ocr）");
+    expect(text).toContain("随本插件分发已就位");
+    expect(text).toContain("检测版本");
+    expect(fieldProps(node, "probe")).not.toBeNull();
+  });
+
+  it("进行中：按钮文案换成「检测中…」并禁用（防连点起两个 ocr 进程）", () => {
+    const node = buildCliStatusRow(depsWith(tZh, { busy: "probe" }));
+    const props = fieldProps(node, "probe");
+    expect(props?.disabled).toBe(true);
+    expect(textOf(node)).toContain("检测中…");
+    expect(textOf(node)).not.toContain("检测版本");
+  });
+
+  it("文案只跟着**自己**那条动作走：探测在飞时「应用」不许读成「应用中…」", () => {
+    // 四条动作共用一个在飞旗标（一个传输口 + 一份 CSRF，本就只跑一条），所以「有没有
+    // 动作在飞」和「是哪一条」必须分开判——只看布尔，按下「检测版本」就会把「应用」
+    // 按钮念成「应用中…」，而什么都没被应用过。
+    const probing = buildProviderSection(
+      depsWith(tZh, { data: READY_DATA, ready: true, busy: "probe" }),
+    );
+    expect(textOf(probing)).not.toContain("应用中");
+    expect(fieldProps(probing, "apply")?.disabled).toBe(true);
+    const applying = buildProviderSection(
+      depsWith(tZh, { data: READY_DATA, ready: true, busy: "apply" }),
+    );
+    expect(textOf(applying)).toContain("应用中");
+    const statusRow = buildCliStatusRow(depsWith(tZh, { busy: "apply" }));
+    // 别人在飞时本按钮同样禁用（同一时刻只跑一条），但文案仍是「检测版本」。
+    expect(fieldProps(statusRow, "probe")?.disabled).toBe(true);
+    expect(textOf(statusRow)).toContain("检测版本");
+    expect(textOf(statusRow)).not.toContain("检测中");
+  });
+
+  it("回执条：有则按 ok/err 上色，无则整条不画", () => {
+    const idle = buildCliStatusRow(depsWith(tZh, {}));
+    expect(fieldProps(idle, PROBE_RESULT)).toBeNull();
+    const failed = buildCliStatusRow(
+      depsWith(tZh, { probeMsg: { ok: false, text: "未取到版本号：x" } }),
+    );
+    const props = fieldProps(failed, PROBE_RESULT);
+    expect(String(props?.className)).toContain("ocr-err");
+    expect(textOf(failed)).toContain("未取到版本号：x");
+    const passed = buildCliStatusRow(depsWith(tEn, { probeMsg: { ok: true, text: "v" } }));
+    expect(String(fieldProps(passed, PROBE_RESULT)?.className)).toContain("ocr-ok");
+  });
+
+  it("loadCliStatus 只读 ocrBinary 那半，四种「读不到」都归成 null", async () => {
+    const stub = fetchStub([
+      { ok: true, json: { ocrBinary: { source: "path", path: PATH_LAUNCHER } } },
+      // 宿主没带这个字段（旧 host）与形状不合（域外的 source）都只能算「没报」。
+      { ok: true, json: { providers: [] } },
+      { ok: true, json: { ocrBinary: { source: "installed" } } },
+      { ok: false, json: {} },
+    ]);
+    vi.stubGlobal("fetch", stub.fetch);
+    await expect(loadCliStatus()).resolves.toStrictEqual({ source: "path", path: PATH_LAUNCHER });
+    await expect(loadCliStatus()).resolves.toBeNull();
+    await expect(loadCliStatus()).resolves.toBeNull();
+    await expect(loadCliStatus()).resolves.toBeNull();
+    // 四处贡献点共用这一个口：URL 必须是那条 GET providers，另开一条就等于另算一份判据。
+    expect(stub.calls).toStrictEqual([PROVIDERS_URL, PROVIDERS_URL, PROVIDERS_URL, PROVIDERS_URL]);
+  });
+
+  it("loadCliStatus 传输失败也归成 null（这三处只负责显示，不叠错误条）", async () => {
+    vi.stubGlobal("fetch", fetchRefused);
+    await expect(loadCliStatus()).resolves.toBeNull();
+  });
+});
+
+/** 详情页 subject 的三种面：本判据只读 kind 与 pkg.name，其余字段随官方形状填齐。
+ *  整份 PluginPackageRef 手写而不 as 断言，是为了让宿主加必填字段时这里先编译红。 */
+function subjectOf(over: { name: string; kind?: "bundle" | "row" | "item" }): PluginsSubject {
+  const kind = over.kind ?? "bundle";
+  if (kind === "item") {
+    return { kind: "item", id: over.name };
+  }
+  const pkg: PluginPackageRef = {
+    name: over.name,
+    installed: true,
+    availability: "profile",
+    official: false,
+    enabled: true,
+    rows: [],
+  };
+  return kind === "bundle"
+    ? { kind: "bundle", pkg }
+    : { kind: "row", pkg, row: { rowId: "review", moduleName: "ocr-review", enabled: true } };
+}
+
+const OWN = "@jayyuen66/dsh-ocr-review";
+
+describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
+  it("isOwnSubject 只认本包的 bundle 页与行页", () => {
+    expect(isOwnSubject(subjectOf({ name: OWN }))).toBe(true);
+    expect(isOwnSubject(subjectOf({ name: OWN, kind: "row" }))).toBe(true);
+    // 别人的 bundle / 行：官方契约是「对无话可说的 subject 渲染 null」，这里必须是假。
+    expect(isOwnSubject(subjectOf({ name: "@deepseek-ai/dsh-subagent-claude-code" }))).toBe(false);
+    expect(isOwnSubject(subjectOf({ name: "other", kind: "row" }))).toBe(false);
+    // 官方插件页没有包名可比——少这一道短路就会去读 undefined.name 并整页报错。
+    expect(isOwnSubject(subjectOf({ name: "settings", kind: "item" }))).toBe(false);
+  });
+
+  it("徽标短文案四档齐全，且英文那份不残留汉字", () => {
+    expect(cliBadgeText(tZh, { source: "bundled" })).toBe("ocr 随包就位");
+    expect(cliBadgeText(tZh, { source: "path" })).toBe("ocr 来自 PATH");
+    expect(cliBadgeText(tZh, { source: "none" })).toBe("未找到 ocr");
+    expect(cliBadgeText(tZh, null)).toBe("ocr 状态未取到");
+    for (const status of [
+      { source: "bundled" },
+      { source: "path" },
+      { source: "none" },
+      null,
+    ] as (OcrBinaryView | null)[]) {
+      expect(cliBadgeText(tEn, status)).not.toMatch(HAN);
+    }
+    // 短文案与整句状态文本共用同一份判据，但必须各说各的话（标题旁放不下整句）。
+    expect(cliBadgeText(tZh, { source: "none" })).not.toBe(
+      binaryStatusText(tZh, { source: "none" }),
+    );
+  });
+
+  it("buildCliBadge 落出徽标元素并带上短文案", () => {
+    const node = buildCliBadge(tZh, { source: "bundled" });
+    expect(String(fieldProps(node, "cli-badge")?.className)).toContain("ocr-hint");
+    // textOf 会把 className/data-field 一起拼进来，所以按「含短文案」断言而不是整串相等。
+    expect(textOf(node)).toContain("ocr 随包就位");
+    expect(textOf(buildCliBadge(tEn, null))).toContain("ocr status unavailable");
+  });
+
+  it("buildCliSection 画齐标题、状态与「版本要去卡片点检测」的指路", () => {
+    const node = buildCliSection(tZh, { source: "path", path: PATH_LAUNCHER });
+    expect(fieldProps(node, "cli-section")).not.toBeNull();
+    const text = textOf(node);
+    expect(text).toContain("外部 CLI（ocr）");
+    expect(text).toContain(PATH_LAUNCHER);
+    expect(text).toContain("检测版本");
+    expect(textOf(buildCliSection(tEn, { source: "none" }))).not.toMatch(HAN);
+  });
+
+  it("buildCliActivation 给缺失说明配两个动作，各自接宿主的回调", () => {
+    const clicked: string[] = [];
+    const node = buildCliActivation(tZh, {
+      onOpenDetails: () => {
+        clicked.push("details");
+      },
+      onDismiss: () => {
+        clicked.push("dismiss");
+      },
+    });
+    expect(fieldProps(node, "cli-activation")).not.toBeNull();
+    expect(textOf(node)).toContain("brew install open-code-review");
+    const details = fieldProps(node, "guide-details");
+    const dismiss = fieldProps(node, "guide-dismiss");
+    expect(details?.onClick).toBeTypeOf("function");
+    expect(dismiss?.onClick).toBeTypeOf("function");
+    details?.onClick?.();
+    dismiss?.onClick?.();
+    expect(clicked).toStrictEqual(["details", "dismiss"]);
+    // 英文那份同样不含汉字（指引出现在启用那一刻，是最外侧的可见文本）。
+    expect(textOf(buildCliActivation(tEn, { onOpenDetails: noop, onDismiss: noop }))).not.toMatch(
+      HAN,
+    );
+  });
+});
+
+/** 一条探测回执。 */
+interface ProbeMsg {
+  ok: boolean;
+  text: string;
+}
+
+/** runProbe 的落态记录：忙位依次经过哪些值、回执依次写出哪些内容、打的是哪条 URL、
+ *  载荷被重读了几次。 */
+interface ProbeRun {
+  urls: string[];
+  busy: (CardActionKind | null)[];
+  messages: (ProbeMsg | null)[];
+  refreshes: number;
+}
+
+/**
+ * 跑一次 runProbe。`post` 由注入给（与卡片里那条 postWithCsrf 同一个口），
+ * 替身只送 runProbe 真读的 json()。`fails` 用来模拟传输层失败。
+ */
+async function probeOnce(json: unknown, fails = false): Promise<ProbeRun> {
+  const run: ProbeRun = { urls: [], busy: [], messages: [], refreshes: 0 };
+  await runProbe({
+    t: tZh,
+    post: async (url: string): Promise<Response> => {
+      run.urls.push(url);
+      if (fails) {
+        throw new TypeError(REFUSAL);
+      }
+      return { json: async () => json } as unknown as Response;
+    },
+    refresh: async (): Promise<null> => {
+      run.refreshes += 1;
+      return null;
+    },
+    setBusy: (next: CardActionKind | null): void => {
+      run.busy.push(next);
+    },
+    setProbeMsg: (message: ProbeMsg | null): void => {
+      run.messages.push(message);
+    },
+  });
+  return run;
+}
+
+describe("检测版本这条动作：URL、回执文本与忙位回收", () => {
+  it("成功带回版本 + 上游 output 时，回执是「版本行 + 原样附上的 output」", async () => {
+    const run = await probeOnce({
+      ok: true,
+      version: "1.12.13",
+      output: "npm i -g @alibaba-group/open-code-review@1.13.0",
+    });
+    // URL 逐字钉：写端点改名而卡片没跟上，症状正是「点了没反应」之外的那句报错。
+    expect(run.urls).toStrictEqual([PROBE_URL]);
+    expect(run.messages).toStrictEqual([
+      null,
+      { ok: true, text: "ocr 版本：1.12.13\nnpm i -g @alibaba-group/open-code-review@1.13.0" },
+    ]);
+    // 忙位必须成对：先占位（按钮禁用）再在 finally 里放开，漏第二步就是永久转圈。
+    expect(run.busy).toStrictEqual(["probe", null]);
+    // 走完一次来回就要重读载荷：否则「刚装上 CLI 立刻点检测」会出现「版本 1.12.13」与
+    // 「未找到 ocr」同屏（状态那行还是页面装载时读的）。
+    expect(run.refreshes).toBe(1);
+  });
+
+  it("只有版本号时不补空行（output 缺席就只写版本行）", async () => {
+    const run = await probeOnce({ ok: true, version: "1.12.13" });
+    expect(run.messages[1]).toStrictEqual({ ok: true, text: "ocr 版本：1.12.13" });
+  });
+
+  it("host 报失败时把原因写进回执，并把 ok 落成假", async () => {
+    const run = await probeOnce({ ok: false, reason: "ocr version 超时" });
+    expect(run.messages[1]).toStrictEqual({ ok: false, text: "未取到版本号：ocr version 超时" });
+    expect(run.busy).toStrictEqual(["probe", null]);
+    // 来回成了、只是没取到版本：载荷照样重读（CLI 可能刚被拆掉，那行得跟着改）。
+    expect(run.refreshes).toBe(1);
+  });
+
+  it("传输层失败也归成一条错误回执，且忙位照样回收", async () => {
+    const run = await probeOnce({}, true);
+    expect(run.messages[1]?.ok).toBe(false);
+    expect(run.messages[1]?.text).toContain("请求失败：");
+    expect(run.messages[1]?.text).toContain(REFUSAL);
+    expect(run.busy).toStrictEqual(["probe", null]);
+    // 请求根本没成：拿不到任何新事实，就不该再打一次 GET（与 migrate 同一分工）。
+    expect(run.refreshes).toBe(0);
   });
 });

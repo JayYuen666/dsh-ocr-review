@@ -199,6 +199,24 @@ export function redactKeyMaterial(text: string): string {
     .replaceAll(STANDALONE_KEY, REDACTION);
 }
 
+/** ESC 由运行时构造：`eslint(no-control-regex)` 不许控制字符出现在正则字面量里，而这里
+ *  必须按真 ESC 匹配——放宽成「匹配 `[33m` 这种文本」会把日志里合法的方括号内容一起吃掉。 */
+const ESC = String.fromCodePoint(27);
+/** ECMA-48 的 CSI 序列：ESC `[` + 参数位 + 中间位 + 终结位（SGR 颜色码就是终结位 `m`）。 */
+const ANSI_CSI = new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]`, "gu");
+
+/**
+ * 剥掉终端控制序列，只给**要显示给人复制**的那段输出用。
+ *
+ * 上游 launcher 那句「有新版本，跑这条命令」是硬编码 `console.error("\x1b[33m…")` 打到
+ * stderr 的，`--color never` 管不到它（那句在 JS 包装层打印，Go 那侧的旗标还没生效）。
+ * 留着这些字节，浏览器里看到的就是 `[33m[ocr] A new version …[0m` 这种噪声，而用户要选中
+ * 复制进终端的恰好是那条 `npm i -g …`——复制到的是带控制字符的脏命令。
+ */
+export function stripAnsi(text: string): string {
+  return text.replaceAll(ANSI_CSI, "");
+}
+
 /** 官方子集的迷你走查（path 限定违规位置，一次列全）。oneOf 语义与官方一致：
  *  恰好一支命中，多支/零支都算违规。 */
 function violationsOf(schema: JsonSchemaNode, value: unknown, path: string): string[] {

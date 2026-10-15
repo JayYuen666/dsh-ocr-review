@@ -105,7 +105,7 @@ const configPathOf = (configured: string | undefined): string =>
   resolveOcrConfigPath(configured, zh);
 const homeOf = (configured: string | undefined): string | undefined => ocrHomeOverride(configured);
 const cardOf = (gateway: GatewayFixture, paths: OcrPaths): Promise<CardPayload> =>
-  providersForCard(gateway, paths, zh);
+  providersForCard(gateway, paths, zh, null);
 const selectOf = (
   gateway: GatewayFixture,
   paths: OcrPaths,
@@ -1279,8 +1279,8 @@ describe("配置通道文案双语（en 注入）", () => {
   it("卡片载荷里的 source 与 host 侧同源：注入哪份就是哪份（同一 gateway）", async () => {
     const paths = makePaths();
     const gateway = makeGateway({ health: { settings: false } });
-    const zhPayload = await providersForCard(gateway, paths, MESSAGES.zh);
-    const enPayload = await providersForCard(gateway, paths, MESSAGES.en);
+    const zhPayload = await providersForCard(gateway, paths, MESSAGES.zh, null);
+    const enPayload = await providersForCard(gateway, paths, MESSAGES.en, null);
     expect(zhPayload.source.message).not.toBe(enPayload.source.message);
     expect(enPayload.source.status).toBe(zhPayload.source.status);
   });

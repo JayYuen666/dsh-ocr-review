@@ -8,9 +8,9 @@
 // 按这层边界取用——生产侧的 consumers 全在 ocr-config.ts 那一个文件里，`fallow --production`
 // 因此把它们判成「只被测试养着的导出」。
 //
-// 为什么 provider 清单只能走 ctx.settings.describe()、不读 settings.yaml /
-// .credentials.yaml（完整理由见 lib/ocr-config.ts 头注释）：那两个文件的
-// 位置与格式都是宿主实现细节。本模块因此只认 DshConfigGateway 这一个面，单测给替身。
+// 为什么 provider 清单只能走 ctx.settings.describe()、不碰宿主的私有配置文件与
+// 凭据文件（完整理由见 lib/ocr-config.ts 头注释）：那些文件的位置与格式都是
+// 宿主实现细节。本模块因此只认 DshConfigGateway 这一个面，单测给替身。
 //
 // 安全口径：本模块绝不在返回值里带出任何 key 值——卡片侧只问 describe(ref) 的 configured
 // 布尔，值本身连经手都不经手。
@@ -32,7 +32,7 @@ export interface DshProviderWithKey extends DshProvider {
 
 /** describe() 单条描述符里本包用到的面（宿主给全量 SettingsDescriptor，测试给替身）。 */
 export interface ProviderDescriptor {
-  /** 命名空间名。宿主 0.1.6 的官方字段名是 `ns`（上游有改名 namespace 的 TODO）。 */
+  /** 命名空间名。宿主侧官方字段名是 `ns`（上游留了改名 namespace 的 TODO）。 */
   ns: string;
   /** 该命名空间解析后的最终值。 */
   value: unknown;

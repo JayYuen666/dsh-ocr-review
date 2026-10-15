@@ -1,10 +1,11 @@
 # ocr-review：open-code-review 工作区审查插件（bundle）。
 # 双面包机制：本包含 Host 半（host.ts：5 个工具 ocr_review/ocr_scan/
-# ocr_delegate_preview/ocr_delegate_rule/ocr_session + settings namespace「ocr-review」+
-# webServer 配置端点）与 Client 半（src/client-entry.ts → client.js：设置卡片，
-# 从 settings.yaml 的 llm-pi-ai.providers 选 provider/model 应用到
-# ~/.opencodereview/config.json，key 走 api_key_cmd 动态读取 .credentials.yaml
-# 的 refs，OCR 配置永不落明文 key）。
+# ocr_delegate_preview/ocr_delegate_rule/ocr_session + 由 `Config` 上 `.volatile()`
+# 隐式投影的设置面（命名空间就是下面这条的 id）+ webServer 配置端点）与
+# Client 半（src/client-entry.ts → client.js：设置卡片，从宿主设置服务的
+# llm-pi-ai.providers 选 provider/model 应用到
+# ~/.opencodereview/config.json，key 走 api_key_cmd 动态读取宿主凭据 ref，
+# OCR 配置永不落明文 key）。
 #
 # 组合包层：本文件由 package.json 的 dsh.bundle.patch 指向，随
 # `dsh plugin --profile web add/remove ./plugins/ocr-review` 维护。行按裸包名

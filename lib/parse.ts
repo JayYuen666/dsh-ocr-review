@@ -1,9 +1,17 @@
 // lib/parse.ts —— 纯函数：把 ocr CLI 的 JSON 输出解析为省 token 的结构化摘要。
-// 契约依据（open-codereview.ai/docs/cli-reference + FAQ；1.12.x 起以源码为准逐一
-// 核对，见 REVIEW_STATUSES 处的注释）：
+// 契约依据（open-codereview.ai/docs/cli-reference + FAQ，字段名以 CLI 侧 Go 声明为准）：
 //   - review/scan JSON 恰好一个对象：status/summary/comments/warnings/session_id
-//     /manifest 可选；comments 字段 per-comment：path/content/start_line/end_line
+//     /manifest/tool_calls 可选；comments 字段 per-comment：path/content/start_line/end_line
 //     /existing_code/suggestion_code/category/severity/thinking。
+//   - warnings 条目是 `{file,message,type}`（不是 `error`）。type 标出子任务失败
+//     （subtask_error / scan_subtask_error），带 manifest 时 CLI 会把这类条目从
+//     warnings 里摘掉——失败事实改由 manifest.coverage.failed 承载，两处都要读，
+//     只读一处就有一半失败看不见。
+//   - summary.budget_exceeded 只在真被 token 预算截断时出现；status 仍是 partial，
+//     单看 status 分不出「审完了没发现」和「预算花完提前收工」。
+//   - tool_calls = {total, failure, failure_by_tool, failure_details}，是模型侧
+//     「这一场里 LLM 的工具调用失败了多少」的唯一出口（`--audience agent` 下 CLI 的
+//     进度行走 io.Discard，任何 stdout 文本都到不了这里）。
 //   - status: success | complete | partial | completed_with_warnings
 //     | completed_with_errors | skipped。skipped 表示无变更可审（区别于“审了但零
 //     发现”），partial 表示部分文件未完成但整体有覆盖（评论仍有效）。白名单外
@@ -28,16 +36,21 @@ import { aggregateComments, severityRank } from "./severity.ts";
 import type { CommentAggregation } from "./severity.ts";
 
 /**
- * OCR 评审 JSON 的 status 枚举（1.12.x 源码核对：cmd/opencodereview/output.go 的
- * jsonOutput 装配 + internal/session/manifest.go:166-169 的 TerminalState）。
+ * OCR 评审 JSON 的 status 枚举（判据在 CLI 侧 `cmd/opencodereview/output.go` 的 jsonOutput
+ * 装配与 `internal/session/manifest.go` 的 TerminalState）。
  * 白名单外的一律视为失败：exit 0 不等于评审成功——`{"error":"auth failed"}`
  * 这类「没有 status 的错误对象」若被当作 ok:true，模型会把「0 条评论」读成
- * 「代码干净」，是最坏的一类假阳性。
+ * 「代码干净」，是最坏的一类假阳性。`failed` 也刻意留在白名单外：CLI 的退出契约是
+ * 「全场失败才非零」（`review_cmd.go` 的 reviewResultError），那份文档随非零退出
+ * 一起被 shell 侧的失败详情拦下，本解析拿不到它。
  *
- * partial 是 manifest 终态之一（StatePartial）：部分文件失败但整体有覆盖、以及
- * --max-tokens-budget 截断后仍有覆盖，都以 exit 0 + status "partial" 输出
- * （review_cmd.go 的退出注释 "complete/partial/skipped all succeed"）。此前白名单
- * 漏了它，整场已花费 token 的评审被误报成「status 非法」并丢弃全部评论。
+ * partial 是 manifest 终态之一：部分文件失败但整体有覆盖、以及 token 预算截断后仍有
+ * 覆盖，都以 exit 0 + status "partial" 输出。此前白名单漏了它，整场已花费 token 的
+ * 评审被误报成「status 非法」并丢弃全部评论。
+ *
+ * 有 manifest 时 status 就是它的终态（complete/partial/skipped），success 与
+ * completed_with_warnings/completed_with_errors 只在没有 manifest 的产出上出现——
+ * 逐文件失败在那两种形态下的落点也不同（前者在 coverage.failed，后者在 warnings）。
  */
 const REVIEW_STATUSES = [
   "success",
@@ -72,14 +85,50 @@ export interface ReviewSummary {
   elapsed: string;
 }
 
+/**
+ * OCR 的 `tool_calls` 字段：这一场里 LLM 发起的工具调用总数与失败数。
+ *
+ * 为什么必须读它：`--audience agent` 下 CLI 把进度行（含 "No tool calls parsed"、
+ * "Max tool requests reached"）写进 io.Discard，stdout 一个字都到不了宿主；模型侧要
+ * 判断「是模型不会调工具，而不是代码没问题」，只有这一条路。
+ */
+export interface ToolCallView {
+  total: number;
+  failure: number;
+  /** 渲染行：`tool_name @ item_key: error`，截到 DIAGNOSTIC_DETAIL_LIMIT。 */
+  failures: string[];
+}
+
+/**
+ * OCR 的 `manifest.coverage`：五个互斥文件集的大小，selected 是分母。
+ *
+ * 这是「这一场到底审完了多少文件」的权威口径，与 `warnings` 互补：带 manifest 时 CLI
+ * 会把子任务失败从 warnings 里摘掉（同一事实不在两处重复，也避免 provider 原始错误文本
+ * 泄漏），失败条目只剩 coverage.failed。`droppedCount` 一类衡量的是**本摘要的截断**，
+ * 与这里的**运行覆盖度**是两件事，不能互相替代。
+ */
+export interface CoverageView {
+  selected: number;
+  completed: number;
+  reused: number;
+  failed: number;
+  waived: number;
+  /** 渲染行：`path [classification] reason`，截到 DIAGNOSTIC_DETAIL_LIMIT。 */
+  failedItems: string[];
+}
+
 export interface ParsedReview {
   ok: boolean;
   status: ParsedReviewStatus;
   message: string;
   skipped: boolean;
   summary: ReviewSummary | null;
+  /** `summary.budget_exceeded`：被 token 预算截断过（status 仍是 partial，看不出这一层）。 */
+  budgetExceeded: boolean;
   comments: OcrComment[];
   warnings: string[];
+  toolCalls: ToolCallView | null;
+  coverage: CoverageView | null;
   sessionId: string;
   /** comments 数组里形态不合（非对象/无 content）被丢弃的条目数：> 0 即
    *  「本次解析没有覆盖全部产出」，摘要据此无法宣称干净。 */
@@ -97,11 +146,6 @@ function str(value: unknown): string {
   return "";
 }
 
-/**
- * 数值字段解析：number 与「数字字符串」都接受（OCR 部分 provider 实测把
- * start_line 输出成 "42"，一律当 0 会把真实评论判成「未锚定」而被摘要丢掉），
- * 空串/NaN/Infinity/其它类型回 0。
- */
 /**
  * 行号与增删统计的有效域：有限、非负、整数。
  *
@@ -121,6 +165,9 @@ function nonNegativeInt(value: number): number {
   return truncated;
 }
 
+/** 数值字段解析：number 与「数字字符串」都接受（OCR 部分 provider 实测把 start_line
+ *  输出成 "42"，一律当 0 会把真实评论判成「未锚定」而被摘要丢掉），空串/NaN/Infinity/
+ *  其它类型回 0。落进 `nonNegativeInt` 那道有效域。 */
 function num(value: unknown): number {
   if (typeof value === "number") {
     return nonNegativeInt(value);
@@ -135,6 +182,167 @@ function num(value: unknown): number {
     return nonNegativeInt(Number(trimmed));
   }
   return 0;
+}
+
+/**
+ * 明细行上限：coverage.failed 与 tool_calls.failure_details 在大会话里可以是几百条，
+ * 逐条铺开会把「省 token 的摘要」变成第二份原始输出，而模型只需要知道「有哪些文件没审成」。
+ */
+const DIAGNOSTIC_DETAIL_LIMIT = 8;
+
+/** 布尔字段：只认真布尔，缺省与非真值一律 false（OCR 用 omitempty 表示「没有发生」）。 */
+function boolOf(value: unknown): boolean {
+  return value === true;
+}
+
+/**
+ * 明细行收尾：截断时补一条「另有 N 条已省略」，让读的人知道后面还有，而不是以为看到了全部。
+ * @param lines - 已渲染的明细行
+ * @param total - 该组的总条数
+ * @param messages - 文案表
+ * @returns 不超过上限的行数组
+ */
+function capLines(lines: string[], total: number, messages: OcrReviewMessages): string[] {
+  if (lines.length >= total) {
+    return lines;
+  }
+  return [...lines, format(messages.diagnosticOmitted, { count: String(total - lines.length) })];
+}
+
+/** 计数字段的合法形态：非负整数或纯十进制数字串（与 {@link num} 的取值域对齐，
+ *  否则 "x" 或 -1 会被 num 折成 0，把「读不出」伪装成「零失败」）。 */
+function isCount(value: unknown): boolean {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+  return typeof value === "string" && /^\d+$/u.test(value.trim());
+}
+
+/**
+ * 解析 `tool_calls`。字段缺失或为 null（这一场没有工具调用记录）返回 null；
+ * 存在却读不出 total/failure 两个计数、或 failure_details 不是数组，同样返回 null，
+ * 并交出 unreadable 让调用方把「读不出」这条挂进 warnings——诊断字段坏掉不该让整场
+ * 评审作废（评论仍然有效），但也不能把它读成「零失败」。
+ */
+function toolCallsOf(
+  raw: unknown,
+  messages: OcrReviewMessages,
+): { view: ToolCallView | null; unreadable: boolean } {
+  if (raw === undefined || raw === null) {
+    return { view: null, unreadable: false };
+  }
+  const doc = isRecord(raw) ? raw : undefined;
+  const details = doc?.["failure_details"];
+  if (
+    doc === undefined ||
+    !isCount(doc["total"]) ||
+    !isCount(doc["failure"]) ||
+    (details !== undefined && !Array.isArray(details))
+  ) {
+    return { view: null, unreadable: true };
+  }
+  const rows: unknown[] = Array.isArray(details) ? details : [];
+  const rendered = rows
+    .filter((row): row is Record<string, unknown> => isRecord(row))
+    .map((row) => {
+      const key = str(row["file_path"]);
+      const tool = str(row["tool_name"]);
+      const error = str(row["error"]);
+      return `${tool || messages.statusNone}${key === "" ? "" : ` @ ${key}`}: ${error}`;
+    });
+  return {
+    view: {
+      total: num(doc["total"]),
+      failure: num(doc["failure"]),
+      failures: capLines(rendered.slice(0, DIAGNOSTIC_DETAIL_LIMIT), rows.length, messages),
+    },
+    unreadable: false,
+  };
+}
+
+/** coverage 的一个集合：不是数组即读不出（undefined）。 */
+function setOf(coverage: Record<string, unknown>, key: string): unknown[] | undefined {
+  const items: unknown = coverage[key];
+  return Array.isArray(items) ? items : undefined;
+}
+
+/**
+ * 解析 `manifest.coverage`。五个键与 CLI 侧 Coverage 结构一一对应：selected 是分母，
+ * 其余四个是它的互斥划分。任一不是数组即整体读不出——宁可回 null 让模型看见「这里没有
+ * 覆盖度数据」，也不要用 0 冒充「一个文件都没审」。
+ * @param raw - `root["manifest"]`
+ * @param messages - 文案表
+ * @returns 覆盖度视图，与「manifest 存在但读不出」的标记
+ */
+function coverageOf(
+  raw: unknown,
+  messages: OcrReviewMessages,
+): { view: CoverageView | null; unreadable: boolean } {
+  if (raw === undefined || raw === null) {
+    return { view: null, unreadable: false };
+  }
+  const coverage = isRecord(raw) ? raw["coverage"] : undefined;
+  if (!isRecord(coverage)) {
+    return { view: null, unreadable: true };
+  }
+  const selected = setOf(coverage, "selected");
+  const completed = setOf(coverage, "completed");
+  const reused = setOf(coverage, "reused");
+  const failedRows = setOf(coverage, "failed");
+  const waived = setOf(coverage, "waived");
+  if (
+    selected === undefined ||
+    completed === undefined ||
+    reused === undefined ||
+    failedRows === undefined ||
+    waived === undefined
+  ) {
+    return { view: null, unreadable: true };
+  }
+  const rendered = failedRows
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => {
+      const path = str(item["path"]);
+      const classification = str(item["classification"]);
+      const reason = str(item["reason"]);
+      return `${path || messages.statusNone}${classification === "" ? "" : ` [${classification}]`}${
+        reason === "" ? "" : ` ${reason}`
+      }`;
+    });
+  return {
+    view: {
+      selected: selected.length,
+      completed: completed.length,
+      reused: reused.length,
+      failed: failedRows.length,
+      waived: waived.length,
+      failedItems: capLines(
+        rendered.slice(0, DIAGNOSTIC_DETAIL_LIMIT),
+        failedRows.length,
+        messages,
+      ),
+    },
+    unreadable: false,
+  };
+}
+
+/**
+ * 单条 warning 的渲染：字符串原样；`{file,message,type}` 拼成 `file：message [type]`；
+ * 三者都读不出即落占位说明（空字符串条目会被模型读成「有一条空告警」，那不是事实）。
+ */
+function warningLineOf(warn: unknown, messages: OcrReviewMessages): string {
+  if (typeof warn === "string") {
+    return warn;
+  }
+  if (!isRecord(warn)) {
+    return messages.warningUnreadable;
+  }
+  const head = [str(warn["file"]), str(warn["message"])]
+    .filter(Boolean)
+    .join(messages.warningSeparator);
+  const type = str(warn["type"]);
+  const line = [head, type === "" ? "" : `[${type}]`].filter(Boolean).join(" ");
+  return line === "" ? messages.warningUnreadable : line;
 }
 
 function commentOf(raw: unknown): OcrComment | null {
@@ -165,11 +373,52 @@ function reviewFailure(status: "unparseable" | "invalid", message: string): Pars
     message,
     skipped: false,
     summary: null,
+    budgetExceeded: false,
     comments: [],
     warnings: [],
+    toolCalls: null,
+    coverage: null,
     sessionId: "",
     droppedComments: 0,
   };
+}
+
+/**
+ * 三个诊断出口的合并：告警行、工具调用统计、运行覆盖度。
+ *
+ * warnings 条目是 `{file,message,type}`——CLI 侧的 AgentWarning 没有 `error` 这一项，
+ * 照 error 读等于把失败原因整条丢掉、只留一个文件名。type 是 CLI 自己分类的依据
+ * （subtask_error / scan_subtask_error 与其余），带出去才能让模型分清「哪个文件没审成」
+ * 和「只是有个非致命提醒」。字段存在却不是数组、或条目既不是字符串也读不出任何内容
+ * ⇒ 保留一条明确的「格式无法解析」占位，而不是静默清空。
+ *
+ * 诊断字段读不出来时**不判整场失败**（评论仍然有效、token 已经花掉），而是各补一条
+ * 说明进同一个 warnings 出口——「这一路没有数据」必须看得见，但不能把结果作废。
+ */
+function diagnosticsOf(
+  root: Record<string, unknown>,
+  messages: OcrReviewMessages,
+): { warnings: string[]; toolCalls: ToolCallView | null; coverage: CoverageView | null } {
+  const warnings: string[] = [];
+  const warningsRaw = root["warnings"];
+  if (warningsRaw !== undefined) {
+    if (Array.isArray(warningsRaw)) {
+      for (const warn of warningsRaw) {
+        warnings.push(warningLineOf(warn, messages));
+      }
+    } else {
+      warnings.push(messages.warningUnreadable);
+    }
+  }
+  const toolCalls = toolCallsOf(root["tool_calls"], messages);
+  const coverage = coverageOf(root["manifest"], messages);
+  if (toolCalls.unreadable) {
+    warnings.push(format(messages.diagnosticUnreadable, { field: "tool_calls" }));
+  }
+  if (coverage.unreadable) {
+    warnings.push(format(messages.diagnosticUnreadable, { field: "manifest.coverage" }));
+  }
+  return { warnings, toolCalls: toolCalls.view, coverage: coverage.view };
 }
 
 /**
@@ -217,33 +466,7 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
   const skipped = status === "skipped";
   const sumRaw = root["summary"];
   const sum = isRecord(sumRaw) ? sumRaw : undefined;
-  // warnings 存在却不是数组、或条目既不是字符串也读不出 file/error ⇒ 保留一条明确的
-  // 「格式无法解析」占位，而不是静默清空。对 partial / completed_with_errors 来说这是
-  // **唯一**的失败细节来源，静默丢弃等于把「出了错」显示成「一切正常」。
-  const warningsRaw = root["warnings"];
-  let warningsArr: string[];
-  if (warningsRaw === undefined) {
-    warningsArr = [];
-  } else if (Array.isArray(warningsRaw)) {
-    warningsArr = warningsRaw
-      .map((warn) => {
-        if (typeof warn === "string") {
-          return warn;
-        }
-        if (isRecord(warn)) {
-          const joined = [str(warn["file"]), str(warn["error"])]
-            .filter(Boolean)
-            .join(messages.warningSeparator);
-          if (joined !== "") {
-            return joined;
-          }
-        }
-        return messages.warningUnreadable;
-      })
-      .filter(Boolean);
-  } else {
-    warningsArr = [messages.warningUnreadable];
-  }
+  const diagnostics = diagnosticsOf(root, messages);
   return {
     ok: true,
     status,
@@ -259,8 +482,11 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
           elapsed: str(sum["elapsed"]),
         }
       : null,
+    budgetExceeded: sum === undefined ? false : boolOf(sum["budget_exceeded"]),
     comments,
-    warnings: warningsArr,
+    warnings: diagnostics.warnings,
+    toolCalls: diagnostics.toolCalls,
+    coverage: diagnostics.coverage,
     sessionId: str(root["session_id"]),
     droppedComments,
   };
@@ -311,6 +537,8 @@ export interface ReviewSummaryView {
   skipped: boolean;
   message: string | null;
   summary: ReviewSummary | null;
+  /** 被 token 预算截断过：status 只说 partial，说不出「为什么没审完」。 */
+  budgetExceeded: boolean;
   sessionId: string | null;
   aggregation: CommentAggregation;
   /** OCR 产出并经形态校验的评论总数。 */
@@ -327,6 +555,10 @@ export interface ReviewSummaryView {
     suggestion: string | null;
   }[];
   warnings: string[];
+  /** LLM 工具调用统计（`--audience agent` 下这是模型侧唯一能看见的失败口径）。 */
+  toolCalls: ToolCallView | null;
+  /** 运行覆盖度（有 manifest 时「哪些文件没审成」的权威来源）。 */
+  coverage: CoverageView | null;
   hint: string;
 }
 
@@ -358,6 +590,7 @@ export function summarizeReview(
     skipped: parsed.skipped,
     message: parsed.message || null,
     summary: parsed.summary ?? null,
+    budgetExceeded: parsed.budgetExceeded,
     sessionId: parsed.sessionId || null,
     aggregation: agg,
     totalCommentCount: parsed.comments.length,
@@ -371,6 +604,8 @@ export function summarizeReview(
       suggestion: comment.suggestionCode || null,
     })),
     warnings: parsed.warnings,
+    toolCalls: parsed.toolCalls,
+    coverage: parsed.coverage,
     hint: messages.reviewSummaryHint,
   };
 }

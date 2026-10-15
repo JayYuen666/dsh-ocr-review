@@ -26,8 +26,17 @@ const pkgDir = path.join(import.meta.dirname, "..");
  */
 const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/u];
 
-/** `publishConfig` 里唯一允许出现的字段：可见性与源，都不是入口面。 */
-const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry"]);
+/**
+ * `publishConfig` 里允许出现的字段：可见性、源，与发布用的 dist-tag。三者都不是入口面。
+ *
+ * `tag` 之所以必须在仓库里而不是靠发布者记旗标：npm 对带 prerelease 段的版本（`0.1.5-rc`）
+ * 在没有 `--tag` 也没有 `publishConfig.tag` 时**直接拒绝发布**（installed
+ * npm/lib/commands/publish.js 的 isDefaultTag/isPreRelease 那道检查），漏旗标不是"发错标签"
+ * 而是"发不出去"。而它不属于本门禁守的那类字段——本门禁管的是「入口字段不得只写在
+ * publishConfig 里」（npm 不合并 main/exports，换个发布器就发出一个 import 必失败的包），
+ * `tag` 没有这个风险：npm 读它，pnpm 侧还有 `--tag` 旗标可覆盖。
+ */
+const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry", "tag"]);
 
 /** 遍历时跳过的目录：依赖、产物、以及本门禁刻意不管的面。 */
 const SKIP_DIRS = new Set([
@@ -232,7 +241,7 @@ describe("发布形态", () => {
     }
   });
 
-  it("publishConfig 只留可见性与源，不留入口覆盖", async () => {
+  it("publishConfig 只留可见性、源与 dist-tag，不留入口覆盖", async () => {
     const { manifest } = await readSurface();
     for (const key of Object.keys(manifest.publishConfig ?? {})) {
       expect(ALLOWED_PUBLISH_CONFIG.has(key), `publishConfig.${key} 会被 npm 忽略`).toBe(true);
@@ -291,18 +300,22 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     expect(ranged, "这些 dsh-* 依赖没有精确钉住版本").toStrictEqual([]);
   });
 
-  it("dsh-* 全部与 peer 的 dsh 同版本（不许装出第二份宿主类型）", async () => {
-    // 宿主类型面被这些包以 type-only 方式消费；同一个会话里出现两个 dsh-session 的拷贝，
+  it("dsh-* 全部同版本（不许装出第二份宿主类型）", async () => {
+    // 宿主类型面被这些包以 type-only 方式消费；同一个会话里出现两枚 dsh-session 的拷贝，
     // nominal 类型（品牌串、投影状态）会开始互相不认，而那不报编译错、只报运行期
     // 「认不出这个 callId」。同版本是让这件事不发生的最小条件。
+    // 基准取自这张表自己，不取自 `@deepseek-ai/dsh`：本包一个符号都不从宿主主包导入
+    // （服务面全部来自 dsh-* 子包），拿它当基准只是在 manifest 里养一条没人读的条目。
     const { manifest } = await readSurface();
-    const peer = manifest.peerDependencies?.["@deepseek-ai/dsh"];
-    expect(peer, "peer 依赖缺失：宿主版本就失去基准了").toBeDefined();
-    const hostVersion = (peer ?? "").replace(/^[\^~]/u, "");
-    const drifted = Object.entries(hostRanges(manifest)).filter(
-      ([name, range]) => name.startsWith("@deepseek-ai/dsh-") && range !== hostVersion,
+    const dshDeps = Object.entries(hostRanges(manifest)).filter(([name]) =>
+      name.startsWith("@deepseek-ai/dsh-"),
     );
-    expect(drifted, "这些 dsh-* 与宿主 dsh 不同版本").toStrictEqual([]);
+    expect(dshDeps.length, "至少要钉住一枚 dsh-* 宿主依赖，否则同版本这条无从校验").toBeGreaterThan(
+      0,
+    );
+    const baseline = dshDeps[0]?.[1];
+    const drifted = dshDeps.filter(([, range]) => range !== baseline);
+    expect(drifted, `这些 dsh-* 与 ${baseline} 不同版本`).toStrictEqual([]);
   });
 });
 

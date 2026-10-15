@@ -6,7 +6,7 @@
 // （每次 execute 都在 define() 出口过一遍守卫）。
 import { describe, expect, it } from "vitest";
 import type { JsonSchemaNode } from "@deepseek-ai/dsh-tools";
-import { assertToolOutput, redactKeyMaterial } from "../lib/output.ts";
+import { assertToolOutput, redactKeyMaterial, stripAnsi } from "../lib/output.ts";
 import { MESSAGES } from "../lib/messages.ts";
 import type { OcrReviewMessages } from "../lib/messages.ts";
 
@@ -183,5 +183,29 @@ describe("redactKeyMaterial", () => {
     expect(redactKeyMaterial(paths)).toBe(paths);
     const prose = "the api_key field is missing; token count 1234567890 in max_tokens=12000";
     expect(redactKeyMaterial(prose)).toBe(prose);
+  });
+});
+
+describe("stripAnsi", () => {
+  it("上游那句升级提示里的颜色码被剥掉，要复制的命令本身留着", () => {
+    // 这两句是 launcher 硬编码打到 stderr 的真实形状（`--color never` 管不到它：那句在
+    // JS 包装层打印，Go 侧的旗标还没生效）。
+    const nudge =
+      "\u001B[33m[ocr] A new version (v1.13.0) is available. Run to update:\u001B[0m\n" +
+      "\u001B[33m  npm i -g @alibaba-group/open-code-review@1.13.0\u001B[0m\n";
+    expect(stripAnsi(nudge)).toBe(
+      "[ocr] A new version (v1.13.0) is available. Run to update:\n" +
+        "  npm i -g @alibaba-group/open-code-review@1.13.0\n",
+    );
+  });
+
+  it("没有 ESC 前缀的方括号文本一个字符都不动（宁可漏剥也不误伤）", () => {
+    const plain = "[33m npm i -g pkg@1.2.3 [0m 与 [ERROR] binary not found";
+    expect(stripAnsi(plain)).toBe(plain);
+    expect(stripAnsi("")).toBe("");
+  });
+
+  it("除 SGR 之外的 CSI 序列同样算控制序列（清行、光标位都不该进浏览器）", () => {
+    expect(stripAnsi("a\u001B[2Kb\u001B[1;32mc\u001B[0md")).toBe("abcd");
   });
 });

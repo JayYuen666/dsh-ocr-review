@@ -12,8 +12,8 @@
 // 注入防线与此并行，不受语言影响：拼进 argv 的值全部经 shq()，枚举一律白名单钳制，
 // 校验闸的调用位置与抛错先后次序都不因文案迁移而改变。
 //
-// 契约依据（open-codereview.ai/docs；1.12.x 起以源码逐条核对，当前 1.12.13，与
-// optionalDependencies 的 ^1.12.13 同源）：
+// 契约依据（open-codereview.ai/docs，判据以 CLI 侧源码逐条核对，钉的版本号见
+// package.json 的 optionalDependencies，本注释不重述它，以免两处数字各自漂移）：
 //   - ocr review：workspace（默认）/ commit（-c）/ range（--from/--to）三模式互斥。
 //   - ocr scan：--path 逗号分隔；二者都接受 --format/--output/--audience/--exclude。
 //   - ocr delegate preview / rule：--format json 机器可读，reviewable_files
@@ -22,7 +22,7 @@
 //     effort=low 的评审约 19k input tokens），宿主 stdout 有 400KB 截断上限，
 //     落盘读取可避免「截断当完整」误判（zvec-grep 同款思路）。
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { format } from "./messages.ts";
@@ -224,7 +224,7 @@ function pushTextFlag(
 }
 
 /** --exclude/--background/--provider/--model 等通用 flag。
- * 注意：ocr 的 --exclude 是 String 类型（实测 v1.12.0 多 flag 实例只认最后一个，
+ * 注意：ocr 的 --exclude 是 String 类型（实测多个 flag 实例只认最后一个，
  * 逗号分隔才生效）——多值必须合并为一个 flag 逗号连接，绝不能展开多个。
  * resume 不在这里：它与 scope 是互斥语义（workspace 禁恢复），由
  * buildReviewCommand 在拿到 scopeFlags 结果后前置校验。 */
@@ -320,16 +320,6 @@ export function wrapWithHostReaper(command: string, messages: OcrReviewMessages)
   return `bash -c ${shq(inner)}`;
 }
 
-/**
- * `ocr` 命令词。优先用**随包装上**的 `@alibaba-group/open-code-review` 入口：它经
- * optionalDependencies 带进来（平台二进制再由它自己的 optionalDependencies 选一），
- * 于是「装上本插件 = 工具可用」，不必用户自己再 brew/npm i -g 一遍。
- * 解析不到（平台二进制装不上、或部署刻意不随包分发）就回落到 PATH 上的裸 `ocr`，
- * 与本包一直以来的形态完全一致——两种装法都继续支持。
- *
- * 惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在
- * 装载期抛，否则整包会因为一个可选二进制而下线。
- */
 /** 随包 launcher 的绝对路径；依赖缺席（或入口不在盘上）时给 undefined。
  *  默认实现用 createRequire 以本文件为基准解析**本插件自己**的依赖树（打包产物
  *  host.js 里即随包发布的那个），不走宿主 profile 的目录。做成入参是为了让回落那一档
@@ -355,12 +345,88 @@ export function locateLauncher(): string | null {
   return launcher;
 }
 
+/** ocr 可执行体的来源：随包 JS 入口 / PATH 上的可执行 / 两处都没有。 */
+export type OcrBinarySource = "bundled" | "path" | "none";
+
+export interface OcrBinaryStatus {
+  readonly source: OcrBinarySource;
+  /** 命中的绝对路径；`none` 时缺席。 */
+  readonly path?: string;
+}
+
+/** 是不是一个普通文件（PATH 里恰好有个叫 ocr 的目录不算命中）。 */
+function isRegularFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 只用文件系统的事实回答：`ocr` 这个候选在哪条路上找得到。
+ *
+ * 为什么需要：`ocrCommand()` 在随包入口缺席时**假设** PATH 上有裸 `ocr`，而这个假设
+ * 过去只有等子进程 exit 127 才暴露——用户看到的是「ocr 命令不存在」而不是「哪条路都
+ * 没找到」。本函数给设置页的状态行与工具的前置短路同一个可先问的判据。
+ *
+ * 四条口径：
+ *  - 只回答「找不找得到」，不回答「跑不跑得起来」：丢执行位、入口是符号链接指向空缺
+ *    这类事实在真实 spawn 那一侧由子进程自己报（比 fs 侧猜权限准确得多），本判据也不
+ *    为此引入 `accessSync` 或 mode 位运算。
+ *  - 因此误报方向是安全的：`none` 只在两条路都没有候选文件时给出，而前置短路只认
+ *    `none`——不会把一套能跑的环境挡掉。
+ *  - Windows 永不报 `bundled`：`ocrCommand()` 在那边刻意跳过随包入口（shebang 脚本
+ *    pwsh/cmd 无法直执行），两处口径必须一致，否则状态说可用、命令却走另一条路。
+ *  - 「包在但平台二进制缺失」不在这里判——那要读 OCR 自己的内部布局（平台子包名与
+ *    bin 文件名），抄进本包就等于养一条随上游漂移的判据；那一档由 launcher 自己那句
+ *    `[ERROR] OpenCodeReview binary not found`（exit 1）报出来。
+ * @param env - 进程环境（默认生产那一份；单测注入 stub 以构造 PATH 形态）。
+ * @param locate - 随包 launcher 的定位口（默认即 `ocrCommand()` 用的那一个）。
+ * @param platform - 平台（默认 `process.platform`；单测换成 stub 以覆盖分隔符与后缀）。
+ * @returns 来源与命中路径。
+ */
+export function resolveOcrAvailability(
+  env: NodeJS.ProcessEnv = process.env,
+  locate: LauncherLocator = locateLauncher,
+  platform: NodeJS.Platform = process.platform,
+): OcrBinaryStatus {
+  const windows = platform === "win32";
+  if (!windows) {
+    const launcher = locate();
+    if (launcher !== null) {
+      return { source: "bundled", path: launcher };
+    }
+  }
+  // 空段在 shell 语义里是**当前工作目录**，跟着那条语义走就会把被审查仓库里恰好叫 ocr
+  // 的文件报成「PATH 上有」，所以先滤掉再逐段试。
+  const dirs = (env["PATH"] ?? env["Path"] ?? "")
+    .split(windows ? ";" : ":")
+    .filter((dir) => dir !== "");
+  const suffixes = windows
+    ? [...new Set(["", ...(env["PATHEXT"] ?? "").split(";").filter(Boolean)])]
+    : [""];
+  for (const dir of dirs) {
+    for (const suffix of suffixes) {
+      const candidate = path.resolve(dir, `ocr${suffix}`);
+      if (isRegularFile(candidate)) {
+        return { source: "path", path: candidate };
+      }
+    }
+  }
+  return { source: "none" };
+}
+
 /** 进程级记忆槽（默认那一档）：整包共用一次解析结果。 */
 const memoBox: { value?: string } = {};
 
 /** 解析出的 `ocr` 命令词（已 shq 转义）：随包入口的绝对路径，或 PATH 上的裸 `ocr`。
- *  惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在
- *  装载期抛，否则整包会因为一个可选二进制而下线。
+ *  优先用**随包装上**的 `@alibaba-group/open-code-review` 入口：它经 optionalDependencies
+ *  带进来（平台二进制再由它自己的 optionalDependencies 选一），于是「装上本插件 = 工具可用」，
+ *  不必用户自己再 brew/npm i -g 一遍；解析不到（平台二进制装不上、或部署刻意不随包分发）才
+ *  回落到 PATH 上的裸 `ocr`，与本包一直以来的形态完全一致——两种装法都继续支持。
+ *  惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在装载期抛，
+ *  否则整包会因为一个可选二进制而下线。
  *  导出给同包的命令构造单测——它们按同一个解析结果写期望值，测试与生产同源，
  *  而不是各自把「ocr 还是某个绝对路径」写死一遍。
  * @param locate 随包 launcher 的定位口（默认实现即生产那一档）。
@@ -418,6 +484,34 @@ export function buildLlmTestCommand(): string {
 }
 
 /**
+ * `ocr version` 命令词（设置页的状态探测专用）。与五个工具同一个解析源，理由与
+ * `llm test` 完全一致；也不套宿主回收守护——它是秒级本地打印，与
+ * delegate/session/llm test 同一档（`wrapWithHostReaper` 只管分钟级的 review/scan）。
+ */
+export function buildVersionCommand(): string {
+  return `${ocrCommand()} version`;
+}
+
+/**
+ * 从 `ocr version` 的回执里取版本号。上游那句自述是 `open-code-review <Version> <os>/<arch>`
+ * （`cmd/opencodereview/root.go` 的 versionString），而 `<Version>` 有两种**都在野外**的形态：
+ * 随包的 Go 构建把 git tag 整个塞进去，带 `v`（`open-code-review v1.12.13 (fabbdb29) darwin/arm64`），
+ * 包管理器装到 PATH 上那份没有（`open-code-review 1.12.13 darwin/arm64`）。上游自己那层 npm 包装
+ * 的 parseVersionOutput 只认带 `v` 的一种，本包两种都得读——按 PATH 装法的用户按下「检测版本」
+ * 却看到「没有版本号」，这个功能对他就是失效的。
+ * 锚在产品名上而不是「文本里第一个像版本号的串」：launcher 那句升级提示里也带一个版本号，
+ * 那是**可用的新版本**而非本机装的这份，抓错就把建议读成了现状。
+ * 读不出即 null：未发布构建的 `<Version>` 是 `dev`，没有版本号可报，猜一个等于编一个。
+ */
+export function parseOcrVersion(text: string): string | null {
+  const version =
+    /open-code-review\s+v?(?<version>\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/u.exec(
+      text,
+    )?.groups?.["version"];
+  return version ?? null;
+}
+
+/**
  * 构造 `ocr review` 命令。--output 固定为调用方给定的临时文件路径（防截断），
  * --audience agent --format json 是默认（结构化、无进度行）。
  * outputPath 缺省（后台模式）省略 --output：结果以 OCR 会话记录为准。
@@ -464,7 +558,7 @@ export function buildReviewCommand(
 
 /** 构造 `ocr scan` 命令（无 git diff 的全文件扫描）。
  * 与 review 相同的坑：--path/--exclude 都是 String 类型，多值必须逗号连接
- * （实测 v1.12.0：多 flag 实例不生效），绝不能展开多个。
+ * （实测多个 flag 实例不生效），绝不能展开多个。
  * outputPath 缺省（后台模式）省略 --output：结果以 OCR 会话记录为准。 */
 export function buildScanCommand(
   args: ScanScopeArgs,

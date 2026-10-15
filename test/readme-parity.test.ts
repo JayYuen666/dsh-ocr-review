@@ -1,6 +1,6 @@
 // README 双语结构闸：README.md 与 README.zh-CN.md
-// 是同一份事实的两语投影——工具清单、部署级键、第三方声明引用与章节结构一旦单侧漂移，
-// 读另一侧的人拿到的是过时的契约。这里不比对措辞（翻译本来就不逐字），只比对结构。
+// 是同一份事实的两语投影——工具清单、端点路径、部署级键、第三方声明引用与章节结构一旦
+// 单侧漂移，读另一侧的人拿到的是过时的契约。这里不比对措辞（翻译本来就不逐字），只比对结构。
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -21,8 +21,26 @@ const TOOL_NAMES = [
   "ocr_session",
 ] as const;
 
-/** 两侧都必须点名的部署级调优键（设置卡刻意不收的那三枚）。 */
-const DEPLOYMENT_KEYS = ["llmTestTimeoutMs", "ocrBackgroundMaxMs", "stdoutMaxBytes"] as const;
+/** 两侧都必须点名的部署级键：导出 `Config` 上那些**不进设置卡**的非 volatile 字段
+ *  （前三枚是调优值，第四枚是「一条运行能不能改动这台机器」的部署决策）。 */
+const DEPLOYMENT_KEYS = [
+  "llmTestTimeoutMs",
+  "ocrBackgroundMaxMs",
+  "stdoutMaxBytes",
+  "ocrNoAutoUpdate",
+] as const;
+
+/**
+ * 两侧都必须逐条点名的端点路径（对外契约面）。刻意数路径而不是数总数：少写一行的症状
+ * 是「读文档的人以为没这条路」，而总数断言在同侧既漏写又补上一句别处引用时正好相互抵消。
+ */
+const ENDPOINT_PATHS = [
+  "/_dsh/ocr-review/providers",
+  "/_dsh/ocr-review/select",
+  "/_dsh/ocr-review/migrate",
+  "/_dsh/ocr-review/test",
+  "/_dsh/ocr-review/probe",
+] as const;
 
 /**
  * 读某一侧的 README 全文。
@@ -63,7 +81,7 @@ describe("readme 双语结构", () => {
     }
   });
 
-  it("部署级调优键两侧都在（config: 行的契约面）", async () => {
+  it("部署级键两侧都在（只走 config: 行的那几张契约面）", async () => {
     const texts = {
       en: await readReadme("en"),
       zh: await readReadme("zh"),
@@ -71,6 +89,17 @@ describe("readme 双语结构", () => {
     for (const key of DEPLOYMENT_KEYS) {
       expect(texts.en, `README.md 缺部署键 ${key}`).toContain(key);
       expect(texts.zh, `README.zh-CN.md 缺部署键 ${key}`).toContain(key);
+    }
+  });
+
+  it("五条端点路径两侧都在（对外契约面不许单语失明）", async () => {
+    const texts = {
+      en: await readReadme("en"),
+      zh: await readReadme("zh"),
+    } as const;
+    for (const route of ENDPOINT_PATHS) {
+      expect(texts.en, `README.md 缺端点 ${route}`).toContain(route);
+      expect(texts.zh, `README.zh-CN.md 缺端点 ${route}`).toContain(route);
     }
   });
 

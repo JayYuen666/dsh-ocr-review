@@ -40,7 +40,12 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 // 顺着 `./client` 的再导出走到 slot-contract.ts），也是本卡渲染视模型两个状态位的真源
 // （见下面 CardSnapshot）。lint 的 `require-module-specifiers` 禁空 import specifier，
 // 正合本意——载入官方契约就该同时*用上*它。
-import type { ConfigPageForm } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
+import type {
+  ConfigPageForm,
+  PluginActivationOwnerProps,
+  PluginDetailProps,
+  PluginsSubject,
+} from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
@@ -68,6 +73,7 @@ const PROVIDERS_URL = "/_dsh/ocr-review/providers";
 const SELECT_URL = "/_dsh/ocr-review/select";
 const MIGRATE_URL = "/_dsh/ocr-review/migrate";
 const TEST_URL = "/_dsh/ocr-review/test";
+const PROBE_URL = "/_dsh/ocr-review/probe";
 /** 写端点 CSRF 头名（与 host.ts OCR_CSRF_HEADER 同源，改名要两端一起改）。 */
 const CSRF_HEADER = "x-ocr-csrf";
 
@@ -106,6 +112,37 @@ function providerOf(raw: unknown): DshProvider {
   };
 }
 
+/** 可得性来源的合法域（与 host 侧 `OcrBinarySource` 同一份取值）。形状不合即「没报」。 */
+const BINARY_SOURCES = new Set(["bundled", "path", "none"]);
+
+/** 解析宿主送的可得性对象。导出是为了让「wire 键名」这条契约能被钉住：卡片与 host
+ *  两处各写一份键名时，写错了的症状是状态行永远显示「未取到」，而不是任何报错。 */
+export function binaryOf(raw: unknown): OcrBinaryView | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const source = strOf(raw["source"]);
+  if (!BINARY_SOURCES.has(source)) {
+    return null;
+  }
+  const path = strOf(raw["path"]);
+  return path === "" ? { source } : { source, path };
+}
+
+/**
+ * 详情页徽标/区块/启用指引共用的取数口：读同一条 GET providers 的 `ocrBinary` 那半。
+ * 判据只在 host 的 `resolveOcrAvailability` 一处，本包三个显示面都只翻译它的结论。
+ */
+export async function loadCliStatus(): Promise<OcrBinaryView | null> {
+  try {
+    const res = await fetch(PROVIDERS_URL, { headers: { accept: "application/json" } });
+    return res.ok ? binaryOf(fieldOf(await res.json(), "ocrBinary")) : null;
+  } catch {
+    // 读不到就是「宿主没报」：这三处贡献点的职责正是把这件事显示出来，不再叠一层错误条。
+    return null;
+  }
+}
+
 function providersPayloadOf(json: unknown): ProvidersPayload {
   const providersArr = fieldOf(json, "providers");
   const providers = Array.isArray(providersArr) ? providersArr.map((item) => providerOf(item)) : [];
@@ -119,6 +156,12 @@ function providersPayloadOf(json: unknown): ProvidersPayload {
   // source 是宿主给的结构化降级状态（status + 给用户看的 message）；wire 上一切
   // 未知取值都按「不可用」处理，只有 status === "ready" 才允许渲染选择器。
   const sourceRaw = fieldOf(json, "source");
+  // 装载期端点自检：宿主没跑（或旧宿主不带该字段）时为 null；形状不合按 null 处理。
+  const verifyRaw = fieldOf(json, "endpointVerify");
+  const endpointVerify =
+    verifyRaw === null || verifyRaw === undefined
+      ? null
+      : { ok: fieldOf(verifyRaw, "ok") === true, message: strOf(fieldOf(verifyRaw, "message")) };
   return {
     providers,
     current,
@@ -128,6 +171,8 @@ function providersPayloadOf(json: unknown): ProvidersPayload {
       message: strOf(fieldOf(sourceRaw, "message")),
     },
     csrf: strOf(fieldOf(json, "csrf")),
+    endpointVerify,
+    ocrBinary: binaryOf(fieldOf(json, "ocrBinary")),
   };
 }
 
@@ -135,6 +180,9 @@ function providersPayloadOf(json: unknown): ProvidersPayload {
  *  抽出来是因为两处 input 与一处 select 必须同宽同边框：写三遍字面量时改一处漏两处，
  *  症状是设置卡里某一行的控件比其它行窄。 */
 const FORM_CONTROL_CLASS = "ocr-select";
+
+/** 小节标题的类名（卡片头、CLI 状态行、详情页区块共用；sonarjs 的重复字面量门禁）。 */
+const CARD_NAME_CLASS = "ocr-card-name";
 
 const CARD_CSS = [
   // 设置卡外壳（复刻其它自研卡片/一方 PluginCard：边框圆角卡片 + 可折叠 header）
@@ -178,6 +226,15 @@ export interface ProviderSource {
   status: string;
   message: string;
 }
+/**
+ * 外部 `ocr` 的可得性（`lib/cli.ts` 的 resolveOcrAvailability 那一档）。
+ * 只有文件系统的事实，不含版本号——版本要 spawn，归「检测」按钮那条动作。
+ */
+export interface OcrBinaryView {
+  /** "bundled" | "path" | "none"；wire 上一切未知取值按「未报」处理（见 binaryOf）。 */
+  source: string;
+  path?: string;
+}
 export interface ProvidersPayload {
   providers: DshProvider[];
   current: { provider: string; model: string; keyIsDynamic: boolean; url: string };
@@ -185,10 +242,15 @@ export interface ProvidersPayload {
   source: ProviderSource;
   /** 宿主每次 apply 生成的会话内 CSRF token（写端点必须回填 x-ocr-csrf 头）。 */
   csrf: string;
+  /** 装载期端点自检结果（host 在 apply 时跑一次 `ocr llm test`）；null/缺省 = 没跑。
+   *  可选：上游 host 版本可能不带这个字段，卡片按「没跑」处理即可。 */
+  endpointVerify?: { ok: boolean; message: string } | null;
+  /** 外部 ocr 的可得性（纯 fs 判据）；null/缺省 = 宿主这侧没报，卡片显示「未取到状态」。 */
+  ocrBinary?: OcrBinaryView | null;
 }
 
 /**
- * 0.1.7 的客户端配置面：直接取官方声明
+ * 客户端配置面：直接取官方声明
  * `@deepseek-ai/dsh-client-ui-settings/client` 的 `ConfigForm<T>`（getSnapshot / subscribe /
  * mutate / set / unset）与其 `ConfigFormSnapshot<T>`。原先那份 `getSnapshot: () => unknown`
  * 逼出下面 `cardStore` 里的 `fieldOf(snap, "status")` 逐位再解析——那只是丢失类型的补救，不是
@@ -363,7 +425,7 @@ function OcrPluginCard(props: {
   const headRow = createElement(
     "span",
     { className: "ocr-card-head" },
-    createElement("span", { className: "ocr-card-name" }, title),
+    createElement("span", { className: CARD_NAME_CLASS }, title),
     createElement("span", { className: "ocr-card-desc" }, description),
   );
   const chevron = createElement(
@@ -565,7 +627,10 @@ export interface OcrCardDeps {
   t: Translate;
   data: ProvidersPayload | null;
   fetchError: string | null;
-  busy: boolean;
+  /** 哪条动作正在飞（四条动作共用一份 CSRF 与一个传输口，故同一时刻只允许一条）；
+   *  null = 空闲。按钮按「有没有动作在飞」禁用，但只有**自己**那条在飞时才改自己的文案——
+   *  否则按下「检测版本」会让「应用」按钮读成「应用中…」，把没发生过的事报给用户。 */
+  busy: CardActionKind | null;
   actionMsg: { ok: boolean; text: string } | null;
   ready: boolean;
   writable: boolean;
@@ -575,6 +640,10 @@ export interface OcrCardDeps {
   modelOptions: DshModel[];
   keyHint: string;
   statusHint: string | null;
+  /** 外部 ocr 的可得性（fs 判据，随 providers 载荷来）；null = 宿主没报。 */
+  binary: OcrBinaryView | null;
+  /** 最近一次 `ocr version` 的回执；null = 还没检测过。 */
+  probeMsg: { ok: boolean; text: string } | null;
   effortValue: unknown;
   languageValue: unknown;
   autoVerifyValue: unknown;
@@ -589,6 +658,7 @@ export interface OcrCardDeps {
   onApply: () => void;
   onTest: () => void;
   onMigrate: () => void;
+  onProbe: () => void;
   onField: (field: string, value: unknown) => void;
   onSave: () => void;
   onDiscard: () => void;
@@ -607,6 +677,239 @@ export function currentConfigText(t: Translate, current: ProvidersPayload["curre
     modelPart: current.model === "" ? "" : t("modelPart", { model: current.model }),
     keyPart: t(current.keyIsDynamic ? "dynamicKey" : "plainKeyWarning"),
   });
+}
+
+/**
+ * 外部 CLI 可得性那一行的文本。三档来源与「宿主没报」四种说法，判据全在 host 侧
+ * （`lib/cli.ts` 的 resolveOcrAvailability），卡片只翻译结论——两处各算各的就会漂。
+ */
+export function binaryStatusText(t: Translate, binary: OcrBinaryView | null): string {
+  if (binary === null) {
+    return t("binaryUnknown");
+  }
+  if (binary.source === "bundled") {
+    return t("binaryBundled");
+  }
+  if (binary.source === "path") {
+    return t("binaryPath", { path: binary.path ?? "" });
+  }
+  return t("binaryNone");
+}
+
+/** 一条错误提示行的类名（多处在用；sonarjs 的重复字面量门禁要求收成常量）。 */
+const STATUS_ERROR_CLASS = "ocr-status ocr-err";
+
+/** 一条成功/失败回执行的类名（动作条、探测回执共用）。 */
+function statusClass(ok: boolean): string {
+  return `ocr-status ${ok ? "ocr-ok" : "ocr-err"}`;
+}
+
+/**
+ * 外部 CLI 状态行：可得性 + 「检测」按钮 + 最近一次探测回执。
+ *
+ * 刻意画在 provider 表单**之外**（provider 源不可用时也要看得见）——「这台机器有没有
+ * ocr」与「宿主能不能列出 provider」是两件事，混在一支里会让缺 CLI 的机器连原因都看不到。
+ * 回执用 `.ocr-status`（`white-space:pre-wrap`）而不是输入框：那段文本里就有上游给的
+ * `npm i -g …` 命令，要能选中复制，而本包不提供剪贴板 API（非安全上下文会静默失败）。
+ */
+export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
+  const { t } = deps;
+  const label = createElement("div", { className: CARD_NAME_CLASS }, t("binaryTitle"));
+  const button = createElement(
+    "button",
+    {
+      className: "ocr-btn",
+      type: "button",
+      disabled: deps.busy !== null,
+      onClick: deps.onProbe,
+      "data-field": "probe",
+    },
+    deps.busy === "probe" ? t("detecting") : t("detectCli"),
+  );
+  const row = createElement(
+    "div",
+    { className: "ocr-row", style: { justifyContent: "flex-start", gap: 8 } },
+    label,
+    button,
+  );
+  const statusText = binaryStatusText(t, deps.binary);
+  const status = createElement("div", { className: "ocr-hint" }, statusText);
+  const probe = deps.probeMsg
+    ? createElement(
+        "div",
+        { className: statusClass(deps.probeMsg.ok), "data-field": "probe-result" },
+        deps.probeMsg.text,
+      )
+    : null;
+  return createElement(
+    "div",
+    { style: { padding: "2px 0" }, "data-field": "cli-status" },
+    row,
+    status,
+    probe,
+  );
+}
+
+/**
+ * 徽标用的短文案（标题旁那只标签放不下整句装法）。与 `binaryStatusText` 同一判据、
+ * 不同长度：两处各算一份「哪一档」就会漂，所以入参仍是 host 送的那份 `OcrBinaryView`。
+ */
+export function cliBadgeText(t: Translate, binary: OcrBinaryView | null): string {
+  if (binary === null) {
+    return t("badgeUnknown");
+  }
+  if (binary.source === "bundled") {
+    return t("badgeBundled");
+  }
+  if (binary.source === "path") {
+    return t("badgePath");
+  }
+  return t("badgeNone");
+}
+
+/** 这页说的是不是本包（bundle 页与它的行页都算；官方插件页 `item` 没有包名可比）。
+ *  导出是因为「在别人插件的页上白拉一次自己的端点」这条判据只能在这里钉。 */
+export function isOwnSubject(subject: PluginsSubject): boolean {
+  return subject.kind !== "item" && subject.pkg.name === BUNDLE_PKG;
+}
+
+/** 徽标那枚元素（状态已到才画；取状态与 subject 过滤留给组件，用例才不必起渲染器）。 */
+export function buildCliBadge(t: Translate, status: OcrBinaryView | null): ReactNode {
+  return createElement(
+    "span",
+    { className: "ocr-hint", "data-field": "cli-badge" },
+    cliBadgeText(t, status),
+  );
+}
+
+/** 详情页/启用指引这几处贡献点共用的注入面：取文案的口 + 取可得性的口。 */
+export interface CliStatusShare {
+  t: Translate;
+  loadCliStatus: () => Promise<OcrBinaryView | null>;
+}
+
+/**
+ * 订阅一次外部 CLI 可得性（GET providers 的 `ocrBinary` 那半，纯 fs 判据、不起进程）。
+ *
+ * `active` 为假（这页说的不是本包）时既不发请求也不画东西：官方契约是「对无话可说的
+ * subject 渲染 null」，在别人插件的页面上拉一次自己的端点属于白干的活。
+ * @returns undefined = 还没回来（渲染 null，不闪「状态未知」）；null = 宿主没报。
+ */
+function useCliStatus(
+  active: boolean,
+  load: () => Promise<OcrBinaryView | null>,
+): OcrBinaryView | null | undefined {
+  const [status, setStatus] = useState<OcrBinaryView | null | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    const settle = (value: OcrBinaryView | null): void => {
+      if (alive) {
+        setStatus(value);
+      }
+    };
+    const run = async (): Promise<void> => {
+      try {
+        settle(await load());
+      } catch {
+        settle(null);
+      }
+    };
+    if (active) {
+      void run();
+    }
+    return (): void => {
+      alive = false;
+    };
+  }, [active, load]);
+  return status;
+}
+
+/** 详情页标题旁的徽标：一句话说明外部 ocr 从哪条路来（或压根没有）。 */
+export function OcrCliBadge(props: CliStatusShare & PluginDetailProps): ReactNode {
+  const mine = isOwnSubject(props.subject);
+  const status = useCliStatus(mine, props.loadCliStatus);
+  if (!mine || status === undefined) {
+    return null;
+  }
+  return buildCliBadge(props.t, status);
+}
+
+/** 区块体：标题 + 完整状态那一行 + 指路那一句。 */
+export function buildCliSection(t: Translate, status: OcrBinaryView | null): ReactNode {
+  const title = createElement("div", { className: CARD_NAME_CLASS }, t("binaryTitle"));
+  const body = createElement("div", { className: "ocr-hint" }, binaryStatusText(t, status));
+  const hint = createElement("div", { className: "ocr-hint" }, t("binaryProbeHint"));
+  return createElement(
+    "div",
+    { style: { padding: "8px 0" }, "data-field": "cli-section" },
+    title,
+    body,
+    hint,
+  );
+}
+
+/** 详情页下方的区块：完整状态 + 「版本号要在配置卡片里点检测」的指路。 */
+export function OcrCliSection(props: CliStatusShare & PluginDetailProps): ReactNode {
+  const mine = isOwnSubject(props.subject);
+  const status = useCliStatus(mine, props.loadCliStatus);
+  if (!mine || status === undefined) {
+    return null;
+  }
+  return buildCliSection(props.t, status);
+}
+
+/**
+ * 启用指引的内容：一句「两条路都没找到」+ 去详情页 / 收起这两个动作。
+ * 动作回调由宿主给（`onOpenDetails` 顺带把用户送到本包配置页，那里才有「检测」按钮）。
+ */
+export function buildCliActivation(
+  t: Translate,
+  props: Pick<PluginActivationOwnerProps, "onOpenDetails" | "onDismiss">,
+): ReactNode {
+  const text = createElement("div", { className: STATUS_ERROR_CLASS }, t("binaryNone"));
+  const details = createElement(
+    "button",
+    {
+      className: "ocr-btn",
+      type: "button",
+      onClick: props.onOpenDetails,
+      "data-field": "guide-details",
+    },
+    t("binaryGuideDetails"),
+  );
+  const dismiss = createElement(
+    "button",
+    {
+      className: "ocr-btn",
+      type: "button",
+      onClick: props.onDismiss,
+      "data-field": "guide-dismiss",
+    },
+    t("binaryGuideDismiss"),
+  );
+  return createElement(
+    "div",
+    { style: { padding: "8px 0", display: "flex", gap: 8 }, "data-field": "cli-activation" },
+    text,
+    details,
+    dismiss,
+  );
+}
+
+/**
+ * 启用后的一次性指引：只在「两条路都没找到 ocr」那一刻说话。
+ *
+ * 这是官方给第三方 bundle 的最外侧位置（`plugins.bundle.activation`，用户从列表启用本包
+ * 后由页面渲染）。列表卡片上那排标签全部来自宿主对条目自身的判定，插件注入不进去，所以
+ * 「装没装外部 CLI」能被显示的最外一处就是这里，外加详情页那只徽标。
+ */
+export function OcrCliActivation(props: CliStatusShare & PluginActivationOwnerProps): ReactNode {
+  const mine = props.packageName === BUNDLE_PKG;
+  const status = useCliStatus(mine, props.loadCliStatus);
+  if (!mine || status?.source !== "none") {
+    return null;
+  }
+  return buildCliActivation(props.t, props);
 }
 
 /** 数据齐（source.status === "ready"）那一支：provider/model 两行 + 三个动作按钮 +
@@ -654,18 +957,18 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     {
       className: "ocr-btn ocr-btn-primary",
       type: "button",
-      disabled: deps.busy,
+      disabled: deps.busy !== null,
       onClick: deps.onApply,
       "data-field": "apply",
     },
-    deps.busy ? t("applying") : t("applyToOcr"),
+    deps.busy === "apply" ? t("applying") : t("applyToOcr"),
   );
   const testBtn = createElement(
     "button",
     {
       className: "ocr-btn",
       type: "button",
-      disabled: deps.busy,
+      disabled: deps.busy !== null,
       onClick: deps.onTest,
       "data-field": "test",
     },
@@ -676,7 +979,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     {
       className: "ocr-btn",
       type: "button",
-      disabled: deps.busy,
+      disabled: deps.busy !== null,
       onClick: deps.onMigrate,
       "data-field": "migrate",
     },
@@ -693,7 +996,26 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
   const currentHint = cur.provider === "" ? t("noProvider") : currentConfigText(t, cur);
   const currentInfo = createElement("div", { className: "ocr-hint" }, currentHint);
   const keyInfo = createElement("div", { className: "ocr-hint" }, deps.keyHint);
-  return createElement("div", {}, providerRow, modelRow, actionRow, currentInfo, keyInfo);
+  // 装载期自检失败只作提示：配置照样可以改（正因为端点可能配错，才不该挡住表单）。
+  const verify = data.endpointVerify ?? null;
+  const verifyWarning =
+    verify !== null && !verify.ok
+      ? createElement(
+          "div",
+          { className: STATUS_ERROR_CLASS, "data-field": "endpoint-verify" },
+          t("endpointVerifyFailed", { reason: verify.message }),
+        )
+      : null;
+  return createElement(
+    "div",
+    {},
+    verifyWarning,
+    providerRow,
+    modelRow,
+    actionRow,
+    currentInfo,
+    keyInfo,
+  );
 }
 
 /** Provider / Model 选择与应用区：三条降级各出一行提示（数据未就绪/读取失败/
@@ -702,7 +1024,7 @@ export function buildProviderSection(deps: OcrCardDeps): ReactNode {
   const { t } = deps;
   if (deps.fetchError !== null) {
     const reason = t("loadProvidersFailed", { error: deps.fetchError });
-    return createElement("div", { className: "ocr-status ocr-err" }, reason);
+    return createElement("div", { className: STATUS_ERROR_CLASS }, reason);
   }
   if (deps.data === null) {
     return createElement("div", { className: "ocr-status ocr-muted" }, t("loadingProviders"));
@@ -714,7 +1036,7 @@ export function buildProviderSection(deps: OcrCardDeps): ReactNode {
     const sourceMessage = deps.data.source.message;
     const reason = sourceMessage === "" ? t("noReason") : sourceMessage;
     const line = t("readProvidersFailed", { reason });
-    return createElement("div", { className: "ocr-status ocr-err" }, line);
+    return createElement("div", { className: STATUS_ERROR_CLASS }, line);
   }
   return buildReadyProviderSection(deps, deps.data);
 }
@@ -968,9 +1290,14 @@ interface CardActionDeps {
   t: Translate;
   post: (url: string, body?: string) => Promise<Response>;
   refresh: () => Promise<ProvidersPayload | null>;
-  setBusy: (busy: boolean) => void;
+  setBusy: (busy: CardActionKind | null) => void;
   setActionMsg: (message: { ok: boolean; text: string } | null) => void;
 }
+
+/** 卡片上四条动作的标识。同一时刻只允许一条在飞（CSRF 令牌与动作回执都只有一份），
+ *  所以它是一个「谁在飞」的旗标而不是布尔——按钮按「有没有动作在飞」禁用，但只有**自己**
+ *  那条在飞时才改自己的文案，否则按下「检测版本」会让「应用」按钮读成「应用中…」。 */
+export type CardActionKind = "apply" | "test" | "migrate" | "probe";
 
 /** apply 动作多要两位：本次渲染选中的 provider/model。 */
 interface ApplySelectionDeps extends CardActionDeps {
@@ -985,7 +1312,7 @@ async function runApplySelection(deps: ApplySelectionDeps): Promise<void> {
     deps.setActionMsg({ ok: false, text: t("pickProviderModel") });
     return;
   }
-  deps.setBusy(true);
+  deps.setBusy("apply");
   deps.setActionMsg(null);
   try {
     const res = await deps.post(
@@ -1021,14 +1348,14 @@ async function runApplySelection(deps: ApplySelectionDeps): Promise<void> {
     const failedText = `${t("requestFailed")}${errorSummary(error)}`;
     deps.setActionMsg({ ok: false, text: failedText });
   } finally {
-    deps.setBusy(false);
+    deps.setBusy(null);
   }
 }
 
 /** POST migrate：明文 api_key 一键迁到 api_key_cmd，回执把迁移/跳过两个名单拼成一行。 */
 async function runMigrateKeys(deps: CardActionDeps): Promise<void> {
   const { t } = deps;
-  deps.setBusy(true);
+  deps.setBusy("migrate");
   deps.setActionMsg(null);
   try {
     const res = await deps.post(MIGRATE_URL);
@@ -1052,14 +1379,14 @@ async function runMigrateKeys(deps: CardActionDeps): Promise<void> {
     const failedText = `${t("requestFailed")}${errorSummary(error)}`;
     deps.setActionMsg({ ok: false, text: failedText });
   } finally {
-    deps.setBusy(false);
+    deps.setBusy(null);
   }
 }
 
 /** POST test：手动触发 ocr llm test，输出原样回显在动作条上。 */
 async function runTestConnection(deps: CardActionDeps): Promise<void> {
   const { t } = deps;
-  deps.setBusy(true);
+  deps.setBusy("test");
   deps.setActionMsg(null);
   try {
     const res = await deps.post(TEST_URL);
@@ -1074,7 +1401,47 @@ async function runTestConnection(deps: CardActionDeps): Promise<void> {
     const failedText = `${t("requestFailed")}${errorSummary(error)}`;
     deps.setActionMsg({ ok: false, text: failedText });
   } finally {
-    deps.setBusy(false);
+    deps.setBusy(null);
+  }
+}
+
+/** 探测动作的落态口：只写自己的那一行，不占 provider 动作条（两处同时有回执要分得开）。
+ *  导出是为了让「回执文本 = 版本行 + 原样附上的 output」这条用户可见契约能被钉住。 */
+export interface ProbeActionDeps {
+  t: Translate;
+  post: (url: string, body?: string) => Promise<Response>;
+  refresh: () => Promise<ProvidersPayload | null>;
+  setBusy: (busy: CardActionKind | null) => void;
+  setProbeMsg: (message: { ok: boolean; text: string } | null) => void;
+}
+
+/**
+ * POST probe：跑一次 `ocr version`。
+ *
+ * 回执里的 `output` 原样附上，不从中抽「有新版本」那句——那是上游的措辞，抽一次就多
+ * 一处会跟着漂的判据；那段文本本来就带在页面上供人选中复制（含上游给的 `npm i -g …`）。
+ */
+export async function runProbe(deps: ProbeActionDeps): Promise<void> {
+  const { t } = deps;
+  deps.setBusy("probe");
+  deps.setProbeMsg(null);
+  try {
+    const res = await deps.post(PROBE_URL);
+    const json: unknown = await res.json();
+    const ok = fieldOf(json, "ok") === true;
+    const head = ok
+      ? t("probeVersion", { version: strOf(fieldOf(json, "version")) })
+      : t("probeReason", { reason: strOf(fieldOf(json, "reason")) });
+    const output = strOf(fieldOf(json, "output"));
+    deps.setProbeMsg({ ok, text: output === "" ? head : `${head}\n${output}` });
+    // 走完一次来回就重读载荷：状态那一行是页面装载时读的，而探测吃的是**此刻**的文件系统。
+    // 用户在页面开着的时候装上（或拆掉）CLI，就会出现「ocr 版本：1.2.3」与「未找到 ocr」
+    // 同屏自相矛盾——两处必须落到同一时刻的事实上。
+    void deps.refresh();
+  } catch (error: unknown) {
+    deps.setProbeMsg({ ok: false, text: `${t("requestFailed")}${errorSummary(error)}` });
+  } finally {
+    deps.setBusy(null);
   }
 }
 
@@ -1178,11 +1545,7 @@ function buildProviderPanel(deps: OcrCardDeps): ReactNode {
   const { actionMsg } = deps;
   const providerSection = buildProviderSection(deps);
   const actionMsgNode = actionMsg
-    ? createElement(
-        "div",
-        { className: `ocr-status ${actionMsg.ok ? "ocr-ok" : "ocr-err"}` },
-        actionMsg.text,
-      )
+    ? createElement("div", { className: statusClass(actionMsg.ok) }, actionMsg.text)
     : null;
   return createElement("div", { style: { padding: "2px 0" } }, providerSection, actionMsgNode);
 }
@@ -1197,8 +1560,9 @@ function OcrCard(props: CardSlotProps): ReactNode {
   // Provider 数据（webServer 端点，无 key 明文）。
   const [data, setData] = useState<ProvidersPayload | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<CardActionKind | null>(null);
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [probeMsg, setProbeMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const refresh = async (): Promise<ProvidersPayload | null> =>
     refreshProviders({ setData, setFetchError });
@@ -1260,6 +1624,8 @@ function OcrCard(props: CardSlotProps): ReactNode {
     chosenProvider,
     modelOptions,
     ...cardHints(t, ready, snap.status, data),
+    binary: data?.ocrBinary ?? null,
+    probeMsg,
     ...draftFieldsOf(touched, value),
     dirty,
     settingsBusy,
@@ -1274,6 +1640,9 @@ function OcrCard(props: CardSlotProps): ReactNode {
     },
     onMigrate: () => {
       void runMigrateKeys(actions);
+    },
+    onProbe: () => {
+      void runProbe({ t, post, refresh, setBusy, setProbeMsg });
     },
     onField: setField,
     onSave: () => {
@@ -1290,6 +1659,7 @@ function OcrCard(props: CardSlotProps): ReactNode {
     onDiscard: discard,
   };
   const providerPanel = buildProviderPanel(deps);
+  const cliStatus = buildCliStatusRow(deps);
   const settingsSection = buildSettingsSection(deps, writable, setField);
   // 头部两行先取成变量：嵌进 createElement 里再调 t() 会顶到 max-nested-calls 上限。
   const headTitle = t("cardTitle");
@@ -1297,6 +1667,7 @@ function OcrCard(props: CardSlotProps): ReactNode {
   return createElement(
     OcrPluginCard,
     { title: headTitle, description: headDesc },
+    cliStatus,
     providerPanel,
     settingsSection,
   );
@@ -1327,7 +1698,7 @@ export interface CardSlotProps {
  *   随 collapse 重跑工厂的语义就写在 :100）。合并进 `SlotMap` 的槽位键在这里是
  *   **编译期受检**的：`inject`/`register` 的 key 参数域就是 `keyof SlotMap & string`，
  *   `plugins.bundle.config` 能过靠的是文件头那条 `import type` 把属主 merge 载入 program。
- * - `configForms`：0.1.7 的配置表单服务（installed
+ * - `configForms`：宿主的配置表单服务（installed
  *   `dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98` 交出
  *   `Context.configForms`，`get:142` 按 profile 条目 id 取那张共享表单）：取代已随宿主
  *   移除的 `settingsScope`（installed 全树零命中）。只投影用到的 `get`：官方
@@ -1387,7 +1758,7 @@ function apply(ctx: ClientCtx): void {
       tag.remove();
     };
   }, "ocr-review-card: styles");
-  // 本包的共享表单：条目 id == cordis.patch.yml 里的裸 id `ocr-review`（0.1.7 起
+  // 本包的共享表单：条目 id == cordis.patch.yml 里的裸 id `ocr-review`（隐式
   // settings 命名空间即条目 id，host.ts 隐式注册用的也是它），与 locale 命名空间同源，
   // 故直接复用 NS。旧写法 `settingsScope.bind({ namespace: NS })` 取的是同一个串。
   const scope = ctx.configForms.get(NS);
@@ -1404,8 +1775,8 @@ function apply(ctx: ClientCtx): void {
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {
-        // 0.1.6：settings.plugin.item 已删除；plugins.bundle.config 按 bundle 包名 keyed。
-        // 0.1.7 复核：槽位仍在（installed slot-contract.d.ts:100），换掉的只是它读写的表单来源。
+        // settings.plugin.item 槽位已不存在；plugins.bundle.config 按 bundle 包名 keyed。
+        // 复核过：该槽位仍在（installed slot-contract.d.ts 的声明），换掉的只是它读写的表单来源。
         // 键值定案：宿主派发 `entryKey: pkg.name`（= bundle 的 npm 包名），
         // 证据见上面 BUNDLE_PKG 的注释块；按裸条目 id 注册 = renderer 逐字相等匹配不到
         // （installed dsh-client-ui-renderer/lib/client.js:1154）= 卡片完全不渲染。
@@ -1421,7 +1792,7 @@ function apply(ctx: ClientCtx): void {
       },
       OcrCard,
     );
-    // disposer 只 unregister()，**不 dispose 表单**：0.1.7 的 `configForms.get(entryId)`
+    // disposer 只 unregister()，**不 dispose 表单**：宿主的 `configForms.get(entryId)`
     // 交回的是 provider 自己持有的共享表单（installed config-form.d.ts:138-142
     // "The entry's form, owned by this provider"），消费契约 `ConfigForm`
     //（config-form-types.d.ts:36-74）里根本没有 dispose，消费者无从销毁；provider 在自己的
@@ -1430,9 +1801,48 @@ function apply(ctx: ClientCtx): void {
     // dsh-client-ui-renderer/lib/types/client/registry.d.ts:100 "Collapse disposes the
     // effect and a later declaration runs it again"）——表单共享且长活，所以重跑后写入
     // 依然落盘；旧 `settingsScope` 那种「离开插件页一次之后 scope 永久 disposed、之后每次
-    // 保存被静默丢弃」的坑（0.1.6 的 fiber 级 dispose）随该服务一起消失。
+    // 保存被静默丢弃」的坑（早先那个 fiber 级 dispose）随该服务一起消失。
     return unregister;
   });
+  // 三处对外贡献：详情页徽标（标题旁）、详情页区块（页面内容之下）、启用后指引。
+  // 全部吃 `loadCliStatus` 那一个口——「装没装 ocr」在卡片、徽标、区块三处必须是同一句
+  // 话，各自算一份就等着哪天分叉。官方只给第三方 bundle 到这几个位置：列表卡片那排标签
+  // 全是宿主对条目自身的判定（running/off/problem），插件注入不进去。
+  const cliShare: CliStatusShare = { t, loadCliStatus };
+  ctx.slots.inject("plugins.detail.badge", () =>
+    ctx.slots.register(
+      {
+        name: "plugins.detail.badge",
+        id: `${NS}-cli-badge`,
+        order: 100,
+        label: "ocr-review CLI badge",
+        inject: () => cliShare,
+      },
+      OcrCliBadge,
+    ),
+  );
+  ctx.slots.inject("plugins.detail.section", () =>
+    ctx.slots.register(
+      {
+        name: "plugins.detail.section",
+        id: `${NS}-cli-section`,
+        order: 100,
+        label: "ocr-review CLI section",
+        inject: () => cliShare,
+      },
+      OcrCliSection,
+    ),
+  );
+  ctx.slots.inject("plugins.bundle.activation", () =>
+    ctx.slots.register(
+      {
+        name: "plugins.bundle.activation",
+        key: BUNDLE_PKG,
+        inject: () => cliShare,
+      },
+      OcrCliActivation,
+    ),
+  );
 }
 
 export { OcrCard, inject, apply };

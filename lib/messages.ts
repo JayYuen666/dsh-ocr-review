@@ -35,6 +35,9 @@ export interface OcrReviewMessages {
   readonly execAborted: string;
   /** exit 127：外部 ocr CLI 未安装。 */
   readonly execNotFound: string;
+  /** 前置短路的拒绝理由：随包依赖与 PATH 两条路都没有候选，连进程都不起。
+   *  与 `execNotFound` 的分工是「找都没找到」对「找到了但跑不起来」，两条都留着。 */
+  readonly ocrBinaryMissing: string;
   /** 非零退出（不含详情）。 */
   readonly execFailed: string;
   /** 详情前的分隔符（中文全角冒号、英文半角冒号 + 空格）。 */
@@ -46,8 +49,8 @@ export interface OcrReviewMessages {
   /** 后台模式的轮询指引（ocr_session 三步）。 */
   readonly backgroundPolling: string;
   // ── 官方作业面（ctx.jobs）：写进模型可见 detail / 环里的说明 ──────────────
-  /** 工具调用被中止时 `job_kill` 的理由（模型侧 job_output 读得到）。 */
-  readonly jobReasonAborted: string;
+  /** 会话被停止/关闭时 `job_kill` 的理由（模型侧 job_output 读得到）。 */
+  readonly jobReasonSessionStopped: string;
   /** 兜底 deadline 到点时 `job_kill` 的理由（{minutes} = 实际窗口的分钟数）。 */
   readonly jobReasonTimeout: string;
   /** 插件卸载时 `job_kill` 的理由。 */
@@ -112,7 +115,7 @@ export interface OcrReviewMessages {
   /** status 缺失时的占位。 */
   readonly statusNone: string;
   readonly ocrCommentsNotArray: string;
-  /** warnings 里 `{file,error}` 两条的连接器。 */
+  /** warnings 里 `{file,message}` 两条的连接器。 */
   readonly warningSeparator: string;
   readonly reviewSummaryHint: string;
   readonly lineZeroNote: string;
@@ -145,10 +148,18 @@ export interface OcrReviewMessages {
   readonly credScriptMissing: string;
   /** 收割器降级：进程信息命令不可用，已把进程树交回宿主管（stderr 只报一次，不每轮刷）。 */
   readonly reaperDegraded: string;
-  /** warnings 字段形状不符（不是数组 / 条目读不出 file+error）：占位而非静默丢弃。 */
+  /** warnings 字段形状不符（不是数组 / 条目读不出 file+message+type）：占位而非静默丢弃。 */
   readonly warningUnreadable: string;
+  /** 诊断字段（tool_calls / manifest.coverage）存在却读不出：说明是哪一条读不出。 */
+  readonly diagnosticUnreadable: string;
+  /** 明细行超上限：说明省略了多少条，避免模型把截断读成「就只有这些」。 */
+  readonly diagnosticOmitted: string;
   /** 逗号列表的数组形式里，某一项自身含逗号（无法表达一个含逗号的模式）。 */
   readonly commaInListItem: string;
+  /** 状态探测跑通了、exit 0，但回执里读不出版本号（未发布构建的 `dev` 就落这里）。 */
+  readonly probeNoVersion: string;
+  /** 状态探测被墙钟收走：与 `execFailed` 分开，否则用户看到的是一个不存在的退出码。 */
+  readonly probeTimedOut: string;
   // ── 端点回显 ──────────────────────────────────────────────────────────────
   readonly providerModelRequired: string;
   readonly bodyParseFailed: string;
@@ -208,10 +219,16 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     execTimedOut:
       "ocr 执行超时（实际生效 {minutes} 分钟 = min(请求, shell.maxTimeoutMs)）：" +
       "请缩小审查范围（exclude/--commit/更小改动）、调低 OCR 每组 --timeout，" +
-      "调大 settings.yaml shell.maxTimeoutMs，或改用 wait=false 后台模式（无超时）",
+      "抬高 shell 执行器（bash-local/pwsh-local）设置项里的 maxTimeoutMs，" +
+      "或改用 wait=false 后台模式（默认不设时限）",
     execAborted: "ocr 执行被中止",
     execNotFound:
       "ocr 命令不存在：请先 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review`",
+    ocrBinaryMissing:
+      "两条路都没找到 ocr：随包的 optionalDependencies 没装上（被跳过或没安装），" +
+      "PATH 上也没有可执行候选。装法：`brew install open-code-review` 或 " +
+      "`npm i -g @alibaba-group/open-code-review`；装完直接重试本工具即可，不必重启 dsh" +
+      "（每次调用都重新判一次，结果不缓存）。",
     execFailed: "ocr 执行失败（exit={exitCode}）",
     detailSeparator: "：",
     stdoutTruncated: "[ocr-review] 注意：输出超过 {limit} 字节上限已截断{spill}",
@@ -221,10 +238,10 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "启动即可读，一定有结果；要停它就 job_kill(job_id=<同一 id>)。会话落盘后再走 ocr_session：" +
       "ocr_session(action=list) 找本仓库最新会话（启动几秒后出现，按 scanPaths/时间匹配）；" +
       "completed_files == selected_files 即已完成；再 ocr_session(action=comments, id) 取全部评论、" +
-      "ocr_session(action=show, id) 看元数据与逐文件检查点。后台运行不设宿主超时，只在兜底窗口" +
-      "（ocrBackgroundMaxMs，默认 2 小时）到点后回收（挂死不动会一直占着官方作业桶），" +
-      "取消本工具调用即终止该后台 OCR（宿主 kill + 命令内回收守护）。",
-    jobReasonAborted: "ocr-review 工具调用被中止",
+      "ocr_session(action=show, id) 看元数据与逐文件检查点。后台评审不随工具调用结束而停止，" +
+      "默认也不设时限（ocrBackgroundMaxMs=0 表示无兜底窗口）；只有 dsh 宿主退出、本会话被停止、" +
+      "插件卸载或显式 job_kill 才会结束。",
+    jobReasonSessionStopped: "ocr-review 会话已停止，回收在跑的后台评审",
     jobReasonTimeout: "ocr-review 后台评审超过兜底窗口（{minutes} 分钟），兜底回收",
     jobReasonUnload: "ocr-review 插件卸载",
     jobOutputGap: "\n[ocr-review] 注意：有一次输出读取失败，已按原游标重试（这段可能不完整）",
@@ -267,10 +284,14 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     ocrCommentsNotArray: "OCR 输出 comments 字段不是数组，无法确认评论完整性",
     warningSeparator: "：",
     reviewSummaryHint:
-      "完整评论与逐文件失败详情请用 `ocr session show <session_id>` 查看；start_line=0 表示 OCR 未能锚定行号，" +
-      "可依据 suggestion/existing_code 在文件中定位。status=partial 表示部分文件未完成审查（失败明细在 warnings），" +
-      "评论仍然有效。判读口径：droppedCount 与 invalidCommentCount 同时为 0 时本摘要才覆盖 OCR 的全部产出；" +
-      "否则请调大 maxComments（或置 0 = 不截断）后复核，切勿把「本摘要无 critical」当作「代码干净」。",
+      "完整评论与逐文件失败详情请用 `ocr_session(action=show/comments, id=<session_id>)` 查看；" +
+      "start_line=0 表示 OCR 未能锚定行号，可依据 suggestion/existing_code 在文件中定位。" +
+      "两套口径不要混：droppedCount 与 invalidCommentCount 同时为 0 只说明**本摘要**列全了 OCR " +
+      "产出的评论（否则调大 maxComments 或置 0 后复核）；而**这一场有没有审完**看 coverage" +
+      "（selected 是分母，completed/reused/failed/waived 是它的互斥划分；coverage 为 null 时退回看 " +
+      "warnings 与 status=partial）和 budgetExceeded（true = token 预算花完提前收工，status 里只写 " +
+      "partial，看不出这一层）。toolCalls.failure 大于 0 说明当前模型的工具调用没跑通，换模型比重试同一个更省 token。" +
+      "切勿把「本摘要无 critical」当作「代码干净」。",
     lineZeroNote: "(line 0: 定位失败，按 existing_code 手动定位)",
     parseFailedWithReason:
       "{tool} 输出解析失败：{message}\n原始内容前 {limit} 码元（已脱敏）：\n{raw}",
@@ -311,10 +332,17 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     reaperDegraded:
       "[ocr-review] 宿主回收守护已降级：ps/pgrep 不可用（进程信息命令被沙箱拒绝），改由宿主管进程树。" +
       "dsh 硬退出时 ocr 可能留孤儿进程。",
-    warningUnreadable: "（一条格式无法解析的 warning：既不是字符串，也没有 file/error 字段）",
+    warningUnreadable:
+      "（一条格式无法解析的 warning：既不是字符串，也没有 file/message/type 字段）",
+    diagnosticUnreadable: "（OCR 的 {field} 字段形态不合，这一场的诊断数据读不出来）",
+    diagnosticOmitted: "（另有 {count} 条同类明细已省略，全量见 ocr_session 的 show/comments）",
     commaInListItem:
       "{name} 的数组形式里有一项自身含逗号：{item}。数组与逗号字符串两条路径 join 后无法区分，" +
       "而 glob 花括号（{ts,tsx}）恰好含逗号——静默拆成多项会改变审查/过滤范围。改用逗号字符串形式。",
+    probeNoVersion: "ocr version 跑通了（exit 0），但回执里读不出版本号：那通常是未发布构建。",
+    probeTimedOut:
+      "ocr version 超时（{seconds} 秒内没回来）：那条进程已被收走。稍后重试，" +
+      "或直接在终端里跑 ocr version——本插件不会替它代跑安装或升级。",
     providerModelRequired: "provider 与 model 必填",
     bodyParseFailed: "body 解析失败：{message}",
     reviewToolDescription:
@@ -381,15 +409,19 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
   - ocr_delegate_preview / ocr_delegate_rule：只取「文件清单 + 适配规则」的确定性脚手架（OCR 端零 LLM 消耗），
     配合 git diff 由你自己完成审查——适合复用本会话模型能力、或先确认审查范围再决定是否跑 ocr_review。
   - 审查前若不确定范围，先 ocr_delegate_preview（不花 token）；范围过大时用 exclude 收敛或按 commit 拆。
-- OCR 端点/provider/model 由「设置 → 插件 → ocr-review 卡片」从 dsh 的 settings.yaml providers 选择；
-  也可在工具参数里用 --provider/--model 临时覆盖。
+- OCR 端点/provider/model 由「设置 → 插件 → ocr-review 卡片」从宿主设置服务的 provider 清单选择
+  （key 只按 api_key_cmd 动态读取，不落盘明文）；也可在工具参数里用 provider/model 逐次覆盖。
 - 调用 ocr_review / ocr_scan 前，先用 git log/diff/提交信息快速分析变更意图，提取 3-5 句业务上下文
   传入 background（open-code-review 官方 skill 明确推荐"始终携带"，是质量提升最有效的单一参数）。
-- 若 ocr_review/ocr_scan 输出含 "No tool calls parsed" 或大量 "Max tool requests reached"，
-  是当前模型的工具调用能力问题——建议在 ocr-review 卡片换一个支持原生工具调用的模型（sensenova、deepseek、glm、qwen 系），
-  不要反复重试同一个模型。
-- LLM 调用本身有重试：OCR 内置重试（429/408/409 与 5xx 自动退避重试）；per-file 组失败被隔离并进 warnings，不整体重跑。
-  工具层超时（min(请求, shell.maxTimeoutMs)，缺省 10 分钟）或部分文件失败后，可 ocr_session 查 session_id、用 ocr_review --resume 恢复中断的区间/commit 评审。
+- 读结果分两套口径，不要互相替代：coverage（selected 是分母）与 budgetExceeded 说「这一场有没有审完」，
+  droppedCount/invalidCommentCount 只说「本摘要有没有列全」。toolCalls.failure 大于 0 是当前模型不会调
+  工具——换支持原生工具调用的模型（sensenova、deepseek、glm、qwen 系），别重试同一个；OCR 以
+  --audience agent 运行时进度行被丢弃，"No tool calls parsed" 这类文本永远不会出现在输出里，
+  只能看这个字段。
+- LLM 调用本身有重试：OCR 内置重试（429/408/409 与 5xx 自动退避重试）；per-file 组失败被隔离，进
+  coverage.failedItems（产出里没有 manifest 时进 warnings），不整体重跑。
+  工具层超时（min(请求, shell 执行器自己设置项里的 maxTimeoutMs)，缺省 10 分钟）或部分文件失败后，可
+  ocr_session 查 session_id、用 ocr_review --resume 恢复中断的区间/commit 评审。
 `.trim(),
   },
   en: {
@@ -397,10 +429,16 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     execTimedOut:
       "ocr timed out (effective {minutes} min = min(request, shell.maxTimeoutMs)): " +
       "narrow the review scope (exclude / --commit / a smaller diff), lower OCR's per-group --timeout, " +
-      "raise shell.maxTimeoutMs in settings.yaml, or switch to background mode with wait=false (no timeout)",
+      "raise maxTimeoutMs in the shell executor's own settings (bash-local/pwsh-local), " +
+      "or switch to background mode with wait=false (no time limit by default)",
     execAborted: "ocr execution aborted",
     execNotFound:
       "ocr command not found: install it first with `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`",
+    ocrBinaryMissing:
+      "no ocr candidate on either path: the bundled optionalDependencies were skipped or not " +
+      "installed, and PATH has no executable candidate. Install it with " +
+      "`brew install open-code-review` or `npm i -g @alibaba-group/open-code-review`, then just " +
+      "retry this call - the verdict is re-read per call, so no dsh restart is needed",
     execFailed: "ocr failed (exit={exitCode})",
     detailSeparator: ": ",
     stdoutTruncated:
@@ -414,11 +452,11 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "repository's newest session (it appears a few seconds after start; match by scanPaths/time); " +
       "completed_files == selected_files means it is done. Then ocr_session(action=comments, id) for " +
       "all comments and ocr_session(action=show, id) for metadata " +
-      "and per-file checkpoints. Background runs get no host timeout; they are reclaimed when the " +
-      "backstop window (ocrBackgroundMaxMs, 2 hours by default) elapses (a wedged one would " +
-      "otherwise keep occupying the official job bucket); cancelling this tool call terminates " +
-      "the background OCR (host kill + the reaper guard inside the command).",
-    jobReasonAborted: "ocr-review tool call aborted",
+      "and per-file checkpoints. A background run does not stop when the tool call ends and has no " +
+      "time limit by default (ocrBackgroundMaxMs=0 means no backstop window); it ends only when the " +
+      "dsh host exits, this session is stopped, the plugin unloads, or you call job_kill.",
+    jobReasonSessionStopped:
+      "the ocr-review session stopped; running background reviews were reclaimed",
     jobReasonTimeout:
       "the ocr-review background review exceeded its backstop window ({minutes} minutes) and was reclaimed",
     jobReasonUnload: "ocr-review plugin unloaded",
@@ -470,12 +508,15 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "the comments field of the OCR output is not an array, comment completeness cannot be confirmed",
     warningSeparator: ": ",
     reviewSummaryHint:
-      "Use `ocr session show <session_id>` for the full comments and per-file failure details; start_line=0 " +
-      "means OCR could not anchor a line — locate it via suggestion/existing_code. status=partial means some " +
-      "files were not reviewed (failure details are in warnings); the comments still stand. " +
-      "How to read this summary: only when droppedCount and invalidCommentCount are both 0 does it cover " +
-      "everything OCR produced; otherwise raise maxComments (or set 0 = no truncation) and re-check — " +
-      'never treat "no critical in this summary" as "the code is clean".',
+      "Use `ocr_session(action=show/comments, id=<session_id>)` for the full comments and per-file failure " +
+      "details; start_line=0 means OCR could not anchor a line — locate it via suggestion/existing_code. " +
+      "Keep the two notions apart: droppedCount and invalidCommentCount both being 0 only means THIS SUMMARY " +
+      "listed every comment OCR produced (otherwise raise maxComments, or set it to 0, and re-check). Whether " +
+      "the run itself covered everything is answered by coverage (selected is the denominator, " +
+      "completed/reused/failed/waived are its disjoint partition; fall back to warnings and status=partial when " +
+      "coverage is null) and by budgetExceeded (true = the token budget stopped the run early — status still " +
+      "only says partial). A toolCalls.failure above 0 means the current model's tool calls did not work: switch " +
+      'models instead of retrying the same one. Never treat "no critical in this summary" as "the code is clean".',
     lineZeroNote: "(line 0: not anchored, locate it via existing_code)",
     parseFailedWithReason:
       "{tool} output parsing failed: {message}\nfirst {limit} UTF-16 code units of the raw output (redacted):\n{raw}",
@@ -522,11 +563,20 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "[ocr-review] host reaper degraded: ps/pgrep are unavailable (process-info commands denied by " +
       "the sandbox), so the host manages the process tree. dsh may leave an orphaned ocr process.",
     warningUnreadable:
-      "(one unreadable warning entry: neither a string nor an object with file/error)",
+      "(one unreadable warning entry: neither a string nor an object with file/message/type)",
+    diagnosticUnreadable:
+      "(the {field} field of the OCR output is malformed; its diagnostics cannot be read for this run)",
+    diagnosticOmitted:
+      "({count} more entries of the same kind were omitted; use ocr_session show/comments for the full list)",
     commaInListItem:
       "an item of the array form of {name} contains a comma itself: {item}. The array form and the " +
       "comma-joined string are indistinguishable after joining, and glob braces ({ts,tsx}) contain " +
       "commas — silently splitting changes the review/filter scope. Use the comma-separated string form.",
+    probeNoVersion:
+      "ocr version ran fine (exit 0), yet no version could be read from its output: that usually means an unreleased build",
+    probeTimedOut:
+      "ocr version timed out (nothing back within {seconds}s): that process was reaped. Retry later, " +
+      "or run ocr version in a terminal yourself — this plugin never runs an install or upgrade on your behalf",
     providerModelRequired: "provider and model are both required",
     bodyParseFailed: "failed to parse the body: {message}",
     reviewToolDescription:
@@ -623,18 +673,23 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     or for confirming the scope before deciding to run ocr_review.
   - Unsure about the scope? Run ocr_delegate_preview first (costs no tokens); if the scope is huge, narrow it with
     exclude or split by commit.
-- The OCR endpoint/provider/model comes from "Settings → Plugins → ocr-review card", fed by dsh's settings.yaml
-  providers; --provider/--model can override per call.
+- The OCR endpoint/provider/model comes from "Settings → Plugins → ocr-review card", fed by the provider list of
+  the host settings service (the key is read dynamically through api_key_cmd and never stored in plaintext);
+  provider/model can also be overridden per call.
 - Before ocr_review / ocr_scan, analyse the change intent via git log/diff/commit messages and pass 3-5 sentences of
   business context as background (the official open-code-review skill says "always carry it" — the single most
   effective quality knob).
-- If ocr_review/ocr_scan output contains "No tool calls parsed" or many "Max tool requests reached", the current
-  model's tool-calling ability is the problem — switch to a model with native tool calls in the ocr-review card
-  (sensenova, deepseek, glm, qwen families) instead of retrying the same one.
+- Read the result through two separate notions, neither replaces the other: coverage (selected is the denominator)
+  and budgetExceeded say whether the run finished covering everything, while droppedCount/invalidCommentCount only
+  say whether this summary listed everything OCR produced. A toolCalls.failure above 0 means the current model does
+  not drive tool calls — switch to a model with native tool calls (sensenova, deepseek, glm, qwen families) instead
+  of retrying the same one; when OCR runs with --audience agent its progress lines are dropped, so text such as
+  "No tool calls parsed" can never show up in the output and this field is the only way to see it.
 - LLM calls retry themselves: OCR has built-in backoff retries (429/408/409 and 5xx); per-file group failures are
-  isolated and land in warnings instead of re-running everything. After a tool-layer timeout (min(request,
-  shell.maxTimeoutMs), 10 minutes by default) or partial file failures, use ocr_session to find the session_id and
-  ocr_review --resume to continue an interrupted range/commit review.
+  isolated and land in coverage.failedItems (in warnings when the output carries no manifest) instead of re-running
+  everything. After a tool-layer timeout (min(request, the maxTimeoutMs setting of the shell executor itself,
+  10 minutes by default) or partial file failures, use ocr_session to find the session_id and ocr_review --resume
+  to continue an interrupted range/commit review.
 `.trim(),
   },
 };
