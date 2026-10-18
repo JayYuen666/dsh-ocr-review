@@ -1,4 +1,4 @@
-// host.ts 集成测试：注册面 + 5 个工具执行路径 + 5 个 webServer 端点。
+// host.ts 集成测试：注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote 方法。
 //
 // 关键约束：**绝不触碰外部 ocr 二进制与网络**。shell.execute 全是替身，
 // 断言的是「下发给宿主的命令串形态」与「结果映射」；--output 落盘文件由替身按
@@ -16,14 +16,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  statSync,
   writeFileSync,
   readdirSync,
   realpathSync,
   rmSync,
 } from "node:fs";
 import { symlink } from "node:fs/promises";
-import { networkInterfaces, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -32,12 +31,9 @@ import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import type { JobId, JobKind } from "@deepseek-ai/dsh-jobs";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
 import { MESSAGES } from "../lib/messages.ts";
-import {
-  buildLlmTestCommand,
-  resolveOcrAvailability,
-  EXPECTED_OCR_CLI_VERSION,
-} from "../lib/cli.ts";
+import { resolveOcrAvailability, EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 import type { OcrAvailabilityProbe } from "../host.ts";
+import { OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
 import { shq } from "../lib/argv-guard.ts";
 
 const OCR_DIR_NAME = ".opencodereview";
@@ -64,11 +60,8 @@ const {
   apply: applyWithProbe,
   assertOcrPresent,
   createGateway,
-  isLoopbackBindAddress,
   ocrRepo,
-  parseJsonBody,
   productionProbe,
-  registerConfigEndpoints,
   requiredKeys,
 } = HOST_MODULE;
 
@@ -78,18 +71,6 @@ const { zh } = MESSAGES;
 const { format } = await import("../lib/messages.ts");
 
 const OCR_CONFIG = path.join(HOME, OCR_DIR_NAME, OCR_CONFIG_NAME);
-const CSRF_HEADER = "x-ocr-csrf";
-const PROVIDERS_PATH = "/_dsh/ocr-review/providers";
-const SELECT_PATH = "/_dsh/ocr-review/select";
-const MIGRATE_PATH = "/_dsh/ocr-review/migrate";
-const TEST_PATH = "/_dsh/ocr-review/test";
-const PROBE_PATH = "/_dsh/ocr-review/probe";
-/** sec-fetch-site 的两个取值：跨站那一条必须被端点拒掉，同源才放行（写端点另加 CSRF 头）。 */
-const FETCH_SITE_CROSS_SITE = "cross-site";
-const FETCH_SITE_SAME_ORIGIN = "same-origin";
-/** fixture 里两条 provider 的模型 id（amd 那条带真实型号的大小写混排形态，钳制用例靠它）。 */
-const SENSENOVA_MODEL = "deepseek-v4-flash";
-const AMD_MODEL = "DeepSeek-V4-Flash";
 /** cordis.patch.yml 里本包那一行的裸条目 id（0.1.7 起也就是设置命名空间）。host.ts 里那份
  *  是私有常量，测试侧独立声明：命名空间与 schema 不同源这条判据才拦得住。 */
 const PLUGIN_ENTRY_ID = "ocr-review";
@@ -108,13 +89,6 @@ const ALL_REFS = ["SENSENOVA_API_KEY", "XKIRO_API_KEY", "AMD_API_KEY", "ANTDIGIT
  *  故 ZWJ 写成显式转义而不是裸字符：裸字符会被编辑器/格式化悄悄吃掉，一吃掉长度就
  *  从 11 变 8，切点落回合法配对边界，用例便对着空靶子打还一路绿灯。 */
 const FAMILY = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
-
-interface ConfigDoc {
-  provider?: string;
-  language?: string;
-  custom_providers?: Record<string, Record<string, unknown>>;
-  [key: string]: unknown;
-}
 
 // ── shell 替身 ──────────────────────────────────────────────────────────────
 //
@@ -556,6 +530,10 @@ interface FakeHost {
   jobs: LocalJobRegistry;
   /** ctx.effect 登记的释放器（卸载用例要手动跑一遍）。 */
   effectDisposers: (() => void)[];
+  /** `reflect.provide` 收到的服务（Remote 读面是否上线、其依赖闭包能否取数）。 */
+  provided: Map<string, unknown>;
+  /** cordis `Service` 构造期的注册口：apply 里的 `installOcrRemote` 只认这一位。 */
+  reflect: { provide: (name: string, service: unknown) => void };
   /** `inject(...)` 子 fiber 的 effect 登记的释放器。与上面**分开存**：混在一队就分不出
    *  「释放器挂在谁身上」，而五条路由的释放器必须挂在子 fiber 上（webServer 换实例时
    *  子 fiber 先卸后装，主 fiber 的效应那时还没轮到）。 */
@@ -668,6 +646,12 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
     fiber: { id: "ocr-review-fiber" },
     jobs: makeJobRegistry(),
     effectDisposers: [],
+    provided: new Map(),
+    reflect: {
+      provide: (name, service) => {
+        host.provided.set(name, service);
+      },
+    },
     injectEffectDisposers: [],
     describedRefs,
     resolvedRefs,
@@ -962,179 +946,24 @@ function outputSchemaOf(host: FakeHost, name: string): Record<string, unknown> {
   return toolOf(host, name).output.schema;
 }
 
-function routeOf(host: FakeHost, url: string): FakeRoute {
-  const found = host.registeredRoutes.find((route) => route.path === url);
-  if (found === undefined) {
-    throw new Error(`route not registered: ${url}`);
-  }
-  return found;
-}
-
 /** host.ts 的 ToolExec 投影（官方 `ToolRunContext` 的 signal/agent 两面）。
  *  从 `ocrRepo` 的参数位取类型，而不是在测试里再抄一份执行面形状——抄了就又会漂。 */
 type HostExec = Parameters<typeof ocrRepo>[1];
 
-/** 执行面替身：`agent` 给的是**官方契约之外**的脏数据（`null`、缺 session / 缺 header
- *  的半装配）。官方 `Agent` 类型不收这些，而运行时真可能收到——host.ts 的
- *  `sessionHeaderCwd` 逐层判空就是为它们留的闸。故值按 `unknown` 构造，只在
- *  这一处定点回投影类型（cast 只存在于测试，生产代码没有）。 */
+/** 执行面替身：`agent` 给的是官方契约之外的脏数据（null、缺 session / 缺 header 的半装配）。 */
 function fakeExec(signal: AbortSignal, agent: unknown): HostExec {
   return { signal, agent } as HostExec;
 }
 
 function makeExec(cwd?: string): HostExec {
-  return fakeExec(
-    new AbortController().signal,
-    cwd === undefined ? {} : { session: { header: { cwd } } },
-  );
-}
-
-// ── HTTP 替身 ───────────────────────────────────────────────────────────────
-
-interface FakeRes {
-  statusCode: number;
-  headers: Record<string, string>;
-  body: string;
-  headersSent: boolean;
-  writableEnded: boolean;
-  setHeader: (name: string, value: string) => void;
-  writeHead: (status: number, headers?: Record<string, string>) => FakeRes;
-  end: (data?: string) => FakeRes;
-}
-
-function makeRes(): FakeRes {
-  const res: FakeRes = {
-    statusCode: 0,
-    headers: {},
-    body: "",
-    headersSent: false,
-    writableEnded: false,
-    setHeader(name, value) {
-      res.headers[name] = value;
-    },
-    writeHead(status, headers) {
-      res.statusCode = status;
-      if (headers !== undefined) {
-        Object.assign(res.headers, headers);
-      }
-      res.headersSent = true;
-      return res;
-    },
-    end(data) {
-      res.body = data ?? "";
-      res.writableEnded = true;
-      return res;
-    },
-  };
-  return res;
-}
-
-/** 假响应只实现端点用到的面（writeHead/end/setHeader），按 ServerResponse 喂给 handler。 */
-function asRes(res: FakeRes): ServerResponse {
-  return res as unknown as ServerResponse;
-}
-
-function bodyOf(res: FakeRes): Record<string, unknown> {
-  return JSON.parse(res.body) as Record<string, unknown>;
-}
-
-interface ReqSpec {
-  method?: string | undefined;
-  url?: string | undefined;
-  headers?: Record<string, string> | undefined;
-  body?: string | undefined;
-  /** 流读取中断（覆盖 readBody 的 aborted → 400 分支）。 */
-  broken?: boolean | undefined;
-}
-
-function makeReq(spec: ReqSpec): IncomingMessage {
-  const raw = {
-    method: spec.method ?? "GET",
-    url: spec.url ?? "/",
-    headers: spec.headers ?? {},
-    async *[Symbol.asyncIterator]() {
-      if (spec.broken === true) {
-        throw new Error("aborted by peer");
-      }
-      if (spec.body !== undefined) {
-        yield Buffer.from(spec.body, "utf8");
-      }
-    },
-  };
-  return raw as unknown as IncomingMessage;
-}
-
-/** GET 端点调用样板。 */
-async function get(
-  host: FakeHost,
-  url: string,
-  headers?: Record<string, string>,
-): Promise<FakeRes> {
-  const res = makeRes();
-  await routeOf(host, url).handler(makeReq({ method: "GET", url, headers }), asRes(res));
-  return res;
-}
-
-/** 一次 GET providers 拿到的会话内 csrf token（写端点必须回填该头）。 */
-async function csrfOf(host: FakeHost): Promise<string> {
-  const res = await get(host, PROVIDERS_PATH);
-  return String(bodyOf(res)["csrf"]);
-}
-
-/** 写端点调用样板：带 csrf + 可选 body。 */
-async function post(
-  host: FakeHost,
-  url: string,
-  options: { body?: string; token?: string; headers?: Record<string, string> } = {},
-): Promise<FakeRes> {
-  const res = makeRes();
-  await routeOf(host, url).handler(
-    makeReq({
-      method: "POST",
-      url,
-      headers: {
-        [CSRF_HEADER]: options.token ?? (await csrfOf(host)),
-        ...options.headers,
-      },
-      body: options.body,
-    }),
-    asRes(res),
-  );
-  return res;
-}
-
-const REVIEW_JSON = JSON.stringify({
-  status: "success",
-  session_id: "sess-1",
-  summary: { files_reviewed: 2, comments: 1, total_tokens: 900, elapsed: "12s" },
-  comments: [
-    {
-      path: "src/a.ts",
-      content: "空指针风险",
-      start_line: "42",
-      end_line: 44,
-      category: "bug",
-      severity: "critical",
-    },
-  ],
-});
-
-function writeOcrConfig(doc: string): void {
-  writeFileSync(OCR_CONFIG, doc);
-}
-
-function configDoc(): ConfigDoc {
-  return JSON.parse(readFileSync(OCR_CONFIG, "utf8")) as ConfigDoc;
+  return {
+    signal: new AbortController().signal,
+    agent: cwd === undefined ? {} : { session: { header: { cwd } } },
+  } as HostExec;
 }
 
 /**
  * 起 count 条后台评审（并发起是安全的：容量闸只管活的，count <= 10）。
- * 循环体里不许 await（oxlint no-await-in-loop），故先攒 Promise 再一次 all。
- * 官方 id 是 `<kind>-<16 hex>`、由注册表当场按 randomUUID 截短发，拼不出字面量 ⇒
- * 这里按登记顺序交回**本批新登记**的 id，用例握住它们才能断「哪几条还在册」。
- * @param host 宿主替身
- * @param count 条数
- * @returns 本批登记的作业 id，按登记顺序
  */
 async function startBackgroundRuns(host: FakeHost, count: number): Promise<string[]> {
   const before = new Set(host.jobs.list().map((job) => String(job.id)));
@@ -1143,7 +972,6 @@ async function startBackgroundRuns(host: FakeHost, count: number): Promise<strin
     runs.push(toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec()));
   }
   await Promise.all(runs);
-  // 这批全是 running，而裁剪只动已落定的记录 ⇒ 差集必然一条不漏。
   return host.jobs
     .list()
     .map((job) => String(job.id))
@@ -1164,27 +992,28 @@ async function settleBackgroundRuns(host: FakeHost, from: number): Promise<void>
   await settledTick();
 }
 
-/** 本机网卡上的非回环 IPv4：`@jayyuen66/dsh-plugin-shared/lib/trust` 的 `interfaceAddresses`
- *  只认"确属本机网卡"的那批地址。
- *  取不到就响亮失败而不是跳过——这条用例是本仓唯一把 `servingNonLoopback` 拨到 **true**
- *  的接线（两包替身根本没有 `host` 成员，那道锁在真实接线上永为合着）。 */
-function lanIpv4(): string {
-  for (const infos of Object.values(networkInterfaces())) {
-    for (const info of infos ?? []) {
-      if (info.family === "IPv4" && !info.internal) {
-        return info.address;
-      }
-    }
-  }
-  throw new Error("这台机器上没有非回环 IPv4 网卡地址：非回环服务面的接线用例无法构造");
-}
-
 // ── 顶层 describe 与文件级钩子 ────────────────────────────────────────────
 //
 // 下面三条钩子（沙箱复位 / mock 进程结算 / 临时 home 清理）对整个文件生效，而
 // vitest(require-top-level-describe) 要求钩子必须在 describe 里，故本文件的全部
-// suite 收进同一层 describe：钩子的作用域、顺序与原来逐字一致，只是宿主容器换了名字。
-describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点）", () => {
+// suite 收进同一层 describe（钩子的作用域与顺序因此不变）。
+const REVIEW_JSON = JSON.stringify({
+  status: "success",
+  session_id: "sess-1",
+  summary: { files_reviewed: 2, comments: 1, total_tokens: 900, elapsed: "12s" },
+  comments: [
+    {
+      path: "src/a.ts",
+      content: "空指针风险",
+      start_line: "42",
+      end_line: 44,
+      category: "bug",
+      severity: "critical",
+    },
+  ],
+});
+
+describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote 方法）", () => {
   // ── 沙箱复位（每个用例只清外部 ocr CLI 的配置；宿主侧已无文件）────────────────
 
   beforeEach(() => {
@@ -1212,7 +1041,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
    * 为什么必须有这一位：官方注册表的周期泵只在**名册里有活作业**时按 `pumpPollMs` 自续
    * （本仓替身是 25ms），而 `兜底 deadline` 那条用例要 `vi.useFakeTimers()` 后一次推进
    * 2 小时。别条用例留下的活作业，它的泵**正好在假时间窗里重新挂上**时就会被当成那条用例
-   * 自己的拍白刷 ~28.8 万次；挂不挂上看调度 ⇒ 整文件在 1.3s / 8.6s / >20s（判超时）之间跳
+   * 自己的拍白刷掉整段假时间窗；挂不挂上看调度 ⇒ 整文件耗时跳档甚至判超时
    * （本机实测）。用例内的断言都在落定之前跑完，这一位不改判据只收尾。
    */
   afterEach(async () => {
@@ -1248,13 +1077,9 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       ]);
       expect(host.sections).toHaveLength(1);
       expect(host.sections[0]?.order).toBe(1555);
-      expect(host.registeredRoutes.map((route) => route.path).toSorted()).toStrictEqual([
-        MIGRATE_PATH,
-        PROBE_PATH,
-        PROVIDERS_PATH,
-        SELECT_PATH,
-        TEST_PATH,
-      ]);
+      expect(host.registeredRoutes, "HTTP 数据面已迁到官方 Remote").toStrictEqual([]);
+      // Remote 读面无条件上线：它的存在只由 apply 决定，与 webServer 是否到位无关。
+      expect(host.provided.has(OCR_REMOTE_NAMESPACE)).toBe(true);
     });
 
     it("行 config 的 undefined 字段落回 schema 默认（0.1.6 内置底座的等价面）", () => {
@@ -1273,6 +1098,20 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       applyPlugin(host);
       expect(host.registeredTools).toHaveLength(5);
       expect(host.registeredRoutes).toHaveLength(0);
+    });
+
+    it("remote 读面无 webServer 也上线，providers 走 apply 交进去的那组依赖", async () => {
+      const host = makeHost({ webServer: false });
+      applyPlugin(host);
+      const service = host.provided.get(OCR_REMOTE_NAMESPACE) as
+        | { providers: () => Promise<Record<string, unknown>> }
+        | undefined;
+      expect(service).toBeDefined();
+      const body = await service?.providers();
+      expect(body?.["ok"]).toBeUndefined();
+      expect(Array.isArray(body?.["providers"])).toBe(true);
+      // 读面不再下发会话内 token：卡片走官方网关，鉴权归网关。
+      expect(body !== undefined && "csrf" in body).toBe(false);
     });
 
     it("宿主服务面缺一即抛（守卫名副其实，不运行到一半才炸）", () => {
@@ -1935,7 +1774,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       expect(byChannel.get("stdout")).toBe("reviewing 12 files\n");
       expect(byChannel.get("stderr")).toBe("warn: rate limit\n");
       const settled = host.jobs.get(onlyJob(job));
-      // 注册表面的 `get()` 返回的就是记录本身（官方 d.ts 非可选，本文件另外 6 处也是直接取
+      // 注册表面的 `get()` 返回的就是记录本身（官方 d.ts 非可选，本文件别处也是直接取
       // 成员），且 `onlyJob` 已经先把「作业没登记」拦成响亮失败 ⇒ 这里不写 `?.`。
       expect(settled.status).toBe("completed");
       expect(settled.detail).toBe("exit code: 0");
@@ -2168,7 +2007,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       proc?.settle();
       await settledTick();
       // 与上面"取消经注册表收"那条同形：整串钉死（生产者结局 + 注册表追加的 reason），reason
-      // 按实际兜底窗口换算（默认 7200000ms ⇒ 120 分钟，不再写死"2 小时"）。原先只
+      // 按实际兜底窗口换算（这条用例自己配的 120 分钟，不写死文案里的"2 小时"）。原先只
       // `toContain(...)` 是字典值的一段 ⇒ 拼接次序坏了也不会红。
       expect(host.jobs.get(onlyJob(job)).detail).toBe(
         `killed before exit; ${format(MESSAGES.zh.jobReasonTimeout, { minutes: "120" })}`,
@@ -2530,369 +2369,6 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
 
   // ── webServer 端点 ──────────────────────────────────────────────────────────
 
-  describe("GET providers", () => {
-    let host: FakeHost;
-    beforeEach(() => {
-      host = makeHost();
-      applyPlugin(host);
-    });
-
-    it("下发 provider 列表与 csrf token，且不含 key 明文", async () => {
-      writeOcrConfig(
-        JSON.stringify({
-          provider: "sensenova",
-          custom_providers: {
-            sensenova: { model: SENSENOVA_MODEL, api_key_cmd: "node scripts/get-cred.mjs" },
-          },
-        }),
-      );
-      const res = await get(host, PROVIDERS_PATH);
-      expect(res.statusCode).toBe(200);
-      const payload = bodyOf(res);
-      expect(String(payload["csrf"])).toMatch(/[0-9a-f-]{36}/u);
-      expect(res.headers["cache-control"]).toBe("no-store");
-      const current = payload["current"] as Record<string, unknown>;
-      expect(current["provider"]).toBe("sensenova");
-      expect(current["keyIsDynamic"]).toBe(true);
-      expect(res.body).not.toContain(LIVE_KEY);
-      // provider 清单来自 settings.describe()：四条、带 hasKey，且不含任何 key 值。
-      const providers = payload["providers"] as Record<string, unknown>[];
-      expect(providers.map((entry) => entry["name"])).toStrictEqual([
-        "sensenova",
-        "xkiro",
-        "amd",
-        "antdigital",
-      ]);
-      expect((bodyOf(res)["source"] as Record<string, unknown>)["status"]).toBe("ready");
-    });
-
-    it("跨站请求 ⇒ 403；坏 JSON 的 config 仍能让卡片打开", async () => {
-      writeOcrConfig("{ broken");
-      const cross = await get(host, PROVIDERS_PATH, { "sec-fetch-site": FETCH_SITE_CROSS_SITE });
-      expect(cross.statusCode).toBe(403);
-      const res = await get(host, PROVIDERS_PATH, { "sec-fetch-site": FETCH_SITE_SAME_ORIGIN });
-      expect(res.statusCode).toBe(200);
-      expect((bodyOf(res)["current"] as Record<string, unknown>)["provider"]).toBe("");
-    });
-  });
-
-  // ── 官方通道的降级面（服务缺席 / 命名空间缺失 / 服务竞态）─────────────────────
-
-  describe("GET providers 的官方通道降级", () => {
-    it("credentials 缺席 ⇒ 清单照给但标记不可用，且一个 ref 都不去问", async () => {
-      const host = makeHost({ credentialsService: false });
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH);
-      const payload = bodyOf(res);
-      expect(res.statusCode).toBe(200);
-      expect((payload["source"] as Record<string, unknown>)["status"]).toBe(
-        "credentials-unavailable",
-      );
-      expect(String((payload["source"] as Record<string, unknown>)["message"])).toMatch(
-        /ctx\.credentials/u,
-      );
-      expect(host.describedRefs).toStrictEqual([]);
-      expect(
-        (payload["providers"] as Record<string, unknown>[]).map((entry) => entry["hasKey"]),
-      ).toStrictEqual([false, false, false, false]);
-    });
-
-    it("settings 服务缺席 ⇒ settings-unavailable + 空清单", async () => {
-      const host = makeHost({ settingsService: false });
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH);
-      const payload = bodyOf(res);
-      const source = payload["source"] as Record<string, unknown>;
-      expect(source["status"]).toBe("settings-unavailable");
-      expect(String(source["message"])).toMatch(/ctx\.settings/u);
-      expect(payload["providers"]).toStrictEqual([]);
-    });
-
-    it("describe() 里没有 llm-pi-ai 那条 ⇒ namespace-unavailable", async () => {
-      const host = makeHost({ descriptors: [{ ns: "ui-theme", value: { preference: "system" } }] });
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH);
-      const source = bodyOf(res)["source"] as Record<string, unknown>;
-      expect(source["status"]).toBe("namespace-unavailable");
-      expect(String(source["message"])).toMatch(/llm-pi-ai/u);
-      expect(bodyOf(res)["providers"]).toStrictEqual([]);
-    });
-
-    it("凭据服务半装配（只有 describe、没有 resolve）⇒ 一律按缺席降级", async () => {
-      const host = makeHost({ partialCredentials: true });
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH);
-      expect((bodyOf(res)["source"] as Record<string, unknown>)["status"]).toBe(
-        "credentials-unavailable",
-      );
-      expect(host.describedRefs).toStrictEqual([]);
-    });
-
-    it("探测通过后服务被卸载 ⇒ settings-failed（端点绝不抛穿成裸错误）", async () => {
-      const host = makeHost({ settingsVanishes: true });
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH);
-      const source = bodyOf(res)["source"] as Record<string, unknown>;
-      expect(res.statusCode).toBe(200);
-      expect(source["status"]).toBe("settings-failed");
-      expect(String(source["message"])).toMatch(/已不可用/u);
-    });
-
-    it("设置项 ocrConfigPath 覆盖默认位置：布局内的自定义路径卡片读写的就是那个文件", async () => {
-      // 布局必须是 <X>/.opencodereview/config.json（OCR 端只认这个形状，插件经
-      // HOME 注入让它生效）。
-      const custom = path.join(HOME, "elsewhere", OCR_DIR_NAME, "config.json");
-      mkdirSync(path.dirname(custom), { recursive: true });
-      writeFileSync(custom, '{"provider":"fromcustom","custom_providers":{}}');
-      const host = makeHost();
-      applyPlugin(host);
-      host.settingsValue["ocrConfigPath"] = custom;
-      const res = await get(host, PROVIDERS_PATH);
-      expect((bodyOf(res)["current"] as Record<string, unknown>)["provider"] as string).toBe(
-        "fromcustom",
-      );
-      expect(existsSync(OCR_CONFIG)).toBe(false);
-    });
-
-    it("ocrConfigPath 布局外的绝对路径 ⇒ 500 + 可读原因（写下去 OCR 也不会读，绝不静默失配）", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      host.settingsValue["ocrConfigPath"] = path.join(HOME, "elsewhere", "ocr.json");
-      const res = await get(host, PROVIDERS_PATH);
-      expect(res.statusCode).toBe(500);
-      expect(String(bodyOf(res)["error"])).toMatch(/布局/u);
-    });
-
-    it("ocrConfigPath 留空白 ⇒ 仍按 os.homedir() 派生默认位置", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      host.settingsValue["ocrConfigPath"] = "   ";
-      writeOcrConfig('{"provider":"bydefault"}');
-      const res = await get(host, PROVIDERS_PATH);
-      expect((bodyOf(res)["current"] as Record<string, unknown>)["provider"]).toBe("bydefault");
-    });
-
-    it("ocrConfigPath 是相对路径 ⇒ 500 + 可读原因（配置绝不落到当时工作区）", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      host.settingsValue["ocrConfigPath"] = "relative/ocr.json";
-      const res = await get(host, PROVIDERS_PATH);
-      expect(res.statusCode).toBe(500);
-      expect(String(bodyOf(res)["error"])).toMatch(/必须是绝对路径/u);
-    });
-  });
-
-  describe("POST select", () => {
-    let host: FakeHost;
-    beforeEach(() => {
-      host = makeHost();
-      applyPlugin(host);
-    });
-
-    it("应用 provider/model：原子写 + .bak + 同条目其它键与未知顶层键保留", async () => {
-      writeOcrConfig(
-        JSON.stringify(
-          {
-            language: "en",
-            mcp_servers: { zvec: { cmd: "x" } },
-            custom_providers: {
-              sensenova: {
-                api_key: PLAIN_KEY,
-                extra_headers: { "x-a": "1" },
-                temperature: 0.3,
-                timeout_seconds: 99,
-              },
-            },
-          },
-          null,
-          2,
-        ),
-      );
-      host.shell.scripts.push({ exitCode: 0, stdoutText: "llm ok" });
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "sensenova", model: SENSENOVA_MODEL }),
-      });
-      expect(res.statusCode).toBe(200);
-      const doc = configDoc();
-      const entry = doc.custom_providers?.["sensenova"];
-      expect(entry?.["api_key"]).toBeUndefined();
-      expect(String(entry?.["api_key_cmd"])).toContain("get-cred.mjs");
-      expect(entry?.["extra_headers"]).toStrictEqual({ "x-a": "1" });
-      expect(entry?.["temperature"]).toBe(0.3);
-      expect(entry?.["timeout_seconds"]).toBe(99);
-      expect(doc["mcp_servers"]).toStrictEqual({ zvec: { cmd: "x" } });
-      expect(doc.provider).toBe("sensenova");
-      expect(doc.language).toBe("中文");
-      expect(existsSync(`${OCR_CONFIG}.bak`)).toBe(true);
-      expect(statSync(OCR_CONFIG).mode % 0o1000).toBe(0o600);
-      expect(res.body).not.toContain(PLAIN_KEY);
-      const payload = bodyOf(res);
-      expect((payload["llmTest"] as Record<string, unknown>)["ok"]).toBe(true);
-      expect(payload["applied"]).toStrictEqual({
-        provider: "sensenova",
-        model: SENSENOVA_MODEL,
-        url: "https://token.sensenova.cn/v1",
-        protocol: "openai",
-      });
-    });
-
-    it("autoVerify=false ⇒ 不调 llm test；language 设置随 config 落盘", async () => {
-      host.settingsValue["autoVerify"] = false;
-      host.settingsValue["language"] = "English";
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "amd", model: AMD_MODEL }),
-      });
-      expect(bodyOf(res)["llmTest"]).toBeNull();
-      expect(configDoc().language).toBe("English");
-      expect(host.shell.resolveCalls).toHaveLength(0);
-    });
-
-    it("设置语言非卡片两选项 ⇒ 不写 language 键；llm test 失败仍算应用成功", async () => {
-      host.settingsValue["language"] = "日本語";
-      host.shell.scripts.push({ exitCode: 1, stderrText: "401 unauthorized" });
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "amd", model: AMD_MODEL }),
-      });
-      expect(res.statusCode).toBe(200);
-      expect(bodyOf(res)["ok"]).toBe(true);
-      expect((bodyOf(res)["llmTest"] as Record<string, unknown>)["ok"]).toBe(false);
-      expect(configDoc().language).toBeUndefined();
-    });
-
-    it("缺 csrf / 错 csrf / 跨站 / 非 POST / 超限 body / 断流各有专属回执", async () => {
-      const missing = await post(host, SELECT_PATH, { token: "", body: "{}" });
-      expect(missing.statusCode).toBe(403);
-      expect(bodyOf(missing)["error"]).toMatch(/csrf/u);
-      const wrong = await post(host, SELECT_PATH, { token: "nope", body: "{}" });
-      expect(wrong.statusCode).toBe(403);
-      const cross = await post(host, SELECT_PATH, {
-        body: "{}",
-        headers: { "sec-fetch-site": FETCH_SITE_CROSS_SITE },
-      });
-      expect(cross.statusCode).toBe(403);
-      const notPost = await get(host, SELECT_PATH);
-      expect(notPost.statusCode).toBe(405);
-      expect(notPost.headers["Allow"]).toBe("POST");
-      const declared = await post(host, SELECT_PATH, {
-        body: "x".repeat(9000),
-        headers: { "content-length": "9000" },
-      });
-      expect(declared.statusCode).toBe(413);
-      const streamed = await post(host, SELECT_PATH, { body: "x".repeat(9000) });
-      expect(streamed.statusCode).toBe(413);
-      const abortedRes = makeRes();
-      await routeOf(host, SELECT_PATH).handler(
-        makeReq({
-          method: "POST",
-          url: SELECT_PATH,
-          headers: { [CSRF_HEADER]: await csrfOf(host) },
-          broken: true,
-        }),
-        asRes(abortedRes),
-      );
-      expect(abortedRes.statusCode).toBe(400);
-      expect(bodyOf(abortedRes)["error"]).toMatch(/unreadable/u);
-    });
-
-    it("body 非对象 / provider+model 缺失 / 应用失败 ⇒ 400 且错误可读", async () => {
-      const notObject = await post(host, SELECT_PATH, { body: "[1,2]" });
-      expect(notObject.statusCode).toBe(400);
-      expect(bodyOf(notObject)["error"]).toMatch(/body 解析失败/u);
-      const missingModel = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "x" }),
-      });
-      expect(bodyOf(missingModel)["error"]).toMatch(/必填/u);
-      const nonStringProvider = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: 42, model: "m" }),
-      });
-      expect(bodyOf(nonStringProvider)["error"]).toMatch(/必填/u);
-      const garbage = await post(host, SELECT_PATH, { body: "{ nope" });
-      expect(bodyOf(garbage)["error"]).toMatch(/body 解析失败/u);
-      const unknown = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "nope", model: "m" }),
-      });
-      expect(bodyOf(unknown)["error"]).toMatch(/不在 dsh 配置的 llm-pi-ai\.providers 列表/u);
-    });
-  });
-
-  describe("POST select 的凭据闸与降级", () => {
-    it("应用成功：api_key_cmd 里只有 ref 名，凭据服务给的明文绝不出回执与配置", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      host.shell.scripts.push({ exitCode: 0, stdoutText: "ok" });
-      // 先单独取 token：post 帮助函数内部的 GET providers 也会问一遍 describe，
-      // 只有先记下次数才能证明「select 这一步走的是 resolve，不是 describe」。
-      const token = await csrfOf(host);
-      const describedBefore = host.describedRefs.length;
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "amd", model: AMD_MODEL }),
-        token,
-      });
-      expect(res.statusCode).toBe(200);
-      expect(res.body).not.toContain(LIVE_KEY);
-      expect(host.resolvedRefs).toStrictEqual(["AMD_API_KEY"]);
-      expect(host.describedRefs).toHaveLength(describedBefore);
-      const doc = configDoc();
-      expect(String(doc.custom_providers?.["amd"]?.["api_key_cmd"])).toContain("AMD_API_KEY");
-      expect(readFileSync(OCR_CONFIG, "utf8")).not.toContain(LIVE_KEY);
-    });
-
-    it("凭据 resolve 未命中 ⇒ 400 并点名 ref（不写半截配置）", async () => {
-      const host = makeHost({ configured: ["SENSENOVA_API_KEY"] });
-      applyPlugin(host);
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "amd", model: AMD_MODEL }),
-      });
-      expect(res.statusCode).toBe(400);
-      expect(String(bodyOf(res)["error"])).toMatch(/未解析到 AMD_API_KEY/u);
-      expect(existsSync(OCR_CONFIG)).toBe(false);
-    });
-
-    it("provider 未声明 apiKeyEnv ⇒ 400（OCR 自定义 provider 不支持无 key）", async () => {
-      const host = makeHost({
-        descriptors: descriptorsWithValue({
-          providers: { nokey: { baseURL: "https://n", models: [] } },
-        }),
-      });
-      applyPlugin(host);
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "nokey", model: "m" }),
-      });
-      expect(String(bodyOf(res)["error"])).toMatch(/未声明 apiKeyEnv/u);
-      expect(host.resolvedRefs).toStrictEqual([]);
-    });
-
-    it("apiKeyEnv 不合官方 ref 语法 ⇒ 判未配置且不去烦凭据服务", async () => {
-      const host = makeHost({
-        descriptors: descriptorsWithValue({
-          providers: {
-            weird: {
-              baseURL: "https://w",
-              apiKeyEnv: "bad key!",
-              models: [{ id: "m", name: "m" }],
-            },
-          },
-        }),
-      });
-      applyPlugin(host);
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "weird", model: "m" }),
-      });
-      expect(String(bodyOf(res)["error"])).toMatch(/未解析到 bad key!/u);
-      expect(host.resolvedRefs).toStrictEqual([]);
-    });
-
-    it("数据源不可用 ⇒ 400 直接给降级原因", async () => {
-      const host = makeHost({ credentialsService: false });
-      applyPlugin(host);
-      const res = await post(host, SELECT_PATH, {
-        body: JSON.stringify({ provider: "amd", model: AMD_MODEL }),
-      });
-      expect(res.statusCode).toBe(400);
-      expect(String(bodyOf(res)["error"])).toMatch(/ctx\.credentials/u);
-    });
-  });
-
   describe("createGateway 的官方通道门面", () => {
     type GatewayArg = Parameters<typeof createGateway>[0];
 
@@ -2911,6 +2387,11 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
     it("descriptors() 原样透传 settings.describe()（不做任何 YAML 再解析）", () => {
       const gateway = createGateway(makeHost() as unknown as GatewayArg);
       expect(gateway.descriptors().map((descriptor) => descriptor.ns)).toContain("llm-pi-ai");
+    });
+
+    it("descriptors() 在 settings 服务缺席时抛可读错，不返回空表", () => {
+      const gateway = createGateway(makeHost({ settingsService: false }) as unknown as GatewayArg);
+      expect(() => gateway.descriptors()).toThrow(/设置服务/u);
     });
 
     it("credentialConfigured 走 describe、credentialSource 走 resolve，只回存在性/层 id", async () => {
@@ -2954,439 +2435,6 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
     it("凭据服务 resolve 抛错 ⇒ 按未配置处理（应用据此拒绝，热路径不炸）", async () => {
       const gateway = createGateway(makeHost({ credentialsReject: true }) as unknown as GatewayArg);
       await expect(gateway.credentialSource("AMD_API_KEY")).resolves.toBeUndefined();
-    });
-  });
-
-  describe("POST migrate / test", () => {
-    let host: FakeHost;
-    beforeEach(() => {
-      host = makeHost();
-      applyPlugin(host);
-    });
-
-    it("migrate 读尽 body 并迁移明文 key（未知 provider 只报不动）", async () => {
-      writeOcrConfig(
-        JSON.stringify({
-          custom_providers: {
-            sensenova: { api_key: PLAIN_KEY },
-            mystery: { api_key: `sk-${"z".repeat(20)}1234` },
-          },
-        }),
-      );
-      const res = await post(host, MIGRATE_PATH, { body: "ignored-but-drained" });
-      expect(res.statusCode).toBe(200);
-      const payload = bodyOf(res);
-      expect(payload["migrated"]).toStrictEqual(["sensenova"]);
-      expect(payload["skippedUnknown"]).toStrictEqual(["mystery"]);
-      expect(existsSync(`${OCR_CONFIG}.bak`)).toBe(true);
-      expect(configDoc().custom_providers?.["sensenova"]?.["api_key"]).toBeUndefined();
-    });
-
-    it("坏 config.json ⇒ migrate 抛错被兜成 400（不再静默覆盖用户配置）", async () => {
-      writeOcrConfig("{ broken");
-      const res = await post(host, MIGRATE_PATH);
-      expect(res.statusCode).toBe(400);
-      expect(bodyOf(res)["error"]).toMatch(/已中止写入以保护既有配置/u);
-      expect(readFileSync(OCR_CONFIG, "utf8")).toBe("{ broken");
-    });
-
-    it("test 走 ocr llm test 并把 key 形态脱敏后回执", async () => {
-      host.shell.scripts.push({
-        exitCode: 0,
-        stdoutText: "ok provider=sensenova",
-        stderrText: `note ${PLAIN_KEY} accepted`,
-      });
-      const res = await post(host, TEST_PATH);
-      expect(bodyOf(res)["ok"]).toBe(true);
-      expect(String(bodyOf(res)["output"])).toContain("provider=sensenova");
-      expect(res.body).not.toContain(PLAIN_KEY);
-      // 与五个工具同一命令词解析源（buildLlmTestCommand）：随包装法下 PATH 上没有裸 ocr。
-      expect(host.shell.resolveCalls[0]?.command).toBe(buildLlmTestCommand());
-      expect(host.shell.resolveCalls[0]?.workdir).toBe(HOME);
-    });
-
-    it("test 只有 stderr 时也能回执", async () => {
-      host.shell.scripts.push({ exitCode: 1, stdoutText: "", stderrText: "仅错误输出" });
-      const res = await post(host, TEST_PATH);
-      expect(bodyOf(res)["ok"]).toBe(false);
-      expect(String(bodyOf(res)["output"])).toBe("仅错误输出");
-    });
-
-    it("llm test 回显的 8000 码元切点咬住代理对 ⇒ 回执不留孤立代理", async () => {
-      // runCollect 的 8000 切点只到设置页 HTTP 回显（不进会话日志），但半枚代理同样
-      // 让卡片上长出乱码。8001 = 4 + 11×727 ⇒ 第 8000 码元正是 👦 的高代理。
-      const stdoutText = `前缀哨兵${FAMILY.repeat(727)}`;
-      expect(stdoutText).toHaveLength(8001);
-      // 牙齿：裸切在这里确实留下了一枚孤高代理。
-      expect(stdoutText.slice(0, 8000).isWellFormed()).toBe(false);
-      host.shell.scripts.push({ exitCode: 0, stdoutText, stderrText: "" });
-      const res = await post(host, TEST_PATH);
-      const output = String(bodyOf(res)["output"]);
-      // 7999 = 8000 预算减掉 truncateEnd 丢掉的那枚高代理；仍是从头截起，不是截中间。
-      expect(output).toHaveLength(7999);
-      expect(output.isWellFormed()).toBe(true);
-      expect(stdoutText.startsWith(output)).toBe(true);
-    });
-
-    it("test 的 shell 抛非 Error 值 ⇒ 400 + String(error)", async () => {
-      host.shell.scripts.push({ throws: "shell exploded" });
-      const res = await post(host, TEST_PATH);
-      expect(res.statusCode).toBe(400);
-      expect(bodyOf(res)["error"]).toBe("shell exploded");
-    });
-
-    it("HOME 未设置 ⇒ llm test 的工作区兜底到根目录", async () => {
-      const saved = process.env["HOME"];
-      delete process.env["HOME"];
-      host.shell.scripts.push({ exitCode: 0, stdoutText: "ok" });
-      try {
-        const res = await post(host, TEST_PATH);
-        expect(bodyOf(res)["ok"]).toBe(true);
-        expect(host.shell.resolveCalls[0]?.workdir).toBe("/");
-      } finally {
-        if (saved !== undefined) {
-          process.env["HOME"] = saved;
-        }
-      }
-    });
-
-    it("migrate/test 非 POST 一律 405，不读 body", async () => {
-      const migrated = await get(host, MIGRATE_PATH);
-      const tested = await get(host, TEST_PATH);
-      expect(migrated.statusCode).toBe(405);
-      expect(tested.statusCode).toBe(405);
-    });
-  });
-
-  describe("probe 端点：ocr version 的状态回执", () => {
-    let host: FakeHost;
-    const VERSION_OUT = "open-code-review v1.12.13 darwin/arm64\n";
-
-    beforeEach(() => {
-      host = makeHost();
-      applyPlugin(host);
-    });
-
-    it("exit 0 且读得出版本 ⇒ ok:true，并恒定带上 OCR_NO_UPDATE", async () => {
-      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OUT, stderrText: "" });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(true);
-      expect(body["version"]).toBe("1.12.13");
-      expect(body["reason"]).toBe("");
-      // 这条是本端点的全部意义：状态**读**侧不许有写侧副作用。少了它，按下「检测」就
-      // 顺带触发了 CLI 那层 npm 包装的全局安装（scripts/update.js 见到更新版本直接
-      // spawnSync `npm i -g <pkg>@<latest>`）。
-      const [spec] = host.shell.resolveCalls;
-      expect(spec?.env).toStrictEqual({ OCR_NO_UPDATE: "1" });
-      // 与 host.ts 的 VERSION_PROBE_TIMEOUT_MS 同值：改常量就得同时改这里，
-      // 这条断言是那道墙钟唯一的针。
-      expect(spec?.timeoutMs).toBe(15_000);
-      expect(String(spec?.command)).toContain(" version");
-      // 版本核对随回执一起走：卡片要能当场说「这与你机器上那份是不是同一版」，
-      // 而不是把两个数字丢给用户自己去比。
-      expect(body["expectedVersion"]).toBe(EXPECTED_OCR_CLI_VERSION);
-      expect(body["consistent"]).toBe(false);
-      // presentProbe 报的是 npm 渠道那份 ⇒ 命令说 npm，不给一条动他包管理器的 brew。
-      expect(String(body["changeText"])).toContain(
-        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
-      );
-    });
-
-    it("实测与核对版本同一版 ⇒ consistent:true 且不给换版命令", async () => {
-      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OK_OUT, stderrText: "" });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(true);
-      expect(body["consistent"]).toBe(true);
-      // 一致的时候多嘴一句「怎么换版」是噪音，这条针挡的就是它。
-      expect(body["changeText"]).toBe("");
-    });
-
-    it("压根没装 ⇒ 读不出版本也给换版命令（那正是用户当下要做的事）", async () => {
-      const offline = makeHost();
-      applyPlugin(offline, noneProbe);
-      offline.shell.scripts.push({
-        exitCode: 127,
-        stdoutText: "",
-        stderrText: "bash: ocr: command not found",
-      });
-      const body = bodyOf(await post(offline, PROBE_PATH));
-      expect(body["consistent"]).toBeNull();
-      expect(String(body["changeText"])).toContain(BREW_INSTALL);
-    });
-
-    it("只是超时、候选还在 ⇒ 不给命令（那句装法回答的不是这个问题）", async () => {
-      host.shell.scripts.push({ exitCode: null, timedOut: true });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["consistent"]).toBeNull();
-      expect(body["changeText"]).toBe("");
-    });
-
-    it("检测一次就落进本次 apply 的闭包：providers 载荷读的是那份实测值", async () => {
-      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OK_OUT });
-      await post(host, PROBE_PATH);
-      const body = bodyOf(await get(host, PROVIDERS_PATH));
-      expect((body["ocrBinary"] as Record<string, unknown>)["measuredVersion"]).toBe(
-        EXPECTED_OCR_CLI_VERSION,
-      );
-    });
-
-    it("上游那句带颜色码的升级提示 ⇒ 回执里不留控制字符（那行是要复制进终端的）", async () => {
-      // launcher 的提示硬编码 \x1b[33m，`--color never` 管不到（那句在 JS 包装层打印）。
-      // 不剥的话浏览器里显示成 `[33m …[0m` 噪声，而用户选中复制到的也是带 ESC 的脏命令。
-      const ESC = String.fromCodePoint(27);
-      host.shell.scripts.push({
-        exitCode: 0,
-        stdoutText: VERSION_OUT,
-        stderrText:
-          `${ESC}[33m[ocr] A new version (v1.13.0) is available. Run to update:${ESC}[0m\n` +
-          `${ESC}[33m  npm i -g @alibaba-group/open-code-review@1.13.0${ESC}[0m\n`,
-      });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(true);
-      expect(body["version"]).toBe("1.12.13");
-      expect(String(body["output"])).not.toContain(ESC);
-      expect(String(body["output"])).toContain("npm i -g @alibaba-group/open-code-review@1.13.0");
-    });
-
-    it("包管理器装到 PATH 上那份的自述不带 v ⇒ 版本号照样读得出来", async () => {
-      // 随包的 Go 构建塞的是 git tag（带 v），brew 那份塞的是裸 semver。只认前一种的话，
-      // 按 PATH 装法的人按下「检测版本」看到的是「跑通了但没有版本号」——功能是坏的。
-      host.shell.scripts.push({
-        exitCode: 0,
-        stdoutText: "open-code-review 1.12.13 darwin/arm64\n",
-        stderrText: "",
-      });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(true);
-      expect(body["version"]).toBe("1.12.13");
-    });
-
-    it("exit 127 ⇒ 理由落到「找不到命令」，而不是「执行失败（exit=127）」", async () => {
-      host.shell.scripts.push({
-        exitCode: 127,
-        stdoutText: "",
-        stderrText: "bash: ocr: command not found",
-      });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(false);
-      expect(body["version"]).toBeNull();
-      expect(String(body["reason"])).toBe(zh.execNotFound);
-    });
-
-    it("exit 1（随包入口在、平台二进制缺失那一档）⇒ 一手输出原样带回，那句 [ERROR] 得看得见", async () => {
-      host.shell.scripts.push({
-        exitCode: 1,
-        stdoutText: "",
-        stderrText:
-          "[ERROR] OpenCodeReview binary not found. Run: npm install -g @alibaba-group/open-code-review",
-      });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(false);
-      expect(String(body["reason"])).toContain("exit=1");
-      expect(String(body["output"])).toContain("binary not found");
-    });
-
-    it("exit 0 但读不出版本（未发布构建的 dev）⇒ ok:false 并给出理由，不编一个版本号", async () => {
-      host.shell.scripts.push({ exitCode: 0, stdoutText: "open-code-review dev linux/amd64\n" });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(false);
-      expect(body["version"]).toBeNull();
-      expect(String(body["reason"])).toBe(zh.probeNoVersion);
-    });
-
-    it("墙钟把进程收走 ⇒ 理由是「超时 + 实际生效的秒数」，而不是一个不存在的退出码", async () => {
-      // 超时那档执行器交回的是 exitCode:null（进程是被杀掉的，没有退出码可报）。只读
-      // exitCode 的调用方会把它写成「执行失败（exit=null）」，把人指去查一个不存在的返回值。
-      host.shell.scripts.push({ exitCode: null, timedOut: true });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(false);
-      expect(body["version"]).toBeNull();
-      // 秒数取自 VERSION_PROBE_TIMEOUT_MS，与上面那条 15_000 的墙钟针同源。
-      expect(String(body["reason"])).toContain("15");
-      expect(String(body["reason"])).not.toContain("exit=");
-      expect(String(body["reason"])).not.toContain("null");
-    });
-
-    it("ocrConfigPath 命中布局 ⇒ probe 也带 HOME= 前缀（状态与评审吃同一个世界）", async () => {
-      // launcher 那句「自动更新没成功」的提示写在 $HOME/.opencodereview/ 下；不跟着
-      // 重定向，卡片读到的就是另一个世界的状态。
-      const customHome = path.join(HOME, "probe-home");
-      const custom = path.join(customHome, OCR_DIR_NAME, OCR_CONFIG_NAME);
-      mkdirSync(path.dirname(custom), { recursive: true });
-      host.settingsValue["ocrConfigPath"] = custom;
-      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OUT, stderrText: "" });
-      await post(host, PROBE_PATH);
-      // 单层引号即可：probe 与 llm test 同档，不套宿主回收守护，所以没有守护那层二次
-      // 转义（review/scan 的断言里看到的是 '\'' 形态）。
-      const guarded = host.shell.resolveCalls[0]?.command ?? "";
-      expect(guarded.startsWith(`HOME=${shq(customHome)} `)).toBe(true);
-      // 未设置时命令不含 HOME=：默认路径零重定向。
-      host.settingsValue["ocrConfigPath"] = undefined;
-      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OUT, stderrText: "" });
-      await post(host, PROBE_PATH);
-      expect(String(host.shell.resolveCalls[1]?.command)).not.toContain("HOME=");
-    });
-
-    it("HOME 未设置 ⇒ probe 的工作区兜底到根目录（与 llm test 同一分工）", async () => {
-      const saved = process.env["HOME"];
-      delete process.env["HOME"];
-      host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OUT, stderrText: "" });
-      try {
-        const body = bodyOf(await post(host, PROBE_PATH));
-        expect(body["ok"]).toBe(true);
-        const [spec] = host.shell.resolveCalls;
-        expect(spec?.workdir).toBe("/");
-      } finally {
-        if (saved !== undefined) {
-          process.env["HOME"] = saved;
-        }
-      }
-    });
-
-    it("缺 csrf 头 403、非 POST 405（新路由同样吃这套前置）", async () => {
-      const anonymous = await post(host, PROBE_PATH, { token: "" });
-      expect(anonymous.statusCode).toBe(403);
-      const viaGet = await get(host, PROBE_PATH);
-      expect(viaGet.statusCode).toBe(405);
-    });
-
-    it("shell 服务抛错 ⇒ 400 + 可读错误，而不是把请求挂住", async () => {
-      host.shell.scripts.push({ throws: new Error("shell down") });
-      const body = bodyOf(await post(host, PROBE_PATH));
-      expect(body["ok"]).toBe(false);
-      expect(String(body["error"])).toContain("shell down");
-    });
-  });
-
-  describe("parseJsonBody", () => {
-    it("空 body 视为 {}，非对象抛错", () => {
-      expect(parseJsonBody("   ", zh)).toStrictEqual({});
-      expect(parseJsonBody('{"a":1}', zh)).toStrictEqual({ a: 1 });
-      expect(() => parseJsonBody("[1]", zh)).toThrow(/必须是 JSON 对象/u);
-    });
-  });
-
-  describe("配置端点的生命周期：五条路由的释放器", () => {
-    const FIVE_PATHS = [MIGRATE_PATH, PROBE_PATH, PROVIDERS_PATH, SELECT_PATH, TEST_PATH];
-
-    it("释放器挂在注入子 fiber 上：摘干净后能重新注册，热重载不撞名", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      expect(host.registeredRoutes.map((route) => route.path).toSorted()).toStrictEqual(FIVE_PATHS);
-      // 先跑**主 fiber** 那一队（只该有后台作业那条效应）：五条路由不该归它管。
-      // 归了管这条就红——子 fiber 才是 webServer 换实例时先卸后装的那一层
-      // （cordis registry.d.ts:97），挂错地方的后果是重载时旧路由还占着路径。
-      for (const dispose of host.effectDisposers) {
-        dispose();
-      }
-      expect(host.registeredRoutes, "主 fiber 的效应不该管路由").toHaveLength(5);
-      for (const dispose of host.injectEffectDisposers) {
-        dispose();
-      }
-      expect(host.registeredRoutes, "子 fiber 释放后五条路由都该摘掉").toStrictEqual([]);
-      // 摘得干净才谈得上重装：DSH_HOT_RELOAD=1 下改本文件任意一行，走的正是
-      // 「旧 fiber dispose ⇒ 新 apply」这一对。
-      // `applyPlugin` 返回 void ⇒ 箭头必须带花括号（本仓 lint 的 no-confusing-void-expression：
-      // 简写箭头把 void 表达式当返回值交出去，读起来像"断言在检查那个值"）。
-      expect(() => {
-        applyPlugin(host);
-      }).not.toThrow();
-      expect(host.registeredRoutes.map((route) => route.path).toSorted()).toStrictEqual(FIVE_PATHS);
-      const res = await get(host, PROVIDERS_PATH);
-      expect(res.statusCode).toBe(200);
-    });
-
-    it("不摘就再 apply ⇒ 当场撞名抛错（钉住替身复刻了官方查重，不是假件放行）", () => {
-      const host = makeHost();
-      applyPlugin(host);
-      // 官方判据：installed dsh-host-webserver/lib/index.js:179。替身若不抛，上面那条
-      // "摘干净才能重装"就没有对照物。
-      expect(() => {
-        applyPlugin(host);
-      }).toThrow(/webserver: duplicate exact route/u);
-    });
-  });
-
-  describe("registerConfigEndpoints 的 token 来源", () => {
-    it("csrf 由调用方给定 ⇒ providers 原样下发（host 只负责每次 apply 换新值）", async () => {
-      const host = makeHost();
-      registerConfigEndpoints(
-        // 直接调用时 ctx 给的是同一枚替身：它有 `effect`（FakeHost 的那一队），也有 `get`。
-        host as unknown as Parameters<typeof registerConfigEndpoints>[0],
-        host as unknown as Parameters<typeof registerConfigEndpoints>[1],
-        // 替身只复刻「稳定引用 + 现读值」这一语义，逐字段的 Volatile<T> 类型面由
-        // host.ts 那侧的 Config 声明守住（这里按形参类型收口，不必逐字段造引用）。
-        liveConfig(host) as unknown as Parameters<typeof registerConfigEndpoints>[2],
-        "fixed-token",
-        // 装载期自检与实测版本的现读口：本用例不关心，给恒空；可用性复用模块级替身。
-        { verifyOf: () => null, availability: presentProbe, versionSink: { value: null } },
-      );
-      const res = await get(host, PROVIDERS_PATH);
-      expect(bodyOf(res)["csrf"]).toBe("fixed-token");
-    });
-  });
-
-  describe("装载期端点自检", () => {
-    it("startupVerify=true ⇒ 失败结论随 providers 载荷下发", async () => {
-      const host = makeHost();
-      host.settingsValue["startupVerify"] = true;
-      host.shell.scripts.push({
-        exitCode: 1,
-        stdoutText: "MissingSessionID: x-opencode-session required",
-      });
-      applyPlugin(host);
-      await settledTick();
-      const res = await get(host, PROVIDERS_PATH);
-      expect(bodyOf(res)["endpointVerify"]).toStrictEqual({
-        ok: false,
-        message: "MissingSessionID: x-opencode-session required",
-      });
-    });
-
-    it("startupVerify=true 且端点通 ⇒ ok=true、message 为空串", async () => {
-      const host = makeHost();
-      host.settingsValue["startupVerify"] = true;
-      host.shell.scripts.push(LLM_TEST_OK);
-      applyPlugin(host);
-      await settledTick();
-      const res = await get(host, PROVIDERS_PATH);
-      expect(bodyOf(res)["endpointVerify"]).toStrictEqual({ ok: true, message: "" });
-    });
-
-    it("startupVerify=false（夹具默认）⇒ 不起进程，载荷里是 null", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      await settledTick();
-      const res = await get(host, PROVIDERS_PATH);
-      expect(bodyOf(res)["endpointVerify"]).toBeNull();
-      expect(host.shell.resolveCalls).toHaveLength(0);
-    });
-
-    it("同一宿主两次 apply 得到不同 token（旧 token 随即失效）", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      const first = await csrfOf(host);
-      const secondHost = makeHost();
-      applyPlugin(secondHost);
-      const second = await csrfOf(secondHost);
-      expect(first).toMatch(/[0-9a-f-]{36}/u);
-      expect(second).not.toBe(first);
-      const stale = await post(host, MIGRATE_PATH, { token: second });
-      expect(stale.statusCode).toBe(403);
-    });
-
-    it("startupVerify=true 时装载期也测一次版本：那条命令词与五个工具用的是同一个解析源", async () => {
-      const host = makeHost();
-      host.settingsValue["startupVerify"] = true;
-      // apply 里两行调用的先后即 resolve 的先后：先端点自检、后版本探测。
-      host.shell.scripts.push(LLM_TEST_OK, { exitCode: 0, stdoutText: VERSION_OK_OUT });
-      applyPlugin(host);
-      await settledTick();
-      expect(String(host.shell.resolveCalls[1]?.command)).toMatch(/ version$/u);
-      const body = bodyOf(await get(host, PROVIDERS_PATH));
-      expect((body["ocrBinary"] as Record<string, unknown>)["measuredVersion"]).toBe(
-        EXPECTED_OCR_CLI_VERSION,
-      );
     });
   });
 
@@ -3537,285 +2585,6 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       expect(empty.sessionOutput).toBe(MESSAGES.en.sessionEmpty);
       expect(empty.hint).toBe(MESSAGES.en.sessionResumeHint);
     });
-
-    it("端点回执按 en：必填闸、body 闸、降级原因与 500 的可读 error", async () => {
-      const host = makeHost({ locale: { preference: "en" } });
-      applyPlugin(host);
-      const missing = await post(host, SELECT_PATH, { body: JSON.stringify({ provider: "amd" }) });
-      expect(String(bodyOf(missing)["error"])).toBe(MESSAGES.en.providerModelRequired);
-      const garbage = await post(host, SELECT_PATH, { body: "[1,2]" });
-      expect(String(bodyOf(garbage)["error"])).toBe(
-        "failed to parse the body: body must be a JSON object",
-      );
-      host.settingsValue["ocrConfigPath"] = "relative/ocr.json";
-      const broken = await get(host, PROVIDERS_PATH);
-      expect(broken.statusCode).toBe(500);
-      expect(String(bodyOf(broken)["error"])).toBe(
-        "the ocrConfigPath setting must be absolute or start with ~: relative/ocr.json",
-      );
-      const credless = makeHost({ locale: { preference: "en" }, credentialsService: false });
-      applyPlugin(credless);
-      const degraded = await get(credless, PROVIDERS_PATH);
-      expect(String((bodyOf(degraded)["source"] as Record<string, unknown>)["message"])).toBe(
-        MESSAGES.en.sourceCredentialsUnavailable,
-      );
-      expect(degraded.body).not.toContain(LIVE_KEY);
-      const vanished = makeHost({ locale: { preference: "en" }, settingsVanishes: true });
-      applyPlugin(vanished);
-      const gone = await get(vanished, PROVIDERS_PATH);
-      const goneSource = bodyOf(gone)["source"] as Record<string, unknown>;
-      expect(String(goneSource["status"])).toBe("settings-failed");
-      expect(String(goneSource["message"])).toBe(
-        "calling the dsh settings service failed: the settings service holding llm-pi-ai became unavailable while being read",
-      );
-    });
-
-    it("migrate 的写侧错误按 en 回执（坏 JSON 仍绝不覆盖用户配置）", async () => {
-      const host = makeHost({ locale: { preference: "en" } });
-      applyPlugin(host);
-      writeOcrConfig("{ broken");
-      const res = await post(host, MIGRATE_PATH);
-      expect(res.statusCode).toBe(400);
-      expect(String(bodyOf(res)["error"])).toMatch(/is not valid JSON; the write was aborted/u);
-      expect(readFileSync(OCR_CONFIG, "utf8")).toBe("{ broken");
-    });
-  });
-
-  describe("信任闸门：/_dsh/ocr-review/* 的五条路由", () => {
-    /** DNS 重绑定：Host 是外域，sec-fetch-site 与 Origin 都自洽 ⇒ 只有 Host 腿拒得了。 */
-    const REBINDING: Record<string, string> = {
-      host: "evil.test:8787",
-      origin: "http://evil.test:8787",
-      "sec-fetch-site": FETCH_SITE_SAME_ORIGIN,
-    };
-
-    it("providers GET（发 token 的那条）被重绑定 ⇒ 403，体里不许带出 csrf 与任何 key", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH, REBINDING);
-      expect(res.statusCode).toBe(403);
-      expect(res.body).toMatch(/untrusted host/u);
-      expect(res.body).not.toMatch(/csrf/u);
-      expect(res.body).not.toMatch(/sk-/u);
-    });
-
-    it("select POST 带着合法 token 也照样被权威判据拒", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      const res = await post(host, SELECT_PATH, { body: "{}", headers: REBINDING });
-      expect(res.statusCode).toBe(403);
-      expect(res.body).toMatch(/untrusted host/u);
-    });
-
-    it("判据次序：恶意 Host 与 cross-site 同现时报 Host 腿那句", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH, {
-        host: "evil.test:8787",
-        "sec-fetch-site": FETCH_SITE_CROSS_SITE,
-      });
-      expect(res.statusCode).toBe(403);
-      expect(res.body).toMatch(/untrusted host/u);
-    });
-
-    it("五条路由逐条都被拒（防「只在一条 handler 装了闸门」的漏装）", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      const routes: readonly ["GET" | "POST", string][] = [
-        ["GET", PROVIDERS_PATH],
-        ["POST", SELECT_PATH],
-        ["POST", MIGRATE_PATH],
-        ["POST", TEST_PATH],
-        ["POST", PROBE_PATH],
-      ];
-      // 闸门在 handler 的第一条语句、且判据与写响应都是同步的 ⇒ 不必逐条 await
-      // （oxlint 的 no-await-in-loop 也不许那样写），先全部打完再一次批断言。
-      const hits: { method: string; url: string; res: FakeRes }[] = [];
-      for (const [method, url] of routes) {
-        const res = makeRes();
-        void routeOf(host, url).handler(
-          makeReq({
-            method,
-            url,
-            headers: REBINDING,
-            ...(method === "POST" ? { body: "{}" } : {}),
-          }),
-          asRes(res),
-        );
-        hits.push({ method, url, res });
-      }
-      await Promise.resolve();
-      for (const one of hits) {
-        expect(one.res.statusCode, `${one.method} ${one.url}`).toBe(403);
-        expect(one.res.body, `${one.method} ${one.url} 该报 Host 腿`).toMatch(/untrusted host/u);
-      }
-    });
-
-    it("回环 Host + 异源 Origin ⇒ 拒（钉 Origin 腿没被删）", async () => {
-      const host = makeHost();
-      applyPlugin(host);
-      const res = await get(host, PROVIDERS_PATH, {
-        host: "127.0.0.1:8787",
-        origin: "http://evil.test:8787",
-      });
-      expect(res.statusCode).toBe(403);
-      expect(res.body).toMatch(/cross-origin/u);
-    });
-
-    it("servingNonLoopback 是**接**出来的：只有 webServer.host 声明 0.0.0.0 才放本机网卡权威", async () => {
-      // 这条钉的是 host.ts 那一行的**接线**（`webServer.host === "0.0.0.0"`），不是 trust 的
-      // 纯函数判据（那份在 shared/test/trust.test.ts 里已经钉过）。把 `===` 改成 `!==`、或把
-      // 整条删掉写死 false，下面两个断言会一起反掉 ⇒ 变异跑不掉。
-      const lan = `${lanIpv4()}:8787`;
-      const headers = {
-        host: lan,
-        origin: `http://${lan}`,
-        "sec-fetch-site": FETCH_SITE_SAME_ORIGIN,
-      };
-      // 替身没声明服务面 ⇒ 保守拒：这是"宿主只绑回环"的常态。
-      const loopbackOnly = makeHost();
-      applyPlugin(loopbackOnly);
-      const refused = await get(loopbackOnly, PROVIDERS_PATH, headers);
-      expect(refused.statusCode).toBe(403);
-      expect(refused.body).toMatch(/untrusted host/u);
-      // 声明绑了具体 LAN IP（宿主 config 唯一允许的非回环形态——0.0.0.0/:: 会被
-      // config 拒绝）⇒ 同一个请求过闸门，往后是 providers 的正常应答。
-      const bound = makeHost({ webServerHost: "192.168.1.7" });
-      applyPlugin(bound);
-      const allowed = await get(bound, PROVIDERS_PATH, headers);
-      expect(allowed.statusCode).toBe(200);
-      expect(bodyOf(allowed)["csrf"]).toMatch(/[0-9a-f-]{36}/u);
-    });
-
-    it("isLoopbackBindAddress：回环各形态判真，LAN IP / 全零判假（host config 只收 IP 字面量）", () => {
-      expect(isLoopbackBindAddress("127.0.0.1")).toBe(true);
-      expect(isLoopbackBindAddress("127.9.9.9")).toBe(true);
-      expect(isLoopbackBindAddress("::1")).toBe(true);
-      expect(isLoopbackBindAddress("::1%lo0")).toBe(true);
-      expect(isLoopbackBindAddress("0:0:0:0:0:0:0:1")).toBe(true);
-      expect(isLoopbackBindAddress("::ffff:127.0.0.1")).toBe(true);
-      expect(isLoopbackBindAddress("192.168.1.7")).toBe(false);
-      expect(isLoopbackBindAddress("::ffff:192.168.1.7")).toBe(false);
-      expect(isLoopbackBindAddress("::2")).toBe(false);
-      // 宿主 config 会拒绝的值（通配/主机名）不在判定域内，但函数不该炸：
-      expect(isLoopbackBindAddress("0.0.0.0")).toBe(false);
-      expect(isLoopbackBindAddress("::")).toBe(false);
-      expect(isLoopbackBindAddress("localhost")).toBe(false);
-    });
-  });
-
-  // ── 三个部署级调优值进 entry config（默认＝现值、非 volatile 不占设置卡）──────
-
-  describe("外部 CLI 状态：设置页载荷与 ocrNoAutoUpdate 开关", () => {
-    let host: FakeHost;
-
-    beforeEach(() => {
-      host = makeHost();
-      applyPlugin(host);
-    });
-
-    it("GET providers 带 ocrBinary：只出文件系统的事实，不起进程", async () => {
-      const body = bodyOf(await get(host, PROVIDERS_PATH));
-      const binary = body["ocrBinary"] as Record<string, unknown>;
-      expect(binary["source"]).toBe("bundled");
-      expect(binary["path"]).toBe(presentProbe().path);
-      expect(binary["channel"]).toBe("npm");
-      expect(binary["expectedVersion"]).toBe(EXPECTED_OCR_CLI_VERSION);
-      // 这条 describe 的夹具 startupVerify 关着 ⇒ 没有实测值可报，null 而不是猜一个。
-      expect(binary["measuredVersion"]).toBeNull();
-      // 已装着的时候这句仍在载荷里（卡片按档决定显不显示），渠道是 npm 就说 npm 那条命令。
-      expect(String(binary["installHint"])).toContain("npm 那条命令：");
-      // resolve 队列为空就是这条针：状态档不该为设置页起子进程，版本归 POST probe。
-      expect(host.shell.resolveCalls).toStrictEqual([]);
-    });
-
-    it("两条路都没有候选 ⇒ 载荷照说 none，并给出带版本的装法", async () => {
-      const offline = makeHost();
-      applyPlugin(offline, noneProbe);
-      const body = bodyOf(await get(offline, PROVIDERS_PATH));
-      const binary = body["ocrBinary"] as Record<string, unknown>;
-      expect(binary["source"]).toBe("none");
-      expect(binary).not.toHaveProperty("path");
-      expect(binary).not.toHaveProperty("channel");
-      expect(binary["measuredVersion"]).toBeNull();
-      // 没装时那句要能照着敲：默认偏好 both ⇒ 两条命令都在，npm 那条带核对版本。
-      expect(String(binary["installHint"])).toContain(BREW_INSTALL);
-      expect(String(binary["installHint"])).toContain(
-        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
-      );
-    });
-
-    it("装法文案按「来源优先、偏好兜底」挑", async () => {
-      // brew 装的那份必须先说 brew：给用户一条 `npm i -g` 会让他机器上多出第二份 ocr，
-      // 而 PATH 上那条还是旧的——症状与他抱怨的一模一样。
-      const brewHost = makeHost();
-      brewHost.settingsValue["ocrInstallHint"] = "npm";
-      applyPlugin(brewHost, () => ({
-        source: "path",
-        path: "/opt/homebrew/bin/ocr",
-        channel: "brew",
-      }));
-      const brewHint = String(
-        (bodyOf(await get(brewHost, PROVIDERS_PATH))["ocrBinary"] as Record<string, unknown>)[
-          "installHint"
-        ],
-      );
-      expect(brewHint).toContain("brew upgrade open-code-review");
-      expect(brewHint).toContain("钉不住");
-      // 来源已知时部署偏好让位：这条用例钉的就是这个优先次序——那句说的是 brew 那条命令。
-      expect(brewHint).not.toContain("npm 那条命令：");
-
-      // 来源判不出来才轮到偏好说话。
-      const unknownNpm = makeHost();
-      unknownNpm.settingsValue["ocrInstallHint"] = "npm";
-      applyPlugin(unknownNpm, () => ({ source: "path", path: "/Users/me/bin/ocr" }));
-      const npmHint = String(
-        (bodyOf(await get(unknownNpm, PROVIDERS_PATH))["ocrBinary"] as Record<string, unknown>)[
-          "installHint"
-        ],
-      );
-      expect(npmHint).toContain(
-        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
-      );
-      expect(npmHint).not.toContain("brew install");
-
-      // 偏好 brew 且压根没装 ⇒ 先说 brew，但「钉不住版本」那句必须在场，
-      // 否则用户以为 `brew install` 得到的是本包核对的那一版。
-      const prefBrew = makeHost();
-      prefBrew.settingsValue["ocrInstallHint"] = "brew";
-      applyPlugin(prefBrew, noneProbe);
-      const brewMissing = String(
-        (bodyOf(await get(prefBrew, PROVIDERS_PATH))["ocrBinary"] as Record<string, unknown>)[
-          "installHint"
-        ],
-      );
-      expect(brewMissing).toContain(BREW_INSTALL);
-      expect(brewMissing).toContain("钉不住");
-      expect(brewMissing).toContain(
-        `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
-      );
-    });
-
-    it("开关关着（默认）⇒ 前台 spawn 不带 env，维持被封装 CLI 的既有行为", async () => {
-      host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
-      expect(host.shell.resolveCalls[0]?.env).toBeUndefined();
-    });
-
-    it("开关开着 ⇒ 前台、后台与 llm test 三条 spawn 都带 OCR_NO_UPDATE=1", async () => {
-      const on = makeHost();
-      on.settingsValue["ocrNoAutoUpdate"] = true;
-      applyPlugin(on);
-      on.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(on, "ocr_review").execute({ repo: "/repo" }, makeExec());
-      expect(on.shell.resolveCalls[0]?.env).toStrictEqual({ OCR_NO_UPDATE: "1" });
-      // 后台那一档是另一处 resolve 调用点，漏传只在 wait=false 时暴露，故单独走一遍。
-      await toolOf(on, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
-      expect(on.shell.resolveCalls[1]?.env).toStrictEqual({ OCR_NO_UPDATE: "1" });
-      // llm test 同理（select 的 autoVerify 与卡片「测试连接」都经它）。
-      await post(on, TEST_PATH);
-      expect(on.shell.resolveCalls[2]?.env).toStrictEqual({ OCR_NO_UPDATE: "1" });
-    });
   });
 
   describe("部署值：stdoutMaxBytes / llmTestTimeoutMs / ocrBackgroundMaxMs", () => {
@@ -3856,17 +2625,6 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 个 webServer 端点
       await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
       expect(host.shell.resolveCalls[0]?.stdoutMaxBytes).toBe(4321);
       expect(spy.waits[0]).toBe(5000);
-    });
-
-    it("llmTestTimeoutMs：/test 端点把配置值当 resolve 的 deadline 下发", async () => {
-      const host = makeHost();
-      host.settingsValue["llmTestTimeoutMs"] = 7000;
-      applyPlugin(host);
-      const res = await post(host, TEST_PATH);
-      expect(res.statusCode).toBe(200);
-      expect(host.shell.resolveCalls[0]?.timeoutMs).toBe(7000);
-      // llm test 的输出上限与前台共用同一字段（未覆盖时落 schema 默认）
-      expect(host.shell.resolveCalls[0]?.stdoutMaxBytes).toBe(400_000);
     });
 
     it("三个新字段都不标 volatile ⇒ 不进设置卡表单", () => {

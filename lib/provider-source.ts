@@ -4,9 +4,7 @@
 // 为什么从 lib/ocr-config.ts 拆出来：本文件回答的是「清单从哪来、通道缺席时怎么报告」，
 // lib/provider-projection.ts 回答「settings 那条值长什么样」，lib/config-store.ts 回答
 // 「外部 ocr CLI 的 config.json 怎么读写」，而 lib/ocr-config.ts 只做三条流程的装配
-// （卡片数据 / 应用选择 / 明文迁移）。readProviders 与 markKeyFlags 的 export 此前只因单测也
-// 按这层边界取用——生产侧的 consumers 全在 ocr-config.ts 那一个文件里，`fallow --production`
-// 因此把它们判成「只被测试养着的导出」。
+// （卡片数据 / 应用选择 / 明文迁移）。
 //
 // 为什么 provider 清单只能走 ctx.settings.describe()、不碰宿主的私有配置文件与
 // 凭据文件（完整理由见 lib/ocr-config.ts 头注释）：那些文件的位置与格式都是
@@ -32,7 +30,7 @@ export interface DshProviderWithKey extends DshProvider {
 
 /** describe() 单条描述符里本包用到的面（宿主给全量 SettingsDescriptor，测试给替身）。 */
 export interface ProviderDescriptor {
-  /** 命名空间名。宿主侧官方字段名是 `ns`（上游留了改名 namespace 的 TODO）。 */
+  /** 命名空间名。宿主侧官方字段名是 `ns`。 */
   ns: string;
   /** 该命名空间解析后的最终值。 */
   value: unknown;
@@ -88,7 +86,7 @@ const SOURCE_READY: ProviderSource = Object.freeze({ status: "ready", message: "
 const SOURCE_SETTINGS_FAILED: ProviderSourceStatus = "settings-failed";
 
 /**
- * 读 provider 清单并把一切失败折进 source（不抛）：会话热路径与 webServer 端点
+ * 读 provider 清单并把一切失败折进 source（不抛）：会话热路径与卡片读面
  * 都只消费返回值，服务缺席/抛错时卡片仍能显示原因。
  */
 export function readProviders(

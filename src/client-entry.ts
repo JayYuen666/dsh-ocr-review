@@ -1,11 +1,10 @@
 // ocr-review 设置卡片（Client 半，build-client.mjs 打包为 client.js）。
-// 功能：从宿主配置服务（GET /_dsh/ocr-review/providers，背后是
-// ctx.settings.describe() 的 llm-pi-ai 命名空间）列出可选 provider+model，
-// 选择后 POST /_dsh/ocr-review/select 应用到外部 ocr CLI 的 config.json
-// （key 走 api_key_cmd 动态读取，不落盘明文）；附带 llm test 验证、明文 key
-// 一键迁移，以及 effort/language/autoVerify/ocrConfigPath 设置行（保存条暂存-写入）。
-// React 一律 createElement；卡片注册进 keyed plugins.bundle.config 槽的 **bundle 包名**键
-// （`@jayyuen66/dsh-ocr-review`，见 BUNDLE_PKG），不是裸条目 id。
+// 功能：经官方 Typert Remote（src/remote.ts）从宿主配置服务列出可选 provider+model，
+// 选择后写到外部 ocr CLI 的 config.json（key 走 api_key_cmd 动态读取，不落盘明文）；
+// 附带 llm test 验证、明文 key 一键迁移，以及 effort/language/autoVerify/ocrConfigPath
+// 设置行（保存条暂存-写入）。React 一律 createElement；卡片注册进 keyed
+// plugins.bundle.config 槽的 **bundle 包名**键（`@jayyuen66/dsh-ocr-review`，见 BUNDLE_PKG），
+// 不是裸条目 id。
 //
 // 界面文案全在 src/ui-messages.ts（中英两份）：apply 里 `ctx.locale.register(NS, UI_MESSAGES)`
 // （官方类型化重载，两语一次交齐）+ `ctx.locale.bind(NS)` 拿到取文案函数，再以 `t` prop
@@ -19,7 +18,7 @@
 // unicorn/max-nested-calls 与 max-statements/complexity）；状态/网络回调统一
 // async/await + try/catch。
 
-import { createElement, useEffect, useState } from "react";
+import { createElement, useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
@@ -49,6 +48,11 @@ import type {
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { claimApply } from "@jayyuen66/dsh-plugin-shared/lib/card-apply";
+import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
+import { createOcrReader } from "./remote.ts";
+import type { OcrReader } from "./remote.ts";
+import type { OcrSelectRequest } from "../lib/remote-shape.ts";
 
 const NS: LocaleNs = "ocr-review";
 /**
@@ -69,13 +73,6 @@ const NS: LocaleNs = "ocr-review";
  * dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当 settings 命名空间用）。
  */
 const BUNDLE_PKG = "@jayyuen66/dsh-ocr-review";
-const PROVIDERS_URL = "/_dsh/ocr-review/providers";
-const SELECT_URL = "/_dsh/ocr-review/select";
-const MIGRATE_URL = "/_dsh/ocr-review/migrate";
-const TEST_URL = "/_dsh/ocr-review/test";
-const PROBE_URL = "/_dsh/ocr-review/probe";
-/** 写端点 CSRF 头名（与 host.ts OCR_CSRF_HEADER 同源，改名要两端一起改）。 */
-const CSRF_HEADER = "x-ocr-csrf";
 
 /** 未知值 → 安全字符串（非字符串给 ''）。 */
 function strOf(value: unknown): string {
@@ -147,13 +144,16 @@ export function binaryOf(raw: unknown): OcrBinaryView | null {
 }
 
 /**
- * 详情页徽标/区块/启用指引共用的取数口：读同一条 GET providers 的 `ocrBinary` 那半。
+ * 详情页徽标/区块/启用指引共用的取数口：读同一条 providers 载荷的 `ocrBinary` 那半。
  * 判据只在 host 的 `resolveOcrAvailability` 一处，本包三个显示面都只翻译它的结论。
+ * 读取器缺席（部署没装远程面）与传输失败都归成 null：这三处只负责显示。
  */
-export async function loadCliStatus(): Promise<OcrBinaryView | null> {
+export async function loadCliStatus(reader: OcrReader | undefined): Promise<OcrBinaryView | null> {
+  if (reader === undefined) {
+    return null;
+  }
   try {
-    const res = await fetch(PROVIDERS_URL, { headers: { accept: "application/json" } });
-    return res.ok ? binaryOf(fieldOf(await res.json(), "ocrBinary")) : null;
+    return binaryOf(fieldOf(await reader.providers(), "ocrBinary"));
   } catch {
     // 读不到就是「宿主没报」：这三处贡献点的职责正是把这件事显示出来，不再叠一层错误条。
     return null;
@@ -187,7 +187,6 @@ function providersPayloadOf(json: unknown): ProvidersPayload {
       status: strOf(fieldOf(sourceRaw, "status")),
       message: strOf(fieldOf(sourceRaw, "message")),
     },
-    csrf: strOf(fieldOf(json, "csrf")),
     endpointVerify,
     ocrBinary: binaryOf(fieldOf(json, "ocrBinary")),
   };
@@ -267,8 +266,6 @@ export interface ProvidersPayload {
   current: { provider: string; model: string; keyIsDynamic: boolean; url: string };
   getCredReady: boolean;
   source: ProviderSource;
-  /** 宿主每次 apply 生成的会话内 CSRF token（写端点必须回填 x-ocr-csrf 头）。 */
-  csrf: string;
   /** 装载期端点自检结果（host 在 apply 时跑一次 `ocr llm test`）；null/缺省 = 没跑。
    *  可选：上游 host 版本可能不带这个字段，卡片按「没跑」处理即可。 */
   endpointVerify?: { ok: boolean; message: string } | null;
@@ -338,20 +335,6 @@ export function cardStore(scope: EntryForm): {
       return scope.subscribe(listener);
     },
   };
-}
-
-/** touched 层与快照的差异字段（值语义比较；undefined 与缺失等价）。 */
-export function diffTouched(
-  touched: Record<string, unknown>,
-  value: Record<string, unknown>,
-): string[] {
-  const out: string[] = [];
-  for (const key of Object.keys(touched)) {
-    if (JSON.stringify(touched[key] ?? null) !== JSON.stringify(value[key] ?? null)) {
-      out.push(key);
-    }
-  }
-  return out;
 }
 
 export function SaveBar(props: {
@@ -654,7 +637,7 @@ export interface OcrCardDeps {
   t: Translate;
   data: ProvidersPayload | null;
   fetchError: string | null;
-  /** 哪条动作正在飞（四条动作共用一份 CSRF 与一个传输口，故同一时刻只允许一条）；
+  /** 哪条动作正在飞（四条动作共用一个传输口与一份回执位，故同一时刻只允许一条）；
    *  null = 空闲。按钮按「有没有动作在飞」禁用，但只有**自己**那条在飞时才改自己的文案——
    *  否则按下「检测版本」会让「应用」按钮读成「应用中…」，把没发生过的事报给用户。 */
   busy: CardActionKind | null;
@@ -1329,25 +1312,33 @@ export function buildSettingsSection(
   );
 }
 
-/** providers GET 的两个落态口（对象化以受 max-params 约束）。 */
+/** providers 读面的两个落态口（对象化以受 max-params 约束）。 */
 interface ProvidersSinks {
   setData: (payload: ProvidersPayload | null) => void;
   setFetchError: (message: string | null) => void;
 }
 
-/** 读 providers 端点（卡片唯一的 GET）：失败只落 fetchError 文本，不抛穿渲染。 */
-async function refreshProviders(sinks: ProvidersSinks): Promise<ProvidersPayload | null> {
+/**
+ * 读设置页载荷（卡片唯一的数据入口）：失败只落 fetchError 文本，不抛穿渲染。
+ * 拒绝回执（`ok:false`）里的 error 就是「为什么读不到」的可读原因；只报一句
+ * 「读取失败」等于把最有用的半句丢掉。
+ */
+async function refreshProviders(
+  reader: OcrReader | undefined,
+  t: Translate,
+  sinks: ProvidersSinks,
+): Promise<ProvidersPayload | null> {
   sinks.setFetchError(null);
   try {
-    const res = await fetch(PROVIDERS_URL, { headers: { accept: "application/json" } });
-    if (!res.ok) {
-      // 非 2xx 的回执体里就是「为什么读不到」的可读原因（宿主把设置项路径不合法
-      // 之类的错误折进 JSON 的 error 字段）。只报状态码等于把最有用的半句丢掉。
-      const parsed: unknown = await res.json().catch(() => ({}));
-      const detail = strOf(fieldOf(parsed, "error"));
-      throw new Error(detail === "" ? `HTTP ${res.status}` : detail);
+    if (reader === undefined) {
+      throw new Error(t("remoteUnavailable"));
     }
-    const payload = providersPayloadOf(await res.json());
+    const json = await reader.providers();
+    if (fieldOf(json, "ok") === false) {
+      const detail = strOf(fieldOf(json, "error"));
+      throw new Error(detail === "" ? t("remoteUnavailable") : detail);
+    }
+    const payload = providersPayloadOf(json);
     sinks.setData(payload);
     return payload;
   } catch (error) {
@@ -1356,50 +1347,59 @@ async function refreshProviders(sinks: ProvidersSinks): Promise<ProvidersPayload
   }
 }
 
-/** 写端点的 CSRF 依赖：本次渲染读到的 token，以及「过期就重取 token」的那道口。 */
-interface CsrfPostDeps {
-  csrf: string;
-  refresh: () => Promise<ProvidersPayload | null>;
+/** 卡片动作的线上方法名（与 src/remote.ts 的 descriptor.method 同源）。 */
+export type RemoteAction = "select" | "migrate" | "test" | "probe";
+
+/** 动作回执的最小面：既有动作函数只读 `json()`，不必把整个 Response 门面造齐。 */
+export interface JsonReply {
+  json: () => Promise<unknown>;
 }
 
-/**
- * 写端点统一出口：回填宿主下发的 x-ocr-csrf token（宿主只接受带 token 的
- * POST，sec-fetch-site 挡不住本地进程）。宿主每次 apply 会换 token，页面开着
- * 时它可能已过期 → 403 就重取 token 重试一次，避免卡片变成「点什么都没反应」。
- */
-async function postWithCsrf(
-  url: string,
-  body: string | undefined,
-  deps: CsrfPostDeps,
-): Promise<Response> {
-  const request = (token: string): Promise<Response> =>
-    fetch(url, {
-      method: "POST",
-      headers: {
-        [CSRF_HEADER]: token,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body }),
-    });
-  const first = await request(deps.csrf);
-  if (first.status !== 403) {
-    return first;
-  }
-  const renewed = await deps.refresh();
-  const retry = await request(renewed?.csrf ?? "");
-  return retry;
+/** 写动作的统一出口（读取器缺席时抛一句可显示的话）。 */
+export type CardPost = (action: RemoteAction, body?: OcrSelectRequest) => Promise<JsonReply>;
+
+/** 把读取器接成动作函数认的那个 `post` 形状：拒绝回执原样交回，传输失败才抛。 */
+function readerPost(reader: OcrReader | undefined, t: Translate): CardPost {
+  return async (action, body) => {
+    if (reader === undefined) {
+      throw new Error(t("remoteUnavailable"));
+    }
+    switch (action) {
+      case "select": {
+        const provider = strOf(fieldOf(body, "provider"));
+        const model = strOf(fieldOf(body, "model"));
+        const reply = await reader.select(provider, model);
+        return { json: () => Promise.resolve(reply) };
+      }
+      case "migrate": {
+        const reply = await reader.migrate();
+        return { json: () => Promise.resolve(reply) };
+      }
+      case "test": {
+        const reply = await reader.test();
+        return { json: () => Promise.resolve(reply) };
+      }
+      case "probe": {
+        const reply = await reader.probe();
+        return { json: () => Promise.resolve(reply) };
+      }
+      default: {
+        throw new Error(`unknown remote action: ${String(action)}`);
+      }
+    }
+  };
 }
 
 /** 三个 provider 动作（apply / test / migrate）共用的传输口与落态口。 */
 interface CardActionDeps {
   t: Translate;
-  post: (url: string, body?: string) => Promise<Response>;
+  post: CardPost;
   refresh: () => Promise<ProvidersPayload | null>;
   setBusy: (busy: CardActionKind | null) => void;
   setActionMsg: (message: { ok: boolean; text: string } | null) => void;
 }
 
-/** 卡片上四条动作的标识。同一时刻只允许一条在飞（CSRF 令牌与动作回执都只有一份），
+/** 卡片上四条动作的标识。同一时刻只允许一条在飞（动作回执只有一份），
  *  所以它是一个「谁在飞」的旗标而不是布尔——按钮按「有没有动作在飞」禁用，但只有**自己**
  *  那条在飞时才改自己的文案，否则按下「检测版本」会让「应用」按钮读成「应用中…」。 */
 export type CardActionKind = "apply" | "test" | "migrate" | "probe";
@@ -1420,10 +1420,7 @@ async function runApplySelection(deps: ApplySelectionDeps): Promise<void> {
   deps.setBusy("apply");
   deps.setActionMsg(null);
   try {
-    const res = await deps.post(
-      SELECT_URL,
-      JSON.stringify({ provider: effectiveProvider, model: effectiveModel }),
-    );
+    const res = await deps.post("select", { provider: effectiveProvider, model: effectiveModel });
     const selJson: unknown = await res.json();
     const ok = fieldOf(selJson, "ok") === true;
     if (ok) {
@@ -1463,7 +1460,7 @@ async function runMigrateKeys(deps: CardActionDeps): Promise<void> {
   deps.setBusy("migrate");
   deps.setActionMsg(null);
   try {
-    const res = await deps.post(MIGRATE_URL);
+    const res = await deps.post("migrate");
     const json: unknown = await res.json();
     const migratedVal = fieldOf(json, "migrated");
     const skippedVal = fieldOf(json, "skippedUnknown");
@@ -1494,7 +1491,7 @@ async function runTestConnection(deps: CardActionDeps): Promise<void> {
   deps.setBusy("test");
   deps.setActionMsg(null);
   try {
-    const res = await deps.post(TEST_URL);
+    const res = await deps.post("test");
     const json: unknown = await res.json();
     const ok = fieldOf(json, "ok") === true;
     const testOutput = strOf(fieldOf(json, "output"));
@@ -1514,7 +1511,7 @@ async function runTestConnection(deps: CardActionDeps): Promise<void> {
  *  导出是为了让「回执文本 = 版本行 + 原样附上的 output」这条用户可见契约能被钉住。 */
 export interface ProbeActionDeps {
   t: Translate;
-  post: (url: string, body?: string) => Promise<Response>;
+  post: CardPost;
   refresh: () => Promise<ProvidersPayload | null>;
   setBusy: (busy: CardActionKind | null) => void;
   setProbeMsg: (message: { ok: boolean; text: string } | null) => void;
@@ -1531,7 +1528,7 @@ export async function runProbe(deps: ProbeActionDeps): Promise<void> {
   deps.setBusy("probe");
   deps.setProbeMsg(null);
   try {
-    const res = await deps.post(PROBE_URL);
+    const res = await deps.post("probe");
     const json: unknown = await res.json();
     const ok = fieldOf(json, "ok") === true;
     const head = ok
@@ -1666,21 +1663,23 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const ready = snap.status === "ready";
   const writable = snap.writable && ready;
 
-  // Provider 数据（webServer 端点，无 key 明文）。
+  // Provider 数据（官方 Remote 读面，无 key 明文）。
   const [data, setData] = useState<ProvidersPayload | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [busy, setBusy] = useState<CardActionKind | null>(null);
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [probeMsg, setProbeMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const refresh = async (): Promise<ProvidersPayload | null> =>
-    refreshProviders({ setData, setFetchError });
+  const refresh = useCallback(
+    async (): Promise<ProvidersPayload | null> =>
+      refreshProviders(props.reader, t, { setData, setFetchError }),
+    [props.reader, t],
+  );
   useEffect(() => {
     void refresh();
-  }, []);
+  }, [refresh]);
 
-  const post = async (url: string, body?: string): Promise<Response> =>
-    postWithCsrf(url, body, { csrf: data?.csrf ?? "", refresh });
+  const post = readerPost(props.reader, t);
 
   // 本地选择态（未持久化到 settings；apply 时才写 OCR config）。
   const [selProvider, setSelProvider] = useState("");
@@ -1787,6 +1786,8 @@ export interface CardSlotProps {
   t: Translate;
   useCard: <TResult>(selector: (snap: CardSnapshot) => TResult) => TResult;
   set: (field: string, value: unknown) => boolean | Promise<boolean>;
+  /** 宿主读面（官方 Remote 的消费侧，见 src/remote.ts）；缺席 = 当前部署没有远程面。 */
+  reader?: OcrReader;
 }
 
 /**
@@ -1843,21 +1844,16 @@ export interface ClientCtx {
     register: (ns: typeof NS, dicts: LocaleCatalog) => () => void;
     bind: (ns: typeof NS) => Translate;
   };
+  /** 显式读取可选服务（官方 `ctx.get`）；缺省时按「当前部署没有远程面」处理。 */
+  get?: (name: string, strict?: boolean) => unknown;
 }
 
 const inject = ["slots", "configForms", "locale"];
 
 function apply(ctx: ClientCtx): void {
-  if (globalThis.ocrReviewCardApplied === true) {
+  if (!claimApply(ctx, "ocrReviewCardApplied", "ocr-review-card: apply claim")) {
     return;
   }
-  globalThis.ocrReviewCardApplied = true;
-  ctx.effect(
-    () => () => {
-      globalThis.ocrReviewCardApplied = undefined;
-    },
-    "ocr-review-card: apply claim",
-  );
   ctx.effect(() => {
     const tag = document.createElement("style");
     tag.id = "ocr-review-card-css";
@@ -1869,7 +1865,7 @@ function apply(ctx: ClientCtx): void {
   }, "ocr-review-card: styles");
   // 本包的共享表单：条目 id == cordis.patch.yml 里的裸 id `ocr-review`（隐式
   // settings 命名空间即条目 id，host.ts 隐式注册用的也是它），与 locale 命名空间同源，
-  // 故直接复用 NS。旧写法 `settingsScope.bind({ namespace: NS })` 取的是同一个串。
+  // 故直接复用 NS。
   const scope = ctx.configForms.get(NS);
   const store = cardStore(scope);
   // 卡片文案交给官方 locale：把本包两语字典一次性交给**类型化**那条 register 重载
@@ -1881,11 +1877,14 @@ function apply(ctx: ClientCtx): void {
   // 返回的是**一个**回收全部 pairs 的 disposer（旧写法是两个 disposer 手工串起来）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "ocr-review-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
+  // 远程读面在 apply 期造一次：`$mount` 幂等（随卡片卸载自动撤），反复拉取只挂一次；
+  // 没有远程面的部署交 undefined，卡片照常渲染、数据面显示读不到。
+  const reader = createOcrReader(ctx);
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {
-        // settings.plugin.item 槽位已不存在；plugins.bundle.config 按 bundle 包名 keyed。
-        // 复核过：该槽位仍在（installed slot-contract.d.ts 的声明），换掉的只是它读写的表单来源。
+        // 旧的 settings.plugin.item 槽位已从宿主侧移除（installed slot-contract.d.ts 零命中）；
+        // 本槽 plugins.bundle.config 按 bundle 包名 keyed。
         // 键值定案：宿主派发 `entryKey: pkg.name`（= bundle 的 npm 包名），
         // 证据见上面 BUNDLE_PKG 的注释块；按裸条目 id 注册 = renderer 逐字相等匹配不到
         // （installed dsh-client-ui-renderer/lib/client.js:1154）= 卡片完全不渲染。
@@ -1897,6 +1896,8 @@ function apply(ctx: ClientCtx): void {
           hooks: { card: store },
           set: (field: string, value: unknown): boolean | Promise<boolean> =>
             scope.set(field, value),
+          // 宿主读面（remote 的消费侧）：缺省不交这一位 = 当前部署没有远程面。
+          ...(reader === undefined ? {} : { reader }),
         }),
       },
       OcrCard,
@@ -1904,7 +1905,7 @@ function apply(ctx: ClientCtx): void {
     // disposer 只 unregister()，**不 dispose 表单**：宿主的 `configForms.get(entryId)`
     // 交回的是 provider 自己持有的共享表单（installed config-form.d.ts:138-142
     // "The entry's form, owned by this provider"），消费契约 `ConfigForm`
-    //（config-form-types.d.ts:36-74）里根本没有 dispose，消费者无从销毁；provider 在自己的
+    //（config-form-types.d.ts 的 ConfigForm）里根本没有 dispose，消费者无从销毁；provider 在自己的
     // fiber 上统一回收（installed lib/client.js:1290-1293）。slot collapse 会调用本
     // disposer 并在再次声明时**重跑工厂**（installed
     // dsh-client-ui-renderer/lib/types/client/registry.d.ts:100 "Collapse disposes the
@@ -1917,7 +1918,7 @@ function apply(ctx: ClientCtx): void {
   // 全部吃 `loadCliStatus` 那一个口——「装没装 ocr」在卡片、徽标、区块三处必须是同一句
   // 话，各自算一份就等着哪天分叉。官方只给第三方 bundle 到这几个位置：列表卡片那排标签
   // 全是宿主对条目自身的判定（running/off/problem），插件注入不进去。
-  const cliShare: CliStatusShare = { t, loadCliStatus };
+  const cliShare: CliStatusShare = { t, loadCliStatus: () => loadCliStatus(reader) };
   ctx.slots.inject("plugins.detail.badge", () =>
     ctx.slots.register(
       {

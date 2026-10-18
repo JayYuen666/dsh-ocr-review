@@ -18,9 +18,9 @@
 //   - ocr scan：--path 逗号分隔；二者都接受 --format/--output/--audience/--exclude。
 //   - ocr delegate preview / rule：--format json 机器可读，reviewable_files
 //     / groups 结构见 docs。delegate 无 LLM 消耗，秒级返回。
-//   - 所有工具统一走 --output <临时文件>：评审 JSON/文本量大（实测一次
-//     effort=low 的评审约 19k input tokens），宿主 stdout 有 400KB 截断上限，
-//     落盘读取可避免「截断当完整」误判（zvec-grep 同款思路）。
+//   - 所有工具统一走 --output <临时文件>：评审 JSON/文本量大，而本包下发给宿主的
+//     stdout 上限（STDOUT_MAX_BYTES）会截断，落盘读取可避免「截断当完整」误判
+//     （zvec-grep 同款思路）。
 
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -125,12 +125,12 @@ export interface ScanScopeArgs {
   exclude?: unknown;
   batch?: unknown;
   concurrency?: unknown;
-  /** OCR 原生 --timeout（每组任务分钟数；0 = 不限时，源码 agent.go:750 仅 timeout>0 才 WithTimeout）。 */
+  /** OCR 原生 --timeout（每组任务分钟数；0 = 不限时，agent.go 里只有 timeout>0 才 WithTimeout）。 */
   timeoutMinutes?: unknown;
   maxTools?: unknown;
   maxTokens?: unknown;
   maxTokensBudget?: unknown;
-  /** OCR scan 原生 --provider/--model（shared_flags.go:223-247 共享 flags），与 review 对齐。 */
+  /** OCR scan 原生 --provider/--model（shared_flags.go 的 registerScanFlags），与 review 对齐。 */
   provider?: unknown;
   model?: unknown;
   /** 同 ReviewScopeArgs.format：未知来源、白名单钳制。 */
@@ -266,7 +266,7 @@ function optionalFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): stri
  *    →补 KILL 全部目标，自我清场的组 KILL 排在最后一步。）
  *  - 硬退出：守护随 launchd 收养后 ppid 改变，监视循环探测 ppid != 初始值 →
  *    reap 后退出。TERM 先行是因 OCR 原生 signal.Notify
- *    （cmd/opencodereview/interrupt.go:48）会优雅落盘会话清单再退。
+ *    （cmd/opencodereview/interrupt.go 的 signal.Notify）会优雅落盘会话清单再退。
  *
  * 组语义：dsh shell runner 以 detached:true（setsid）启动 `bash -c <cmd>`，
  * 守护即组长，`kill -- -$$` 覆盖组内任意深度后代；守护另有组长判定，非组长
@@ -643,7 +643,7 @@ export function buildReviewCommand(
   const resume = idValue(args.resume, "resume", messages);
   if (resume !== "") {
     // OCR 契约：workspace 模式禁 resume（"resume requires --from/--to or --commit"，
-    // shared_flags.go:207；review_cmd.go:364-366）。scopeFlags 返回空 = workspace，
+    // registerReviewFlags 的 --resume；review_cmd.go:364-366）。scopeFlags 返回空 = workspace，
     // 此时带 resume 只会烧一次进程启动才拿到英文报错——前置拦下。
     if (scopeParts.length === 0) {
       throw new Error(messages.resumeNeedsScope);

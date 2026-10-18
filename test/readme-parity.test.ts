@@ -1,5 +1,5 @@
 // README 双语结构闸：README.md 与 README.zh-CN.md
-// 是同一份事实的两语投影——工具清单、端点路径、部署级键、第三方声明引用与章节结构一旦
+// 是同一份事实的两语投影——工具清单、Remote 方法名、部署级键、第三方声明引用与章节结构一旦
 // 单侧漂移，读另一侧的人拿到的是过时的契约。这里不比对措辞（翻译本来就不逐字），只比对结构。
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -33,16 +33,20 @@ const DEPLOYMENT_KEYS = [
 ] as const;
 
 /**
- * 两侧都必须逐条点名的端点路径（对外契约面）。刻意数路径而不是数总数：少写一行的症状
- * 是「读文档的人以为没这条路」，而总数断言在同侧既漏写又补上一句别处引用时正好相互抵消。
+ * 两侧都必须逐条点名的读/写方法（对外契约面）。刻意数方法名而不是数总数：少写一行的症状
+ * 是「读文档的人以为没有这个方法」，而总数断言在同侧既漏写又补上一句别处引用时正好相互抵消。
+ * 带括号的写法是门槛的一部分：裸 `providers` 这种子串在别的句子里也会出现，数不出契约面。
  */
-const ENDPOINT_PATHS = [
-  "/_dsh/ocr-review/providers",
-  "/_dsh/ocr-review/select",
-  "/_dsh/ocr-review/migrate",
-  "/_dsh/ocr-review/test",
-  "/_dsh/ocr-review/probe",
+const REMOTE_METHODS = [
+  "providers()",
+  "select(request)",
+  "migrate()",
+  "test()",
+  "probe()",
 ] as const;
+
+/** 两侧都必须写明的 Remote 命名空间（卡片按 `remote.<它>` 取服务，写错一侧就没人能连上）。 */
+const REMOTE_NAMESPACE = "ocrReview";
 
 /**
  * 读某一侧的 README 全文。
@@ -94,14 +98,17 @@ describe("readme 双语结构", () => {
     }
   });
 
-  it("五条端点路径两侧都在（对外契约面不许单语失明）", async () => {
+  it("五条 Remote 方法与命名空间两侧都在（对外契约面不许单语失明）", async () => {
     const texts = {
       en: await readReadme("en"),
       zh: await readReadme("zh"),
     } as const;
-    for (const route of ENDPOINT_PATHS) {
-      expect(texts.en, `README.md 缺端点 ${route}`).toContain(route);
-      expect(texts.zh, `README.zh-CN.md 缺端点 ${route}`).toContain(route);
+    for (const method of REMOTE_METHODS) {
+      expect(texts.en, `README.md 缺方法 ${method}`).toContain(method);
+      expect(texts.zh, `README.zh-CN.md 缺方法 ${method}`).toContain(method);
+    }
+    for (const [which, text] of Object.entries(texts)) {
+      expect(text, `${which} 侧没写命名空间 ${REMOTE_NAMESPACE}`).toContain(REMOTE_NAMESPACE);
     }
   });
 

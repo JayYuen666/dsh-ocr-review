@@ -9,18 +9,15 @@
 //      本包自带卡片，故只登记一次页面策略 `{ auto: false }`，不让宿主再生成一份自动页。
 //   2. 注册 5 个模型工具：ocr_review（自驱 diff 审查）、ocr_scan（全文件扫描）、
 //      ocr_delegate_preview / ocr_delegate_rule（委托模式脚手架）、ocr_session（会话内复查）。
-//   3. 注册 webServer 端点：GET providers（列表+hasKey，不含 key 明文）、
-//      POST select（把 settings 服务里选中的 provider/model 应用到外部 ocr CLI 的
-//      config.json，key 走 api_key_cmd 动态读取）、
-//      POST migrate（明文 key 一键迁移到 api_key_cmd）、POST test（ocr llm test）、
-//      POST probe（ocr version，取外部 CLI 的自述给状态行）。
+//   3. 设置卡的官方读面（Typert Remote，namespace `ocrReview`）：providers / select /
+//      migrate / test / probe 五个方法经宿主网关暴露给本 profile 的客户端。
 //   4. 注册 systemPrompt 路由段（order 1555，紧邻 zg 1550 之后；不与 lesson-loop 1560 撞车）。
 //
 // provider 与 key 的来源（全部走宿主官方通道，见 createGateway）：
 //   - 清单：ctx.settings.describe() 里 llm-pi-ai 那条的 value.providers。本包不读宿主
 //     的私有配置文件，也不假设私有键路径。
 //   - key：ctx.credentials 的 describe(ref)/resolve(ref)。本包不再读 .credentials.yaml。
-//   - 两个服务都可能缺席（非 web profile、未装配 base bundle）→ 端点回可读的降级
+//   - 两个服务都可能缺席（非 web profile、未装配 base bundle）→ 读面回可读的降级
 //     原因，卡片显示「为什么不可用」；任何一条都不许在会话热路径抛穿。
 //
 // 安全要点：
@@ -31,8 +28,9 @@
 //     resolve() 拿到值也只用于确认「解析得到」，当场丢弃。
 //     OCR 原始 stdout/stderr（错误详情、llm test、解析失败回显、session 透传）
 //     出宿主前统一过 redactKeyMaterial()。
-//   - POST 端点做 CORS 同源校验 + 会话内 CSRF token（shared.guardBody），body
-//     统一读尽并限制 8KB；provider/model 必须命中 settings 服务返回的列表（白名单）。
+//   - Remote 读面只经官方网关暴露给**本 profile 的客户端**，来源校验与鉴权由网关承担；
+//     provider/model 必须命中 settings 服务返回的列表（白名单），这条闸门护的是动作本身，
+//     与传输方式无关。
 //   - 评审/扫描输出统一走 --output 临时文件（防宿主 stdout 截断），解析后即删。
 //   - review/scan 命令经 wrapWithHostReaper 包装（lib/cli.ts）：dsh 任何方式退出
 //     （含 kill -9 后 macOS launchd 收养）OCR 进程都会被 TERM→1s→KILL 回收；
@@ -43,13 +41,14 @@
 // volatile 字段的引用化只在这个宿主 fork 里有实现，公共 schemastery@3.18 没有，
 // 用它的产物，设置卡写得进、读不到）、@deepseek-ai/dsh-credentials（在
 // peerDependencies，只取两枚纯语法件，见下面的 import 注释）、
-// @deepseek-ai/dsh-home-paths 与 @deepseek-ai/dsh-atomic-write（lib/ocr-config.ts 与
-// lib/config-store.ts 取 resolveDshHome/expandHomePath 与 writeFileAtomic/withFileLock
-// ——外部 config.json 的定位与落盘锁都归官方件，四件同在 peerDependencies）以及
-// @jayyuen66/dsh-plugin-shared；
-// cordis / dsh-settings / dsh-tools / dsh-shell / dsh-host-webserver / dsh-system-prompt
+// @deepseek-ai/dsh-typert-protocol（Remote 的 Service 基类与装饰器工厂，同在
+// peerDependencies）、@deepseek-ai/dsh-home-paths 与 @deepseek-ai/dsh-atomic-write
+// （lib/ocr-config.ts 与 lib/config-store.ts 取 resolveDshHome/expandHomePath 与
+// writeFileAtomic/withFileLock——外部 config.json 的定位与落盘锁都归官方件，这两件也在
+// peerDependencies）以及 @jayyuen66/dsh-plugin-shared；
+// cordis / dsh-settings / dsh-tools / dsh-shell / dsh-system-prompt
 // 一律 type-only（运行时服务由 ctx 注入，见 plugins/README.md 的解耦原则；工具面与
-// shell/webServer/systemPrompt 三面的类型绑官方见下面 import 段）。dsh-credentials 是
+// shell/systemPrompt 两面的类型绑官方见下面 import 段）。dsh-credentials 是
 // **值导入且在 peerDependencies**，但只取它两枚纯语法件（见下面的 import 注释），凭据读写仍走
 // ctx.credentials——服务面没有因此开口。
 
@@ -57,9 +56,12 @@ import Schema from "@deepseek-ai/schemastery";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Context, Fiber, Volatile } from "@deepseek-ai/cordis";
+// 设置卡的官方读面：`TypertRemoteService` 是**类**（要 `extends`），`Remote` 是装饰器
+// 工厂，二者都没有 type-only 的造法，故落 peerDependencies（`dependencies` 是禁区，由
+// test/publish-manifest.test.ts 钉着），产物里保持裸说明符（build-host.mjs 的外部化
+// 名单读 dependencies ∪ peerDependencies）。
+import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 // 类型侧绑定官方声明：describe() 的字段名（ns/value）与凭据读的返回形状一旦在上游
 // 改动，typecheck 立刻报错，而不是运行时静默读不到 provider。
 import type { SettingsDescriptor, SettingsForms } from "@deepseek-ai/dsh-settings";
@@ -84,12 +86,12 @@ import type {
   ToolRunContext,
   ToolRuntime,
 } from "@deepseek-ai/dsh-tools";
-// shell / webServer / systemPrompt 三面同批绑官方声明（三个 devDependency 与运行宿主
+// shell / jobs / systemPrompt 这几面同批绑官方声明（各自的 devDependency 与运行宿主
 // 同版本）。服务成员一律经 `Pick<官方类, "方法名">` 投影而不是重抄签名：载荷与返回
 // （resolve 的 ShellExecRequest、execute 的 ShellExecSpec / ShellExecution、
-// register 的 WebRoute、section 的 PromptSection、result() 的 ShellRunResult）由官方
+// section 的 PromptSection、result() 的 ShellRunResult）由官方
 // 给出，上游改名/换形状就是本包编译错误，而不是运行时静默读不到。
-// 仍是 type-only：产物里不得出现这三个说明符（锁见 test/build-host.test.ts）。
+// 仍是 type-only：产物里不得出现这些说明符（锁见 test/build-host.test.ts）。
 import type {
   ShellExecution,
   ShellExecutor,
@@ -100,7 +102,7 @@ import type {
 // 只内部 import、并不再导出，所以取类型必须直引）。同样是 type-only，产物里不得出现该
 // 说明符（锁见 test/build-host.test.ts）；包本身已在 devDependencies 声明，不需要进运行时。
 import type { SandboxExecutionPolicy } from "@deepseek-ai/dsh-sandbox";
-// 后台评审的子进程登记为官方作业（ctx.jobs）。口径与上面三件套一致——type-only +
+// 后台评审的子进程登记为官方作业（ctx.jobs）。口径与上面几面一致——type-only +
 // `Pick<官方类, 方法>` 投影，注册表实例由宿主注入（dsh-base 默认装载 dsh-jobs-local），
 // 产物里不得出现这两个说明符（针在 test/build-host.test.ts）。
 import type {
@@ -112,15 +114,10 @@ import type {
   JobSpec,
   JobStatus,
 } from "@deepseek-ai/dsh-jobs";
-// 落定进程 → 作业结局的映射与 zvec-grep 共用 shared 那一份（口径抄的是宿主 bash 工具）。
-import { jobOutcomeOf } from "@jayyuen66/dsh-plugin-shared/lib/job-outcome";
-import type { WebServer } from "@deepseek-ai/dsh-host-webserver";
+// 落定进程 → 作业结局的映射与收子进程的 killProc 都取 shared 那一份（口径抄的是宿主 bash 工具；
+// killProc 吞掉的那条异常为什么承重，看 startBackground 里 cancel 那一臂的注释）。
+import { jobOutcomeOf, killProc } from "@jayyuen66/dsh-plugin-shared/lib/job-outcome";
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt";
-// 共享 webServer 样板：sendJson/isCrossOrigin/guardBody（跨域 + CSRF + 字节级
-// body 上限）与 session-rescue/lesson-loop/zvec-grep 统一由 shared 提供。
-import { sendJson, guardBody } from "@jayyuen66/dsh-plugin-shared/lib/http";
-// 信任闸门：五条路由 handler 的第一条语句。
-import { guardTrust } from "@jayyuen66/dsh-plugin-shared/lib/trust";
 // host 侧文案语言跟官方 locale 插件的偏好同源：读它拥有的 settings 命名空间（未注册即中文）。
 import {
   LOCALE_SETTINGS_NAMESPACE,
@@ -170,13 +167,21 @@ import {
   ocrHomeOverride,
 } from "./lib/ocr-config.ts";
 import type { EndpointVerify } from "./lib/ocr-config.ts";
+import { OCR_REMOTE_NAMESPACE } from "./lib/remote-shape.ts";
+import type {
+  OcrMigrateReply,
+  OcrProbeReply,
+  OcrSelectReply,
+  OcrSelectRequest,
+  OcrTestReply,
+} from "./lib/remote-shape.ts";
 // provider 清单的来源层与外部 config.json 的落点层各自成模块（判据分家，见那两个文件的头
 // 注释）：命名空间常量在 lib/provider-source.ts，脚本落点在 lib/config-store.ts。
 import { PI_AI_NAMESPACE } from "./lib/provider-source.ts";
 import { defaultCredScriptPath } from "./lib/config-store.ts";
 import type { DshConfigGateway, ProviderDescriptor } from "./lib/provider-source.ts";
 import type { OcrPaths } from "./lib/config-store.ts";
-import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { hasMethods, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { errorText } from "@jayyuen66/dsh-plugin-shared/lib/errors";
 
 // 官方给生产者的 kind 扩展点（installed dsh-jobs/lib/types/view.d.ts 的 JobKindMap，
@@ -214,29 +219,20 @@ const STDOUT_MAX_BYTES = 400_000;
  *  单位写码元而不是"字符"：本常量喂给 `echoRaw`→`truncateEnd`，那一刀按码元数计
  *  （一张 emoji = 2 枚），写"字符"会把给模型的说明夸大约一倍。 */
 const RAW_ECHO_LIMIT = 500;
-const BODY_MAX_BYTES = 8 * 1024;
 /** 评论截断条数的内置默认（旧 BUILTIN_BASE 的那一项）：schema 的 `.default()` 与
  *  「读到坏值时的回退」（readMaxComments）共用这一个数，两处不许各写一份字面量。 */
 const MAX_COMMENTS_DEFAULT = 12;
-/** 会话内 CSRF token 头名（与 lesson-loop/zvec-grep 同族命名）。 */
-const OCR_CSRF_HEADER = "x-ocr-csrf";
-
-const PROVIDERS_PATH = "/_dsh/ocr-review/providers";
-const SELECT_PATH = "/_dsh/ocr-review/select";
-const MIGRATE_PATH = "/_dsh/ocr-review/migrate";
-const TEST_PATH = "/_dsh/ocr-review/test";
-const PROBE_PATH = "/_dsh/ocr-review/probe";
 
 // ── 宿主服务面（运行时由 ctx 注入，一律 type-only）──────────────────────────
 // 工具面（`ToolRuntime` 的成员面 + ToolRunContext / ToolOutputDefinition / JsonSchemaNode）
-// 与 shell / webServer / systemPrompt 三面都已绑 `@deepseek-ai/*` 官方声明，本文件不再
+// 与 shell / jobs / systemPrompt 等服务面都已绑 `@deepseek-ai/*` 官方声明，本文件不再
 // 手抄它们的形状：字段可选性过去是「一律对齐 harness 声明」的手工纪律
 // （packages/shell/shell/src/types.ts、packages/subprocess/subprocess/src/types.ts），
 // 现在由 `Pick` 保证——官方把必有字段改成可选、或给载荷添一个必填字段，这里立刻是编译错误，
 // 而不是调用点静默放过 undefined。
 //
-// 四个官方服务面都是 `Service` 子类（`ShellExecutor` 还是 abstract）：基类的 protected
-// `ctx` 加各自的 private 字段（WebServer 的 exact/prefixes/…，SystemPrompt 的 layers，
+// 这些官方服务面都是 `Service` 子类（`ShellExecutor` 还是 abstract）：基类的 protected
+// `ctx` 加各自的 private 字段（SystemPrompt 的 layers，
 // ToolRuntime 的 deferredContexts/layers/…），
 // TS 对带这类成员的类按名义比 → 结构替身永远满足不了整个类类型（test/host.test.ts 的
 // 替身就是结构替身）。故服务成员只取 `Pick<官方类, "方法名">` 的**方法面投影**：投影本身
@@ -310,7 +306,7 @@ function isLiveOcrStatus(status: JobStatus): boolean {
 /**
  * 剪掉本 kind 最老的已落定记录，给下一次登记腾出窗口（注册表按登记序返回，故取头部）。
  * 在跑与正在收的一条不动：官方件对活作业的 remove 直接抛，而"静默杀掉用户发起的评审"
- * 正是这次换装要消灭的形态。
+ * 正是本包要消灭的形态。
  * @param jobs 官方注册表
  * @returns {void}
  */
@@ -320,7 +316,7 @@ function pruneOcrJobHistory(jobs: JobsService): void {
     .filter((job) => job.kind === OCR_JOB_KIND && !isLiveOcrStatus(job.status));
   // 剪到 MAX-1 而不是 MAX：这一趟在 `start` **之前**跑，起完就是 MAX 条。按 MAX 剪等于
   // 每次登记后窗口里都是 MAX+1 条，而文案与卡片说的是"保留最近 MAX 条"（差的那一格
-  // 复核时记过账，修的是剪枝边界而不是把 MAX 改成 11）。
+  // 选择在剪枝边界修，而不是把 MAX 改成 11）。
   const excess = settled.length - (OCR_JOB_HISTORY_MAX - 1);
   for (const job of settled.slice(0, Math.max(excess, 0))) {
     jobs.remove(job.id);
@@ -417,12 +413,6 @@ export type ToolsService = Pick<ToolRuntime, "register">;
  *  等于宣称宿主可能交不出撤销句柄。 */
 export type SystemPromptService = Pick<SystemPrompt, "section">;
 
-/** webServer 的 `register` 方法面投影：载荷绑官方 `WebRoute`，`kind` 因此是
- *  `WebRouteKind`（"exact" | "prefix"）而不是自由字符串——kind 写错在注册期只会表现为
- *  一条永不命中的路由或撞名抛错，绑上去就提前到编译期。handler 的 req/res 取的就是
- *  官方那一份（node:http，见文件头的 type-only import）。 */
-type WebServerService = Pick<WebServer, "register" | "host">;
-
 /**
  * 官方 `SettingsForms`（installed `@deepseek-ai/dsh-settings/lib/types/index.d.ts:62`，
  * `Service` 子类 + private `ownerContext/revisions/closed/scheduled/presentations`
@@ -503,34 +493,17 @@ export interface HostCtx {
   inject: (deps: readonly string[], callback: (child: InjectedCtx) => void) => unknown;
   /** 服务读取面取官方 `Context["get"]`（installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:14`
    *  `get<K extends string & keyof this>(name: K, strict?: boolean): undefined | this[K]`），
-   *  本地不再重述一枚 `get`。本包读的 `webServer` / `settings` / `credentials` 三个名字**都**是
-   *  官方声明进 `Context` 的成员（installed `@deepseek-ai/dsh-host-webserver/lib/types/index.d.ts:15-18`、
-   *  `@deepseek-ai/dsh-settings/lib/types/index.d.ts:24-29`、
-   *  `@deepseek-ai/dsh-credentials/lib/types/index.d.ts:98-102`），故全部走泛型臂拿到
+   *  本地不再重述一枚 `get`。本包读的 `settings` / `credentials` 两个名字**都**是官方声明进
+   *  `Context` 的成员（`@deepseek-ai/dsh-settings/lib/types/index.d.ts:24-29`、
+   *  `@deepseek-ai/dsh-credentials/lib/types/index.d.ts:98-102`），故走泛型臂拿到
    *  `undefined | 官方服务类`，**不走**那条 `get(name: string): any` 兜底（reflect.d.ts:17）。
    *  旧镜像尾臂 `(name: string): unknown` 是「还会读别的名字」的占位，实际没有——删它不减防御，
    *  少的是一个人人都能塞名字的自由入口。
-   *  返回整类而不是本包的 `Pick` 投影也不是加宽：投影留在**使用点**上（`registerConfigEndpoints`
-   *  的显式标注、`createGateway` 里那两个 `usableService` 的返回类型）。
+   *  返回整类而不是本包的 `Pick` 投影也不是加宽：投影留在**使用点**上（`createGateway`
+   *  里那两个 `usableService` 的返回类型）。
    *  `undefined` 是官方语义（"or `undefined` when not (yet) provided"）：base bundle 未装配
-   *  （非 web profile / 精简 profile）时宿主确实交不出服务，下面三处运行时闸照旧。 */
+   *  （精简 profile）时宿主确实交不出服务，下面两处运行时闸照旧。 */
   get: Context["get"];
-}
-
-/** 服务面校验：对象存在且声明的方法全部可调用。
- *  只做 `typeof value["shell"] === "object"` 的话，守卫声称的是「有 shell 服务」
- *  而实际证明的只是「有个对象」——运行到一半才炸。逐个点名方法，守卫才名副其实
- *  （HostCtx 用到的每个方法都在这里被验证过一遍）。 */
-function hasMethods(value: unknown, methods: readonly string[]): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  for (const method of methods) {
-    if (typeof value[method] !== "function") {
-      return false;
-    }
-  }
-  return true;
 }
 
 /** host 是否为本插件所需服务面（settings/shell/tools/systemPrompt/get/inject 及
@@ -567,7 +540,7 @@ function resolveHost(ctx: Context): HostCtx {
 /** describe() 行里按命名空间取解析值（跨命名空间读只有 describe() 一条路：
  *  `settings.get(ns)` 已删）。未注册该命名空间 → undefined，调用侧按默认值降级。
  *  @param rows - `ctx.settings.describe()` 的返回（全部条目的表单投影）。
- *  @param ns - 要读的命名空间（官方字段名是 `ns`，上游有改名 namespace 的 TODO）。
+ *  @param ns - 要读的命名空间（官方字段名是 `ns`）。
  */
 function describedValue(rows: readonly SettingsDescriptor[], ns: string): unknown {
   return rows.find((row) => row.ns === ns)?.value;
@@ -928,9 +901,12 @@ const SESSION_OUTPUT_SCHEMA = {
  * 密钥与状态管理跟着进仓，且换发布形态就要再搬一次——为绕开一条策略把用户目录写进用户仓。
  * owner 口径是「状态归 ocr 自己，围栏由本包显式放开」，故直接要 `danger-full-access`。
  *
- * **「能不能只放开需要写的那一条路径」：不能。** 官方按调用携带的 `SandboxPolicyRequest`
- * 只有 `session` 与 `mode` 两个字段（dsh-sandbox-policy 0.2.1-alpha.3 的
- * `SandboxPolicyRequest` 声明），**没有**附加可写路径、没有自定义 HOME、没有目录级豁免。
+ * **「能不能只放开需要写的那一条路径」：不能。** 两样东西一起锁死了这条路：
+ * 按调用携带的 `SandboxPolicyRequest` 只有 `session` 与 `mode` 两个字段，**没有**附加可写
+ * 路径、没有自定义 HOME、没有目录级豁免；而 `SandboxMode` 的取值只有
+ * `read-only | workspace-write | danger-full-access` 三档，中间那一档的可写根就是
+ * `workspaceRoot` 一枚。两处声明都取自本包实际解析到的那版（dsh-sandbox-policy 与
+ * dsh-sandbox 的 0.2.1-rc.2，`lib/types/index.d.ts`）。
  * 可选的收紧路径只有「改 ocr 自己的状态落点」或「等上游加字段」，两者都不是本包能在
  * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
  * 文件系统写权限，不是宿主其它能力；且 ocr 读什么、写什么仍由上面那条 argv 闸与
@@ -1061,24 +1037,6 @@ interface BackgroundJob {
 }
 
 /**
- * 终止 OCR 进程，忽略"已经没有必要杀"的那一类异常（进程自然退出、已被注册表或宿主回收）。
- *
- * 这层兜不是风格：官方契约明写生产者的 `cancel` 会往上抛（installed
- * `dsh-jobs/lib/types/types.d.ts:98-102` "throws propagate"），而 `killJob` 裸调
- * `job.cancel(reason)`、只有 teardown 那一臂逐条 try/catch（同包 `lib/index.js:611-622`
- * 对照 `:805-824`）。本包的 `cancel` 是从 `AbortSignal` 监听器里被回调的，Node 对监听器
- * 抛出的处理是 `process.nextTick(() => { throw err })` ⇒ **未捕获异常、宿主进程退出**
- * （本机实跑复现）。一次取消杀掉整个 dsh 不是可接受的失败形态。
- */
-function killProc(proc: ShellExecution): void {
-  try {
-    proc.kill();
-  } catch {
-    // 忽略：见上。
-  }
-}
-
-/**
  * 进程的两条流作为注册表 pull source（与宿主 bash 工具的 processSources 同一形状）。
  * 交给注册表按它自己的节奏泵 ⇒ 没人来看时输出也照样进环；dsh-shell 的 `observed` 是
  * **非消费**的按偏移读，与 `readOutput()` 的游标互不争夺（installed
@@ -1144,8 +1102,8 @@ interface BackgroundReceipt {
  *
  * 那次子进程现在同时是一枚**官方作业**（kind `ocr-review`）：官方 `job_list` /
  * `job_output` / `job_kill` 从此看得见它，本包不再需要为"起完就没人管"负责。
- * 工具的返回值是下面的结构化回执对象（canonical 值直返；作业面换装只动了"谁能看见
- * 并停掉它"，这份回执的内容自此未变——变的只是不再包一层 `{ text }` 字符串）。
+ * 工具的返回值是下面的结构化回执对象（canonical 值直返，不包一层 `{ text }` 字符串；
+ * 作业面只管"谁能看见并停掉它"，不改这份回执的内容）。
  *
  * 生命周期（任何模式下都可后台运行）：
  *  - 不接工具调用的中止信号：program 模式在程序结束时会对活跃调用发 abort，
@@ -1162,7 +1120,7 @@ async function startBackground(host: HostCtx, job: BackgroundJob): Promise<Backg
   const registry: JobsService | undefined = host.get("jobs");
   if (registry === undefined) {
     // 没有注册表就不起进程：本包不再自带一张作业表，"起了但谁也看不见、谁也停不掉"
-    // 正是这次换装要消灭的形态。前台（wait:true）路径不受影响。
+    // 正是本包要消灭的形态。前台（wait:true）路径不受影响。
     throw new Error(
       "background review unavailable: the host provides no ctx.jobs (load @deepseek-ai/dsh-jobs-local); run it with wait:true instead",
     );
@@ -1187,6 +1145,12 @@ async function startBackground(host: HostCtx, job: BackgroundJob): Promise<Backg
       label: `${job.tool} ${job.repo}`,
       output: reviewSources(proc, messages),
       run: () => ({
+        // 这层吞异常不是风格：官方契约明写生产者的 `cancel` 会往上抛（dsh-jobs 的
+        // types.d.ts "throws propagate"），注册表的 `killJob` 裸调 `job.cancel(reason)`、
+        // 只有 teardown 那一臂逐条 try/catch。而本包的 `cancel` 是从 `AbortSignal` 监听器里
+        // 被回调的，Node 对监听器抛出的处理是 `process.nextTick(() => { throw err })`
+        // ⇒ **未捕获异常、宿主进程退出**（本机实跑复现）。一次取消杀掉整个 dsh 不是可接受
+        // 的失败形态，所以这里走 `killProc` 而不是裸调 `proc.kill()`。
         cancel: () => {
           killProc(proc);
         },
@@ -1222,6 +1186,11 @@ async function startBackground(host: HostCtx, job: BackgroundJob): Promise<Backg
 /** 只收集不抛错（llm test 等需要展示原始失败的命令）。输出必先脱敏（直通卡片）。
  *  `timedOut` 必须一起交回：被墙钟收走的那条进程没有退出码可报，只留 exitCode 的调用方
  *  会把「超时」写成「执行失败（exit=null）」，把用户指到不存在的那个退出码上。 */
+/** 两路输出合并：任一路为空就不添分隔符（空 stderr 也常见，别在正文后留一条空行）。 */
+export function joinedOutput(stdout: string, stderr: string): string {
+  return stdout === "" || stderr === "" ? stdout + stderr : `${stdout}\n${stderr}`;
+}
+
 async function runCollect(
   host: HostCtx,
   command: string,
@@ -1238,10 +1207,7 @@ async function runCollect(
   });
   const exec = await host.shell.execute(spec);
   const result = await exec.result();
-  const joined =
-    result.stdout.text === "" || result.stderr.text === ""
-      ? result.stdout.text + result.stderr.text
-      : `${result.stdout.text}\n${result.stderr.text}`;
+  const joined = joinedOutput(result.stdout.text, result.stderr.text);
   return {
     exitCode: result.exitCode,
     timedOut: result.timedOut,
@@ -1261,7 +1227,7 @@ function readEffort(config: Config): "low" | "medium" | "high" {
   return raw === "low" || raw === "high" ? raw : "medium";
 }
 
-function readLanguage(config: Config): string | undefined {
+export function readLanguage(config: Config): string | undefined {
   const lang: unknown = config.language.get();
   return typeof lang === "string" && (lang === "中文" || lang === "English") ? lang : undefined;
 }
@@ -1303,7 +1269,7 @@ const NO_UPDATE_ENV: Record<string, string> = { OCR_NO_UPDATE: "1" };
  * undefined（不注入，维持上游行为）。每次现读并给新对象，不让执行器与本包共享同一份
  * 引用——被净化环境是宿主的事，本包只保证「这条命令带上/不带这个变量」。
  */
-function ocrEnv(config: Config): Record<string, string> | undefined {
+export function ocrEnv(config: Config): Record<string, string> | undefined {
   return config.ocrNoAutoUpdate ? { ...NO_UPDATE_ENV } : undefined;
 }
 
@@ -1402,44 +1368,7 @@ function define(host: HostCtx, spec: ToolSpec): void {
   });
 }
 
-// ── 设置端点辅助（sendJson/isCrossOrigin/guardBody 样板由 shared 提供）──────
-
-/** body 文本 → JSON 对象（空 body = {}；非对象抛错）。 */
-export function parseJsonBody(text: string, messages: OcrReviewMessages): Record<string, unknown> {
-  if (text.trim() === "") {
-    return {};
-  }
-  const parsed: unknown = JSON.parse(text);
-  if (!isRecord(parsed)) {
-    throw new Error(messages.bodyMustBeObject);
-  }
-  return parsed;
-}
-
-/**
- * POST 端点统一前置：405 → 跨域 → CSRF → body 上限（shared.guardBody）。
- *
- * 此前只有 sec-fetch-site（curl/本地进程可伪造头，且空头直通），而写端点会改
- * ~/.opencodereview/config.json；/migrate 与 /test 甚至从不读 body——keep-alive
- * 连接上未读尽的请求体会把残余字节留给后续响应，且超限请求可以一直占内存。
- * 返回 null 表示已就地响应，调用方必须立即返回。
- */
-async function guardPost(
-  req: IncomingMessage,
-  res: ServerResponse,
-  csrf: string,
-): Promise<string | null> {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    sendJson(res, 405, { ok: false, error: "POST only" });
-    return null;
-  }
-  const read = await guardBody(req, res, {
-    maxBytes: BODY_MAX_BYTES,
-    csrf: { token: csrf, headerName: OCR_CSRF_HEADER },
-  });
-  return read;
-}
+// ── 输出收口 ────────────────────────────────────────────────────────────────
 
 /** 原始输出回显给模型/卡片前的两道收口：截断 + 明文 key 脱敏。 */
 function echoRaw(text: string, limit: number): string {
@@ -1464,7 +1393,7 @@ function readOutFile(outPath: string, messages: OcrReviewMessages): string {
 /**
  * OCR 原生数值参数的 tool schema 片段（忠实透传语义，桥接层不设钳制）。
  * unit 区分 review（每组）/ scan（每文件）的措辞（取消息表的 unitGroup/unitFile，
- * 语言随设置页偏好走）；OCR 侧语义见 shared_flags.go:52-58 与 scan_cmd.go:231-236。
+ * 语言随设置页偏好走）；OCR 侧语义见 shared_flags.go:52-58 与同文件的 registerScanFlags。
  */
 function tuningParams(messages: OcrReviewMessages, unit: string): Record<string, unknown> {
   const of = (template: string): { type: "integer"; description: string } => ({
@@ -1604,7 +1533,7 @@ function ocrHome(config: Config): string | undefined {
  * 目录，而插件会被重装、换 profile（desktop / browser / 任意自定义名）、换发布形态。
  * 目录一变那条命令就悬空，ocr 侧报的是「resolve LLM endpoint 失败」，与真因毫无
  * 关系——五个工具一次性全挂，而配置文件里没有任何线索指向「本包被挪了地方」。
- * 当前路径一律取自 PLUGIN_DIR（import.meta.dirname，host.ts:181），与 profile 命名
+ * 当前路径一律取自 PLUGIN_DIR（import.meta.dirname），与 profile 命名
  * 无关，故 desktop / browser / 自定义名走的是同一条路径。
  *
  * 与 ocrHome 同一口径：**不抛错**。pluginPaths 在坏设置下会抛，而那正是「工具照常
@@ -1965,28 +1894,7 @@ async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string>
   return realpathOrSelf(root);
 }
 
-/**
- * 判定 webserver 绑定地址字面量是否回环（127/8、::1 及其全展开/IPv4 映射形态；
- * `%zone` 后缀剥掉再比，对齐宿主 isLoopbackHost 的判定域）。
- *
- * 为什么不是 `host === "0.0.0.0"`：宿主 webserver 的 Config 在装载期就**拒绝通配
- * 地址**（dsh-host-webserver 0.2.1-alpha.3 的 `Config.host` 文档：IPv4/IPv6 any 及其
- * 映射形态 rejected at load，要求绑定本机某个具体接口的 IP 字面量），所以那个等式是永假死分支，
- * 唯一需要 trust 闸放行局域网 Host 头的场景（绑定 LAN IP，容器/远端部署的正路）
- * 反而被当成回环、整批 403。host 经 config 校验必为具体 IP 字面量，故本函数
- * 不必处理主机名与通配，只枚举回环字面量的常见书写。
- */
-export function isLoopbackBindAddress(host: string): boolean {
-  const value = host.toLowerCase().replace(/%.*$/u, "");
-  return (
-    value === "::1" ||
-    value === "0:0:0:0:0:0:0:1" ||
-    value.startsWith("127.") ||
-    /^::ffff:127(?:\.\d{1,3}){3}$/u.test(value)
-  );
-}
-
-/** select 端点过了 trust 闸门与 guardPost 之后那一段的依赖（对象化以受 max-params 约束）。 */
+/** select 读面的依赖（对象化以受 max-params 约束）。 */
 interface SelectEndpointDeps {
   config: Config;
   gateway: DshConfigGateway;
@@ -1994,28 +1902,21 @@ interface SelectEndpointDeps {
   messages: () => OcrReviewMessages;
 }
 
-/** POST select 的响应：把 body 里的 provider/model 应用到 OCR 配置，按需附带 llm test 回执。 */
-async function sendSelectResponse(
-  text: string,
-  res: ServerResponse,
+/**
+ * 应用一次 provider/model 选择。
+ *
+ * 缺字段就地回 400 而不是让 applyProviderSelection 抛：那句文案与卡片「选一个」的提示
+ * 同源，走异常只会让调用方看见一层包装。其余失败一律折成 `{ ok: false, status }`：
+ * `status` 是本包保留的语义码（见 `lib/remote-shape.ts` 的 OcrRemoteRefused），不是 HTTP 状态。
+ */
+async function selectReply(
+  provider: string,
+  model: string,
   deps: SelectEndpointDeps,
-): Promise<void> {
+): Promise<OcrSelectReply> {
   const msgs = deps.messages();
-  let body: Record<string, unknown>;
-  try {
-    body = parseJsonBody(text, msgs);
-  } catch (error) {
-    sendJson(res, 400, {
-      ok: false,
-      error: format(msgs.bodyParseFailed, { message: errorText(error) }),
-    });
-    return;
-  }
-  const provider = typeof body["provider"] === "string" ? body["provider"] : "";
-  const model = typeof body["model"] === "string" ? body["model"] : "";
   if (provider === "" || model === "") {
-    sendJson(res, 400, { ok: false, error: msgs.providerModelRequired });
-    return;
+    return { ok: false, error: msgs.providerModelRequired, status: 400 };
   }
   try {
     const language = readLanguage(deps.config);
@@ -2029,13 +1930,13 @@ async function sendSelectResponse(
     if (readAutoVerify(deps.config)) {
       llmTest = await runLlmTest(deps.host, deps.config);
     }
-    sendJson(res, 200, { ok: true, applied, llmTest });
+    return { ok: true, applied, llmTest };
   } catch (error) {
-    sendJson(res, 400, { ok: false, error: errorText(error) });
+    return { ok: false, error: errorText(error), status: 400 };
   }
 }
 
-/** POST probe 的处理依赖（与 select 同一取舍：>5 参数会撞 max-params）。 */
+/** probe 读面的依赖（与 select 同一取舍：>5 参数会撞 max-params）。 */
 interface ProbeEndpointDeps {
   config: Config;
   host: HostCtx;
@@ -2047,7 +1948,7 @@ interface ProbeEndpointDeps {
 }
 
 /**
- * 跑一次状态探测并落成卡片吃得下的那份 JSON。
+ * 跑一次状态探测并落成卡片吃得下的那份载荷。
  *
  * `reason` 与 `output` 的分工：`output` 是外部 CLI 的一手回执（`runCollect` 已脱敏、
  * 已按码元截断），那句「自动更新没成功，请手工执行 npm i -g …」就原样活在里面——本包
@@ -2058,7 +1959,7 @@ interface ProbeEndpointDeps {
  * 这时对用户宣称「不一致」是把没证据的事说成结论。`changeText` 只在**有把握给出命令**
  * 时才非空——实测到别的版本，或文件系统那边根本没有候选。
  */
-async function sendProbeResponse(res: ServerResponse, deps: ProbeEndpointDeps): Promise<void> {
+async function probeReply(deps: ProbeEndpointDeps): Promise<OcrProbeReply> {
   try {
     const messages = deps.messages();
     const probe = await runVersionProbe(deps.host, deps.config, messages);
@@ -2066,7 +1967,7 @@ async function sendProbeResponse(res: ServerResponse, deps: ProbeEndpointDeps): 
     const status = deps.availability();
     const consistent = probe.version === null ? null : probe.version === EXPECTED_OCR_CLI_VERSION;
     const showCommand = consistent === false || status.source === "none";
-    sendJson(res, 200, {
+    return {
       ok: probe.ok,
       version: probe.version,
       expectedVersion: EXPECTED_OCR_CLI_VERSION,
@@ -2074,15 +1975,15 @@ async function sendProbeResponse(res: ServerResponse, deps: ProbeEndpointDeps): 
       output: probe.output,
       reason: probe.reason,
       changeText: showCommand ? ocrInstallText(status, deps.config, messages) : "",
-    });
+    };
   } catch (error) {
-    // shell 服务本身抛错（不是非零退出）也要回可读 JSON，理由同 /migrate。
-    sendJson(res, 400, { ok: false, error: errorText(error) });
+    // shell 服务本身抛错（不是非零退出）也要回可读回执，理由同 migrate。
+    return { ok: false, error: errorText(error), status: 400 };
   }
 }
 
-/** 端点组要额外现读的三口：装载期自检结论、外部 CLI 可用性、最近一次实测版本。收成对象是因为
- *  registerConfigEndpoints 再加一位就撞 max-params，而这几口本来就是同一类东西。 */
+/** 读面额外现读的三口：装载期自检结论、外部 CLI 可用性、最近一次实测版本。收成对象是因为
+ *  逐项平铺会撞 max-params；这几口本来就是同一类东西。 */
 interface EndpointExtras {
   /** 装载期端点自检结果的现读口（apply 的闭包变量，见 probeEndpointAtApply）。 */
   readonly verifyOf: () => EndpointVerify | null;
@@ -2093,26 +1994,22 @@ interface EndpointExtras {
   readonly versionSink: { value: string | null };
 }
 
-/** GET providers 的处理依赖（与 select/probe 同一取舍：>5 参数会撞 max-params）。 */
+/** providers 读面的依赖（与 select/probe 同一取舍：>5 参数会撞 max-params）。 */
 interface ProvidersEndpointDeps {
   config: Config;
   gateway: DshConfigGateway;
   messages: () => OcrReviewMessages;
-  csrf: string;
   extras: EndpointExtras;
 }
 
 /**
- * 组好设置页那份载荷并写出去。
+ * 组好设置页那份载荷（**不含 csrf**：本包不再持有任何写侧闸门，鉴权归宿主网关）。
  *
  * `ocrBinary` 只用文件系统的事实（不起进程），卡片据此显示「装没装、走的哪条路、那一份是什么
  * 装法」。实测版本不在这里 spawn——这里只交最近一次检测落在闭包里的那个值（没测过就是 null）；
- * 现跑一次 `ocr version` 归 POST probe，由人按下「检测」才拿。
+ * 现跑一次 `ocr version` 归 probe，由人按下「检测」才拿。
  */
-async function sendProvidersResponse(
-  res: ServerResponse,
-  deps: ProvidersEndpointDeps,
-): Promise<void> {
+async function providersReply(deps: ProvidersEndpointDeps): Promise<Record<string, unknown>> {
   try {
     const msgs = deps.messages();
     const payload = await providersForCard(
@@ -2121,7 +2018,7 @@ async function sendProvidersResponse(
       msgs,
       deps.extras.verifyOf(),
     );
-    sendJson(res, 200, {
+    return {
       ...payload,
       ocrBinary: cliStatusPayload(
         deps.extras.availability(),
@@ -2129,165 +2026,150 @@ async function sendProvidersResponse(
         msgs,
         deps.extras.versionSink.value,
       ),
-      csrf: deps.csrf,
-    });
+    };
   } catch (error) {
-    // 装配期之后的意外（设置项里的路径不合法、宿主服务抛错）也要回可读 JSON：
+    // 装配期之后的意外（设置项里的路径不合法、宿主服务抛错）也要回可读回执：
     // 卡片读的是 error 文本，让它卡在「加载 providers…」比让它报错更难排查。
-    sendJson(res, 500, { ok: false, error: errorText(error) });
+    return { ok: false, error: errorText(error), status: 500 };
   }
 }
 
-/** 注册 webServer 配置端点（卡片专用：providers/select/migrate/test/probe）。
- *  csrf 为每次 apply 生成的会话内 token：GET providers 下发、四个写端点回填
- *  校验（sec-fetch-site 只挡浏览器，挡不住能构造请求头的本地进程）。
- *  ctx 只用来挂释放器，给的是 `inject(["webServer"])` 子 fiber 的上下文。 */
-export function registerConfigEndpoints(
-  ctx: Pick<Context, "effect">,
-  host: HostCtx,
-  config: Config,
-  csrf: string,
-  extras: EndpointExtras,
-): void {
-  // 官方 `Context["get"]` 交出整个 `WebServer` 类；这里显式收回本包的方法面投影，
-  // 于是「只用 register」仍是编译期约束（误用别的成员即报错），不必再镜像一次签名。
-  const webServer: WebServerService | undefined = host.get("webServer");
-  if (!webServer) {
-    // 无 webServer 服务（未起 web 组合）→ 卡片不可用，工具与设置照常。
-    return;
+/** 明文 key 一键迁移。 */
+async function migrateReply(deps: SelectEndpointDeps): Promise<OcrMigrateReply> {
+  try {
+    const msgs = deps.messages();
+    const result = await migratePlaintextKeys(deps.gateway, pluginPaths(deps.config, msgs), msgs);
+    return { ok: true, ...result };
+  } catch (error) {
+    // 坏 config.json / settings 读不到都会抛（写侧 fail-loud），必须回可读错误：
+    // 卡片要能读出「为什么没迁移」。
+    return { ok: false, error: errorText(error), status: 400 };
   }
-  // 非回环服务面的信号按 isLoopbackBindAddress 重算（判据与宿主 config 的现实一致，
-  // 见该函数的注释——"=== 0.0.0.0" 那条旧等式在通配被 config 拒绝后是永假分支）。
-  const servingNonLoopback = !isLoopbackBindAddress(webServer.host);
-  const gateway = createGateway(host);
-  // 端点回执是给人看的：每个请求现取一份文案（用户在「设置 → 常规」换语言后，
-  // 下一次请求即换新文案，不必重启）。
-  const messages = (): OcrReviewMessages => localeMessages(host);
+}
 
-  // GET providers：设置页数据（无 key 明文）+ csrf token。
-  const disposeProviders = webServer.register({
-    kind: "exact",
-    path: PROVIDERS_PATH,
-    handler: async (req, res) => {
-      // 信任闸门（shared/lib/trust）：必须是 handler 体的第一条语句——先验权威再谈方法/参数。
-      if (!guardTrust(req, res, { servingNonLoopback })) {
-        return;
-      }
-      // 闸门之后这一段本包的 isCrossOrigin 已不可达（trust 的 sec-fetch-site 白名单更严、
-      // 且给出同一句错误文本），留着它就是一条永不被执行的分支 ⇒ 删。既有那条
-      // 「跨源 403」用例仍然通过：拒它的换成了 trust，文案一字不差。
-      await sendProvidersResponse(res, { config, gateway, messages, csrf, extras });
-    },
-  });
+/** 手动 `ocr llm test`：`ok` 是测试结论，不是调用成败。 */
+async function testReply(deps: SelectEndpointDeps): Promise<OcrTestReply> {
+  try {
+    const llmTest = await runLlmTest(deps.host, deps.config);
+    return { ok: llmTest.ok, output: llmTest.output };
+  } catch (error) {
+    return { ok: false, error: errorText(error), status: 400 };
+  }
+}
 
-  // POST select：把 provider/model 应用到 OCR 配置（api_key_cmd 动态读 key）。
-  const disposeSelect = webServer.register({
-    kind: "exact",
-    path: SELECT_PATH,
-    handler: async (req, res) => {
-      // 信任闸门（shared/lib/trust）：必须是 handler 体的第一条语句——先验权威再谈方法/参数。
-      if (!guardTrust(req, res, { servingNonLoopback })) {
-        return;
-      }
-      const text = await guardPost(req, res, csrf);
-      if (text === null) {
-        return;
-      }
-      await sendSelectResponse(text, res, { config, gateway, host, messages });
-    },
-  });
+/** 卡片读面（官方 Typert Remote）的全部依赖。 */
+export interface OcrReviewRemoteDeps {
+  host: HostCtx;
+  config: Config;
+  gateway: DshConfigGateway;
+  /** 现取一份文案（语言随官方 locale 偏好，改语言不必重载插件）。 */
+  messages: () => OcrReviewMessages;
+  extras: EndpointExtras;
+}
 
-  // POST migrate：明文 api_key → api_key_cmd 一键迁移。
-  const disposeMigrate = webServer.register({
-    kind: "exact",
-    path: MIGRATE_PATH,
-    handler: async (req, res) => {
-      // 信任闸门（shared/lib/trust）：必须是 handler 体的第一条语句——先验权威再谈方法/参数。
-      if (!guardTrust(req, res, { servingNonLoopback })) {
-        return;
-      }
-      const text = await guardPost(req, res, csrf);
-      if (text === null) {
-        return;
-      }
-      try {
-        const msgs = messages();
-        const result = await migratePlaintextKeys(gateway, pluginPaths(config, msgs), msgs);
-        sendJson(res, 200, { ok: true, ...result });
-      } catch (error) {
-        // 坏 config.json / settings 读不到都会抛（写侧 fail-loud），必须回 JSON
-        // 错误而不是让请求挂到 webserver 兜底——卡片要能读出「为什么没迁移」。
-        sendJson(res, 400, { ok: false, error: errorText(error) });
-      }
-    },
-  });
+/**
+ * 设置卡的五条读/写方法（providers / select / migrate / test / probe）。
+ *
+ * ⚠ 服务在**构造时**注册（cordis `Service` 的契约：`ctx.reflect.provide`，随所属 fiber
+ * 卸载自动撤），所以调用方拿实例没有任何用处——装入口 `installOcrRemote` 说明了这一点。
+ * 五个方法都不依赖可选宿主服务（gateway 与取用口都由 apply 交进来），故它跟着 apply
+ * 无条件上线：宿主没有 web 层（TUI）时这五条照样在。
+ */
+export class OcrReviewRemoteService extends TypertRemoteService {
+  private readonly deps: OcrReviewRemoteDeps;
 
-  // POST test：手动触发 ocr llm test。
-  const disposeTest = webServer.register({
-    kind: "exact",
-    path: TEST_PATH,
-    handler: async (req, res) => {
-      // 信任闸门（shared/lib/trust）：必须是 handler 体的第一条语句——先验权威再谈方法/参数。
-      if (!guardTrust(req, res, { servingNonLoopback })) {
-        return;
-      }
-      const text = await guardPost(req, res, csrf);
-      if (text === null) {
-        return;
-      }
-      try {
-        const llmTest = await runLlmTest(host, config);
-        sendJson(res, 200, { ok: llmTest.ok, output: llmTest.output });
-      } catch (error) {
-        sendJson(res, 400, { ok: false, error: errorText(error) });
-      }
-    },
-  });
+  public constructor(ctx: Context, deps: OcrReviewRemoteDeps) {
+    super(ctx, OCR_REMOTE_NAMESPACE);
+    this.deps = deps;
+  }
 
-  // POST probe：手动触发一次 `ocr version`，取外部 CLI 的自述给设置页。
-  // 这条路由**不**做可用性前置——「按检测就是为了知道装没装」，前置会把答案吃掉；
-  // 找不到命令词那一档由 runVersionProbe 落成 execNotFound 那条理由。
-  const disposeProbe = webServer.register({
-    kind: "exact",
-    path: PROBE_PATH,
-    handler: async (req, res) => {
-      // 信任闸门（shared/lib/trust）：必须是 handler 体的第一条语句——先验权威再谈方法/参数。
-      if (!guardTrust(req, res, { servingNonLoopback })) {
-        return;
-      }
-      const text = await guardPost(req, res, csrf);
-      if (text === null) {
-        return;
-      }
-      await sendProbeResponse(res, {
-        config,
-        host,
-        messages,
-        availability: extras.availability,
-        versionSink: extras.versionSink,
-      });
-    },
-  });
+  /** 设置页数据：provider 清单 + 当前 OCR 配置 + 降级原因 + 外部 CLI 状态（无 key 明文）。 */
+  public async providers(): Promise<Record<string, unknown>> {
+    return providersReply(this.deps);
+  }
 
-  // 五条路由的释放器必须自己收。官方 `register` 只做「查重 + 塞进路由表」并交回一枚
-  // **必须调用**的 disposer（installed dsh-host-webserver/lib/index.js:172-183），而路由表
-  // 挂在宿主提供的 webServer 实例上，**不**随本插件 fiber 死。留着的两种后果：
-  //  1. 热重载即坏：旧 fiber dispose 完路由原封不动，新 apply 再注册同一路径 ⇒ 官方件当场抛
-  //     `webserver: duplicate exact route "..."`（DSH_HOT_RELOAD=1 下改本文件任意一行）。
-  //  2. 禁用/卸载后端点仍可达：五条路由继续经那枚已死 fiber 的闭包写
-  //     ~/.opencodereview/config.json、起 `ocr llm test` 与 `ocr version` 进程。
-  // 挂在注入子 fiber 的效应上（而不是 apply 的 ctx）：webServer 换实例时子 fiber 先卸后装
-  // （cordis registry.d.ts:97），释放器因此也覆盖「服务重启后重新注册」这一档。
-  ctx.effect(
-    () => () => {
-      disposeProviders();
-      disposeSelect();
-      disposeMigrate();
-      disposeTest();
-      disposeProbe();
+  /** 应用 provider/model 选择；回执里按 autoVerify 决定是否带 llm test。 */
+  public async select(request: OcrSelectRequest): Promise<OcrSelectReply> {
+    // 入参来自网线：类型说的是 descriptor 的承诺，交付仍按 unknown 面守卫。
+    const provider =
+      isRecord(request) && typeof request.provider === "string" ? request.provider : "";
+    const model = isRecord(request) && typeof request.model === "string" ? request.model : "";
+    return selectReply(provider, model, this.deps);
+  }
+
+  /** 明文 api_key → api_key_cmd 一键迁移。 */
+  public async migrate(): Promise<OcrMigrateReply> {
+    return migrateReply(this.deps);
+  }
+
+  /** 手动触发 ocr llm test。 */
+  public async test(): Promise<OcrTestReply> {
+    return testReply(this.deps);
+  }
+
+  /** 跑一次 `ocr version`，取外部 CLI 的自述给状态行（不前置可用性：检测就是为了知道装没装）。 */
+  public async probe(): Promise<OcrProbeReply> {
+    return probeReply({
+      config: this.deps.config,
+      host: this.deps.host,
+      messages: this.deps.messages,
+      availability: this.deps.extras.availability,
+      versionSink: this.deps.extras.versionSink,
+    });
+  }
+}
+
+/**
+ * 标准装饰器的**程序化调用**：`@Remote` 的全部作用就是往类原型写一枚描述符，而标准装饰器
+ * 语法需要一条 tsc 降级管线（本仓的测试/构建解析器都不降级它）。这里直接按 TC39 的
+ * `ClassMethodDecoratorContext` 形状调同一个 decorator 函数，把标记落到真正的原型上。
+ */
+function markRemote(prototype: OcrReviewRemoteService, methodName: string): void {
+  // 官方 `Remote` 的运行时只读 name/private/static 与 addInitializer（TC39 的 access/metadata
+  // 它一概不读），故这里只给这四位；`Reflect.apply` 让装饰器工厂保持未类型化的调用面。
+  const context = {
+    kind: "method",
+    name: methodName,
+    static: false,
+    private: false,
+    addInitializer: (initializer: (this: unknown) => void): void => {
+      // 初始器只做 `Object.getPrototypeOf(this)` 后落标记；用原型造一枚替身实例即可。
+      Reflect.apply(initializer, Object.create(prototype), []);
     },
-    "ocr-review: config endpoints",
-  );
+  };
+  // oxlint-disable-next-line eslint/new-cap -- `Remote(…)` 是装饰器工厂，不是大写开头的构造调用
+  const decorate = Remote(methodName);
+  Reflect.apply(decorate, undefined, [Reflect.get(prototype, methodName), context]);
+}
+
+markRemote(OcrReviewRemoteService.prototype, "providers");
+markRemote(OcrReviewRemoteService.prototype, "select");
+markRemote(OcrReviewRemoteService.prototype, "migrate");
+markRemote(OcrReviewRemoteService.prototype, "test");
+markRemote(OcrReviewRemoteService.prototype, "probe");
+
+/**
+ * 把读面装到这个上下文上（构造即注册，见类文档；host 侧唯一该调的口）。
+ *
+ * 注册口先探一次（`ctx.reflect.provide`）：替身/畸形上下文未必给，少了它只该少掉卡片
+ * 这一栏，绝不该让 apply 当场炸掉。本服务没有自己的收尾资源——卸载由 Service 基类登记的
+ * 反射面 disposer 负责，不另挂 effect。
+ *
+ * @param ctx - 宿主上下文
+ * @param deps - 读面的全部依赖（见 OcrReviewRemoteDeps）
+ * @returns 装上了没有（调用方不需要它——返回它只是让这条路可断言）
+ */
+export function installOcrRemote(ctx: Context, deps: OcrReviewRemoteDeps): boolean {
+  if (!isRecord(ctx)) {
+    return false;
+  }
+  const { reflect } = ctx;
+  if (!isRecord(reflect) || typeof reflect.provide !== "function") {
+    return false;
+  }
+  // oxlint-disable-next-line eslint/no-new -- 见函数文档：构造即注册，返回值无意义
+  new OcrReviewRemoteService(ctx, deps);
+  return true;
 }
 
 // ── 外部 CLI 可用性前置 ─────────────────────────────────────────────────────
@@ -2474,7 +2356,7 @@ function registerScanTool(
           enum: ["none", "by-language", "by-directory"],
           description: msgs.paramBatch,
         },
-        // OCR scan 原生 --provider/--model（shared_flags.go:223-247 共享 flags），
+        // OCR scan 原生 --provider/--model（shared_flags.go 的 registerScanFlags），
         // 与 ocr_review 对齐。
         provider: { type: "string", description: msgs.paramProvider },
         model: { type: "string", description: msgs.paramModel },
@@ -2757,6 +2639,13 @@ const ENDPOINT_VERIFY_CHARS = 400;
  * @param config 本次 apply 的配置
  * @param sink 本次 apply 的闭包槽（不是常驻状态）
  */
+/** 装载期自检结果 → 卡片读的那一格（成功不占文案，失败截到预算内）。 */
+export function endpointVerifyOf(result: { ok: boolean; output: string }): EndpointVerify {
+  return result.ok
+    ? { ok: true, message: "" }
+    : { ok: false, message: result.output.trim().slice(0, ENDPOINT_VERIFY_CHARS) };
+}
+
 async function probeEndpointAtApply(
   host: HostCtx,
   config: Config,
@@ -2766,9 +2655,7 @@ async function probeEndpointAtApply(
   // 故这里没有可抛路径，也就不需要 catch（本仓覆盖率 100%，写一条走不到的分支
   // 只会逼出一条假用例）。
   const result = await runLlmTest(host, config);
-  sink.value = result.ok
-    ? { ok: true, message: "" }
-    : { ok: false, message: result.output.trim().slice(0, ENDPOINT_VERIFY_CHARS) };
+  sink.value = endpointVerifyOf(result);
 }
 
 /**
@@ -2857,22 +2744,14 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     text: localeMessages(host).routingText,
   });
 
-  // 卡片端点组（providers / select / migrate / test / probe）。
-  // ⚠ 必须对 webServer **建立依赖**，不能在 apply 里读一次：`ctx.get` 是无 inject 语义的
-  // 存储读，官方注释就写着 "or `undefined` when not (**yet**) provided"（installed
-  // @deepseek-ai/cordis/lib/types/reflect.d.ts:10-14）。真实宿主上 webServer 比本条目晚到位
-  // （隔离 DSH_HOME 实测：apply 当场 get 返回 undefined，约 1s 后才交得出实例），旧写法的后果是
-  // 五条端点在 web profile 上永不注册，卡片永远读不到 provider 清单。子 fiber 在依赖到位时
-  // 才激活、依赖换实例时先卸后装（同文件 registry.d.ts:97）。不写进插件级 inject：那会让没有
-  // webServer 的宿主（TUI）连 5 个工具与路由段一并失活。
-  // 效应挂在**子上下文**上（第一个参数）：路由释放器随子 fiber 一起收，故 webServer 换实例、
-  // 插件重载、插件卸载三种场合都不会把旧路由留在那里占住路径（详见该函数里的注释）。
-  host.inject(["webServer"], (child) => {
-    registerConfigEndpoints(child, host, config, randomUUID(), {
-      verifyOf: () => endpointVerify.value,
-      availability: probe,
-      versionSink,
-    });
+  // 设置卡的官方读面（Typert Remote）：五条方法经宿主网关暴露给**本 profile 的客户端**。
+  // 无条件上线——依赖都由这里交进去；来源校验与鉴权由宿主网关承担。
+  installOcrRemote(ctx, {
+    host,
+    config,
+    gateway: createGateway(host),
+    messages: () => localeMessages(host),
+    extras: { verifyOf: () => endpointVerify.value, availability: probe, versionSink },
   });
 }
 

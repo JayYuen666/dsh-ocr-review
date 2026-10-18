@@ -2,9 +2,7 @@
 //
 // 为什么从 lib/parse.ts 拆出来：这一族东西共同回答一个问题——「一条 severity 字符串该算哪
 // 一档」。聚合计数与 top-N 排序都只认这一个口径（此前两处各自实现，同一份数据两种判据，见
-// normalizeSeverity 的注释），判据本身与「OCR 的 JSON 怎么解码」无关，故与 parse.ts 分家；
-// 此前 aggregateComments 的 export 只因单测也按这层边界取用，生产侧的 consumer 全在
-// parse.ts 里，`fallow --production` 因此把它判成「只被测试养着的导出」。
+// normalizeSeverity 的注释），判据本身与「OCR 的 JSON 怎么解码」无关，故与 parse.ts 分家。
 //
 // 本模块与 parse.ts 之间只有 `OcrComment` 这一条**类型**回边（评论形状是 parse.ts 的解码契约，
 // 留在原地），运行时没有反向依赖，不构成模块环。

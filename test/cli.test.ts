@@ -68,6 +68,8 @@ vi.mock("node:fs", async (importOriginal) => {
 
 /** 解析出的命令词：随包入口的绝对路径，或 PATH 上的裸 `ocr`。测试与生产同源。 */
 const OCR = ocrCommand();
+/** 命令词在骨架里占一个 ⟦Q⟧ 当且仅当它解析成了绝对路径（未安装时是裸名 `ocr`）。 */
+const OCR_QUOTED = OCR.startsWith("'") ? 1 : 0;
 /** 可控槽位数（决定命令里应有几段 shq 引号）：命令词另占一段。 */
 const REVIEW_SLOTS = 7;
 const SCAN_SLOTS = 5;
@@ -243,6 +245,13 @@ describe("clampEffort / commaList", () => {
 
 /** 守护包装用例共用的最小命令（字面量散在多处改一处就漏）。 */
 const REVIEW_CMD = "ocr review --audience agent";
+
+describe("命令词的合法形态", () => {
+  it("要么是 shq 转义的绝对路径，要么是未安装时刻意的裸 `ocr`", () => {
+    const legal = OCR === "ocr" || /^'\/.*'$/u.test(OCR);
+    expect(legal, `命令词形态不认识：${OCR}`).toBe(true);
+  });
+});
 
 describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判据）", () => {
   it("PATH 上有候选 ⇒ 命令词是它的绝对路径，随包入口不再抢在它前面", () => {
@@ -515,7 +524,7 @@ describe("buildScanCommand", () => {
     expect(command).toContain("--batch 'by-directory'");
   });
 
-  it("scan 同样透传 timeout/max-tools/max-tokens/max-tokens-budget（scan_cmd.go:231-236 原生支持）", () => {
+  it("scan 同样透传 timeout/max-tools/max-tokens/max-tokens-budget（shared_flags.go 的 registerScanFlags 原生支持）", () => {
     const { command } = scanCmd(
       {
         repo: "/r",
@@ -533,7 +542,7 @@ describe("buildScanCommand", () => {
     expect(command).toContain("--max-tokens-budget 0");
   });
 
-  it("provider/model 透传 --provider/--model（shared_flags.go:223-247 共享 flags，与 review 对齐）", () => {
+  it("provider/model 透传 --provider/--model（shared_flags.go 的 registerScanFlags，与 review 对齐）", () => {
     const { command } = scanCmd({ repo: "/r", provider: "p1", model: "m1" }, "/o");
     expect(command).toContain("--provider 'p1'");
     expect(command).toContain("--model 'm1'");
@@ -742,9 +751,9 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
       const stripped = skeleton(command);
       expect(stripped).not.toMatch(METACHARS);
       // 载荷必须整段落在引号里：⟦Q⟧ 个数 = 可控槽位数（commit/background/
-      // exclude/provider/model/resume/output）+ 命令词本身（它也是一段 shq 转义的
-      // 绝对路径）。少一段就意味着裸拼接。
-      expect(stripped.split("⟦Q⟧").length - 1).toBe(REVIEW_SLOTS + 1);
+      // exclude/provider/model/resume/output）+ 命令词本身。命令词只在解析到绝对路径时
+      // 是 shq 转义的（未安装 ocr 的机器上是刻意保留的裸名 `ocr`），所以按现量加。
+      expect(stripped.split("⟦Q⟧").length - 1).toBe(REVIEW_SLOTS + OCR_QUOTED);
     }
   });
 
@@ -763,7 +772,7 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
       );
       const stripped = skeleton(command);
       expect(stripped).not.toMatch(METACHARS);
-      expect(stripped.split("⟦Q⟧").length - 1).toBe(SCAN_SLOTS + 1);
+      expect(stripped.split("⟦Q⟧").length - 1).toBe(SCAN_SLOTS + OCR_QUOTED);
     }
   });
 
@@ -976,7 +985,7 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
 
   describe("resolveOcrAvailability：来源三档与它的假命中防线", () => {
     it("PATH 上有候选 ⇒ path，且随包入口在盘也不抢在它前面", () => {
-      // 反序是这版修掉的缺陷：随包绝对路径先命中的话，用户升级了自己装在 PATH 上的 CLI，
+      // 反序是缺陷形态：随包绝对路径先命中的话，用户升级了自己装在 PATH 上的 CLI，
       // 插件却仍跑随包那份，卡片报的版本与他终端里跑的永远对不上。
       const bin = makeBinDir(["ocr"]);
       const launcher = path.join(makeBinDir(["ocr.js"]), "ocr.js");

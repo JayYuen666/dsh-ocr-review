@@ -221,7 +221,7 @@ export interface SelectionRequest {
 
 /**
  * 应用选择：官方通道取 provider 清单 → 校验 key 可解析 → 生成新配置 → 写回（0600）。
- * 任何一步不合条件都抛可读错误（webServer 端点兜成 400，卡片显示原因）。
+ * 任何一步不合条件都抛可读错误（Remote 的 select/migrate 兜成 `status: 400`，卡片显示原因）。
  */
 export async function applyProviderSelection(
   gateway: DshConfigGateway,

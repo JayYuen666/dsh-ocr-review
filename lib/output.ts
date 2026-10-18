@@ -9,7 +9,7 @@
 // 输出契约按官方 cookbook（docs/cookbook/adding-a-tool.md）改为
 // 「canonical JSON 值直返」：execute 只交推断出的那个值，不再把结构化对象
 // stringify 进 { text } 再让 render 编第二层（双重编码让 PTC 拿到字符串化的 JSON
-// 而非对象）。本守卫随之升级：define() 出口处用与该工具 output.schema **同一个
+// 而非对象）。本守卫在 define() 出口处用与该工具 output.schema **同一个
 // 对象**自检，违规变成指向具体工具名的插件内错误（模型可见、可重试），故障暴露
 // 面从"harness 深处的 schema 拒绝"收敛回插件自身。
 //
@@ -158,9 +158,13 @@ function arrayViolations(
  *  为什么额外要求随机串里至少有一个数字或大写字母：真实 key 是随机 base62（32 位
  *  纯小写的概率约 1e-12），而审查输出里的 kebab 小写长串几乎只可能是文件路径
  *  （`src/my-super-long-directory-name/index.ts`）。少了这道约束，session/delegate
- *  透传出的路径会被抹成 ***REDACTED***，模型拿不到可行动的位置信息。 */
-const STANDALONE_KEY =
-  /\b[A-Za-z]{2,5}-(?=[A-Za-z0-9_-]{20,}\b)(?=[A-Za-z0-9_-]*[0-9A-Z])[A-Za-z0-9_-]{20,}\b/gu;
+ *  透传出的路径会被抹成 ***REDACTED***，模型拿不到可行动的位置信息。
+ *
+ *  这道约束写在替换回调里而**不写成前瞻**：`-` 同属前缀与随机串的字符集，一条长 run 里
+ *  能嵌套任意多个候选起点，而「run 内是否存在数字或大写」这类前瞻要把后面整段 run 反向
+ *  回溯一遍——逐起点相乘就是 O(n²)（实测 400_000 字符 51 秒，正好是 `stdoutMaxBytes`
+ *  的默认档）。run 是首个 `-` 之后的那一段：前缀只含字母，故首个 `-` 必是分界。 */
+const STANDALONE_KEY = /\b[A-Za-z]{2,5}-[A-Za-z0-9_-]{20,}\b/gu;
 /** `Authorization: <scheme> <value>` / `Proxy-Authorization: …`：认**头名**而不是
  *  枚举认证方案。头名本身就是「后面跟着凭据」的信号，Basic / Token / Digest 乃至
  *  vendor 自定义 scheme 都不会漏；而只认头名还避开了正文里「token based
@@ -177,6 +181,11 @@ const BEARER_VALUE = /(?<scheme>\bbearer[ \t]+)[a-z0-9._~+/=-]{4,}/giu;
 const KEY_ASSIGNMENT =
   /(?<name>\b(?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token)["'\s]*[:=]["'\s]*)(?:(?<scheme>[a-z][a-z0-9_-]*[ \t]+))?[^\s"',;)}\]]{4,}/giu;
 const REDACTION = "***REDACTED***";
+
+/** 独立 key 形态的替换臂：随机串段里真有数字或大写才抹，否则原样交回（文件路径要保持可读）。 */
+function redactStandaloneKey(match: string): string {
+  return /[0-9A-Z]/u.test(match.slice(match.indexOf("-") + 1)) ? REDACTION : match;
+}
 
 /**
  * 抹掉文本里 key 形状的片段。
@@ -196,7 +205,7 @@ export function redactKeyMaterial(text: string): string {
     .replaceAll(AUTH_HEADER_VALUE, `$<name>$<scheme>${REDACTION}`)
     .replaceAll(BEARER_VALUE, `$<scheme>${REDACTION}`)
     .replaceAll(KEY_ASSIGNMENT, `$<name>$<scheme>${REDACTION}`)
-    .replaceAll(STANDALONE_KEY, REDACTION);
+    .replaceAll(STANDALONE_KEY, redactStandaloneKey);
 }
 
 /** ESC 由运行时构造：`eslint(no-control-regex)` 不许控制字符出现在正则字面量里，而这里

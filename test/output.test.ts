@@ -184,6 +184,17 @@ describe("redactKeyMaterial", () => {
     const prose = "the api_key field is missing; token count 1234567890 in max_tokens=12000";
     expect(redactKeyMaterial(prose)).toBe(prose);
   });
+
+  it("无空格的小写长 run 不随长度平方放大（脱敏同步跑在宿主事件循环上）", () => {
+    // 上限取 `stdoutMaxBytes` 的默认档 400_000：失败详情与 llm test 回执都吃这一档，
+    // 而脱敏排在截断之前（先截会把 key 切半、剩下半截全小写就不再命中这条规则）。
+    // 2 秒是独立写死的判据，不是量出来的余量：坏写法（把「run 里有数字或大写」写成前瞻）
+    // 在本机实测 51 秒，好写法 1.3 毫秒，差四个数量级，不存在擦边。
+    const input = "aa-a".repeat(100_000);
+    const started = performance.now();
+    expect(redactKeyMaterial(input)).toBe(input);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
 });
 
 describe("stripAnsi", () => {

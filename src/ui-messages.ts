@@ -39,6 +39,8 @@ export interface UiMessages {
   readonly saveRefused: string;
   /** providers 端点请求失败整行（含原因与自救提示）。 */
   readonly loadProvidersFailed: string;
+  /** 当前部署没有远程面（或网关没挂上命名空间）时的可行动文案。 */
+  readonly remoteUnavailable: string;
   /** providers 首次加载中的占位。 */
   readonly loadingProviders: string;
   /** provider 下拉里没有 key 的条目后缀。 */
@@ -232,7 +234,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     revert: "撤销",
     saveFailed: "保存失败：",
     saveRefused: "未写入（宿主拒收或跳过）：{fields}",
-    loadProvidersFailed: "加载 providers 失败：{error}（端点未就绪？重启 dsh 后重试）",
+    loadProvidersFailed: "加载 providers 失败：{error}（远程面未就绪？重启 dsh 后重试）",
+    remoteUnavailable: "远程服务不可用：宿主没有挂上本插件的设置通道。",
     loadingProviders: "加载 providers…",
     noKeySuffix: "（未配置 key）",
     noModel: "（无模型）",
@@ -320,7 +323,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     saveFailed: "save failed: ",
     saveRefused: "not written (host refused or skipped): {fields}",
     loadProvidersFailed:
-      "failed to load providers: {error} (endpoint not ready? restart dsh and retry)",
+      "failed to load providers: {error} (remote face not ready? restart dsh and retry)",
+    remoteUnavailable:
+      "remote service unavailable: the host did not mount this plugin's settings channel",
     loadingProviders: "loading providers…",
     noKeySuffix: " (no key configured)",
     noModel: " (no model)",

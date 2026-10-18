@@ -9,7 +9,7 @@
 // 工程里连 `node:fs` 都解析不了；而槽 key 恰恰只能在能读文件的这一侧验。
 // 于是分工：本文件（node）钉住 key 的**值**从哪来，client-card.test.ts（浏览器）钉住
 // src 侧的结构与「不得退回裸条目 id」。形状照抄已定案的
-// plugins/zvec-grep/test/build-client.test.ts:33 `profileBundleName()`。
+// plugins/zvec-grep/test/build-client.test.ts 的 `profileBundleName()`。
 //
 // 证据（installed dsh 0.1.7，逐条复核）：
 //   · dsh-client-ui-plugin-manager/lib/client.js:1821

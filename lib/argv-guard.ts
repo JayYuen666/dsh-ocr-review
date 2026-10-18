@@ -3,8 +3,7 @@
 //
 // 为什么从 lib/cli.ts 拆出来：这几族东西共同回答一个问题——「这串用户可控输入能不能进最终
 // 命令」。判据本身与「命令长什么样」无关（cli.ts 的五条命令构造与回收守护只是逐槽位来问一
-// 次），故与 cli.ts 分家；此前它们 export 只因单测也按这层边界取用，生产侧的 consumers 全在
-// 同一个文件里，`fallow --production` 因此把这些导出判成「只被测试养着的导出」。
+// 次），故与 cli.ts 分家。
 //
 // 报错文案双语：与 lib/cli.ts 同一口径——消息表（lib/messages.ts 的一份）由调用点作入参
 // 注入，纯函数不读设置；本模块的校验文本原样回显给模型（工具失败信息）。
@@ -66,10 +65,8 @@ export function clampEffort(value: unknown, fallback: Effort): Effort {
 }
 
 // clampPositiveInt（concurrency/timeout/maxTokens 的数值钳制）已删除：生产侧从无
-// 调用方——lib/cli.ts 的对应槽位全部走 ocr 自身的默认值或 clampEffort。它此前还带着
-// 一处实现与注释相反的缺陷（注释说「非正整数回 fallback」，实际 0/负数被 Math.max
-// 钳到 min），以及 Number(Symbol()) 抛非预期 TypeError 的洞。一个无人调用的导出
-// 留着，它的"契约"只会误导后来人以为已有人在用。
+// 调用方——lib/cli.ts 的对应槽位全部走 ocr 自身的默认值或 clampEffort。一个无人调用的
+// 导出留着，它的"契约"只会误导后来人以为已有人在用。
 
 /** 入参 → 原始项序列（commaList 的第一段：只判「值从哪来」，不判内容）。
  *  数组分支保留逐元素 for-of 而不是 `value.map`：map 会跳过稀疏数组的空洞，

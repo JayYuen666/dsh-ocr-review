@@ -3,10 +3,7 @@
 // 为什么从 lib/ocr-config.ts 拆出来：这一层只认得「settings 那条值长什么样」，不认得
 // ctx.settings 也不认得 credentials 通道（门面与降级状态在 lib/provider-source.ts），更不认得
 // 外部 ocr CLI 的 config.json（在 lib/config-store.ts）。读侧的宽容判据（形状不合的条目整条
-// 丢弃，卡片要能打开让用户去修）与「通道在不在」是两件事，此前挤在同一文件里，
-// providersFromSettingsValue 的 export 只因单测按这层边界取用；生产侧的 consumer 是
-// lib/provider-source.ts 的 readProviders 与 lib/ocr-config.ts（不再是「全在同文件内」
-// ——拆分已经发生过一次，这条依据照抄会让人以为它仍是测试专用）。真正的分层依据是
+// 丢弃，卡片要能打开让用户去修）与「通道在不在」是两件事。分层依据就是
 // 上面那条：**本层不认 ctx、不认 credentials、不认 config.json**，只做纯形状投影。
 //
 // 安全口径与 lib/ocr-config.ts 一致：投影只搬形状，`apiKeyEnv` 是凭据 ref 名而不是 key 值，

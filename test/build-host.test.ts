@@ -1,7 +1,7 @@
 // host.js 构建冒烟 + 防回归锁。
 //
 // 各自防的回归：
-//   1. 跨包依赖必须保持 external（尤其 `@jayyuen66/dsh-plugin-shared/lib/http` 这类**子路径**
+//   1. 跨包依赖必须保持 external（尤其 `@jayyuen66/dsh-plugin-shared/lib/record` 这类**子路径**
 //      说明符：external 的字符串项是精确匹配，匹配不到子路径 → 必须按包名段判定）；
 //   2. Config schema 用的是宿主 fork 的 `@deepseek-ai/schemastery`（0.1.7 的 `.volatile()`
 //      解析只在它有实现），产物里既不能被内联、也不能退回公共 schemastery；
@@ -34,10 +34,9 @@ describe("ocr-review host 构建", () => {
 
   it("跨包依赖保持 external（含 shared 子路径说明符）", async () => {
     const text = await buildHost();
-    // **逐个**子路径列名：只查 `@jayyuen66/dsh-plugin-shared/` 前缀会被 lib/http 一条
+    // **逐个**子路径列名：只查 `@jayyuen66/dsh-plugin-shared/` 前缀会被任意一条子路径
     // 满足，lib/text 哪天被内联（shared 的模块级状态复制成第二份）这条断言看不见。
     for (const subpath of [
-      "lib/http",
       "lib/locale",
       "lib/text",
       "lib/record",
@@ -101,7 +100,7 @@ describe("ocr-review host 构建", () => {
     // brand 只是 credentials 的**传递**依赖（它自己的 lib/index.js:2 就值导入 brand）：本包不
     // 直接导入它，故产物里不该出现它的说明符。这条锁的是本包产物，锁不到"运行时同时存在插件
     // 副本与宿主副本"（realpath 与 inode 都不同）——那是 npm 的解析形状，官方自述 brand 无
-    // 运行时身份与可变状态（实测其 lib/index.js 33 行、0 处顶层 let/var），故不为此加约束。
+    // 运行时身份与可变状态（实测其 lib/index.js 无顶层 let/var），故不为此加约束。
     expect(text).not.toMatch(/from\s*["']@deepseek-ai\/dsh-brand["']/u);
   });
 
@@ -124,15 +123,5 @@ describe("ocr-review host 构建", () => {
     const credStat = await stat(path.join(PKG_ROOT, "scripts", "get-cred.mjs"));
     expect(artifactStat.isFile(), "host.js 已产出（npm run build）").toBe(true);
     expect(credStat.isFile(), "api_key_cmd 脚本必须随包发布（files 含 scripts）").toBe(true);
-  });
-});
-
-describe("闸门的外部化面（shared/lib/trust）", () => {
-  it("lib/trust 子路径保持裸说明符，且 guardTrust 的实现未被内联", async () => {
-    // 这些包原先只钉了 http/project-key/record/jsonl 几枚子路径，`lib/trust` 是新增的第四个坑位：
-    // external 的字符串项是精确匹配，子路径一旦漏掉就把整份判据复制进本包产物（判据分叉的起点）。
-    const out = await buildHost();
-    expect(out).toContain('from "@jayyuen66/dsh-plugin-shared/lib/trust"');
-    expect(/^function guardTrust\(/mu.test(out)).toBe(false);
   });
 });

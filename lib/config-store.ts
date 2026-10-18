@@ -5,11 +5,7 @@
 // `expandHomePath` 之外本地保留的那两条判据，绝对性闸门在 lib/ocr-config.ts 的
 // resolveOcrConfigPath 里）、盘面怎么在不丢未知键的前提下改、怎么用官方
 // `withFileLock` + `writeFileAtomic` 落盘。而「读到的清单与写盘的配置怎么装配成卡片/应用/迁移
-// 三条流程」在 lib/ocr-config.ts。此前这一层被单测直接取用的五个判据（loadOcrConfig /
-// buildApiKeyCmd / renderSelectedConfig / expandHomeForSeparator / credentialScriptPath）全靠
-// export 养着——生产侧的 consumers 全在 ocr-config.ts 那一个文件里，`fallow --production`
-// 因此把它们判成「只被测试养着的导出」；另外四件写盘原语本是文件私有，随这一层一起搬家后
-// 改由装配层跨文件取用。
+// 三条流程」在 lib/ocr-config.ts。
 //
 // 权限与备份口径（0600 / `.bak` / 坏 JSON 抛错而读侧宽容）与「key 不落 OCR 配置」那条决策，
 // 完整理由记在 lib/ocr-config.ts 的头注释里，本模块逐字实现它：写盘一律交官方件，本地只

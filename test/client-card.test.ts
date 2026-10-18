@@ -9,7 +9,7 @@
 //      字符串与 children 当「渲染文本」——en 那份整棵子树不得出现汉字。
 // 带插值的行（currentConfig / provider 标签）另按 helper 直断，
 // 等价于样板包对 sessionRow 的渲染断言。
-import { describe, expect, it, afterEach, vi } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 import {
   apply,
   inject,
@@ -39,6 +39,7 @@ import type {
 } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
 import { UI_MESSAGES } from "../src/ui-messages.ts";
 import type { LocaleNs, Translate } from "../src/ui-messages.ts";
+import type { OcrReader } from "../src/remote.ts";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 import type { LocaleDictOf } from "@deepseek-ai/dsh-client-ui-slots";
@@ -284,7 +285,7 @@ function makeCtx(options: { bound?: Translate } = {}): CardCtxHarness {
         formEntryIds.push(entryId);
         return {
           ...form,
-          // 绊线：0.1.7 的 ConfigForm 没有 dispose（installed config-form-types.d.ts:36-74）。
+          // 绊线：0.1.7 的 ConfigForm 没有 dispose（installed config-form-types.d.ts 的 ConfigForm）。
           // 卡片 slot disposer 一旦回退成「先销毁表单再注销」，这里立刻抛并留下计数。
           dispose: (): never => {
             disposed += 1;
@@ -400,7 +401,6 @@ const READY_DATA = {
   },
   getCredReady: true,
   source: { status: "ready", message: "" },
-  csrf: "token",
 };
 
 /** 装载期自检提示的取文辅助（模块级：放 it / describe 里会被 sonarjs 判「每次调用重建」）。 */
@@ -540,7 +540,7 @@ describe("apply 的官方 locale 接线", () => {
     expect(harness.payloadOf()).toBeNull();
     // 0.1.7 契约移动：`configForms.get()` 交回的是 provider 持有的**共享**表单
     //（installed config-form.d.ts:138-142 "owned by this provider"），消费契约 `ConfigForm`
-    //（config-form-types.d.ts:36-74）里根本没有 dispose，provider 在自己的 fiber 上统一回收
+    //（config-form-types.d.ts 的 ConfigForm）里根本没有 dispose，provider 在自己的 fiber 上统一回收
     //（installed lib/client.js:1290-1293）。故 slot disposer 只注销登记、绊线计数恒 0
     //（迁移前这里是 `toBe(1)`：卡片自己 dispose 那张共享表单，重挂之后每次保存被静默丢弃）。
     // mock 的 dispose 是一根会抛的绊线，真被调用时 cleanSlots() 就直接炸在这里。
@@ -672,7 +672,7 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(loading(tEn)).toContain("loading providers…");
     const failed = (t: Translate): string =>
       textOf(buildProviderSection(depsWith(t, { fetchError: "boom" })));
-    expect(failed(tZh)).toContain("加载 providers 失败：boom（端点未就绪？重启 dsh 后重试）");
+    expect(failed(tZh)).toContain("加载 providers 失败：boom（远程面未就绪？重启 dsh 后重试）");
     expect(failed(tEn)).toContain("failed to load providers: boom");
     const degraded = (t: Translate): string =>
       textOf(
@@ -772,11 +772,6 @@ const BUNDLED_LAUNCHER = "/pkg/bin/ocr.js";
 const PATH_LAUNCHER = "/usr/local/bin/ocr";
 /** 探测回执那条的 data-field。 */
 const PROBE_RESULT = "probe-result";
-/** GET providers 的 URL：与 src 里那份同源但**独立声明**（理由同 PLUGIN_ENTRY_ID——
- *  实现漂到别的端点上时，这条断言才红得住，而跟着改期望值等于没测）。 */
-const PROVIDERS_URL = "/_dsh/ocr-review/providers";
-/** POST probe 的 URL：同样独立声明。 */
-const PROBE_URL = "/_dsh/ocr-review/probe";
 /** 传输层失败时那条 TypeError 的消息（替身与断言共用，写两遍就成了各漂各的期望值）。 */
 const REFUSAL = "connection refused";
 
@@ -821,40 +816,34 @@ function viewOf(
   };
 }
 
-/** 一段 GET providers 的应答（状态码 + 那坨 JSON），loadCliStatus 真读的就这两件。 */
-interface Reply {
-  ok: boolean;
-  json: unknown;
+/** 读取器替身里不参与本组用例的方法：调到即失败（文本面用例不该顺手证明别的方法可用）。 */
+async function unusedReaderMethod(): Promise<never> {
+  throw new Error("unused reader method");
 }
 
 /**
- * fetch 的替身：按调用次序吐出 replies，并原样记下收到的第一个入参。
- * Response 的其余门面（headers/status/text…）本口一概不读，故在此一处投影回官方类型，
- * 而不是把整份 Response 桩齐——多桩的那几位反而会在宿主换实现时假绿。
+ * 读取器替身：按调用次序交出 providers 回包（本组用例只走这一位）。
  */
-function fetchStub(replies: readonly Reply[]): { fetch: typeof fetch; calls: unknown[] } {
-  const calls: unknown[] = [];
-  const stub = (async (input: RequestInfo | URL): Promise<Response> => {
-    // 原样记录而不是 String(input)：断言要的是「传进来的就是那条 URL」，
-    // 转成字符串反而会把 [object Object] 这类漂移糊掉。
-    calls.push(input);
-    const reply = replies[calls.length - 1] ?? { ok: true, json: {} };
-    return { ok: reply.ok, json: async () => reply.json } as unknown as Response;
-  }) satisfies typeof fetch;
-  return { fetch: stub, calls };
+function readerStub(replies: readonly (() => Promise<Record<string, unknown>>)[]): {
+  reader: OcrReader;
+  calls: () => number;
+} {
+  let count = 0;
+  const reader: OcrReader = {
+    providers: async () => {
+      const step = replies[count] ?? (async () => ({}));
+      count += 1;
+      return step();
+    },
+    select: unusedReaderMethod,
+    migrate: unusedReaderMethod,
+    test: unusedReaderMethod,
+    probe: unusedReaderMethod,
+  };
+  return { reader, calls: () => count };
 }
 
-/** 传输层就失败的 fetch（连接被拒、web 服务没起来）。 */
-const fetchRefused: typeof fetch = async (): Promise<Response> => {
-  throw new TypeError(REFUSAL);
-};
-
 describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () => {
-  afterEach(() => {
-    // 断言中途抛错也不能把替身留在 globalThis 上——同文件的后续用例会跟着读到假应答。
-    vi.unstubAllGlobals();
-  });
-
   it("binaryOf 只认 host 送的那三种 source，其余一律「没报」", () => {
     expect(
       binaryOf({
@@ -950,7 +939,7 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
   });
 
   it("文案只跟着**自己**那条动作走：探测在飞时「应用」不许读成「应用中…」", () => {
-    // 四条动作共用一个在飞旗标（一个传输口 + 一份 CSRF，本就只跑一条），所以「有没有
+    // 四条动作共用一个在飞旗标（一个传输口 + 一份回执，本就只跑一条），所以「有没有
     // 动作在飞」和「是哪一条」必须分开判——只看布尔，按下「检测版本」就会把「应用」
     // 按钮念成「应用中…」，而什么都没被应用过。
     const probing = buildProviderSection(
@@ -982,30 +971,32 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     expect(String(fieldProps(passed, PROBE_RESULT)?.className)).toContain("ocr-ok");
   });
 
-  it("loadCliStatus 只读 ocrBinary 那半，四种「读不到」都归成 null", async () => {
-    const stub = fetchStub([
-      { ok: true, json: { ocrBinary: { source: "path", path: PATH_LAUNCHER } } },
+  it("loadCliStatus 只读 ocrBinary 那半，读不到（含没有远程面）都归成 null", async () => {
+    const stub = readerStub([
+      async () => ({ ocrBinary: { source: "path", path: PATH_LAUNCHER } }),
       // 宿主没带这个字段（旧 host）与形状不合（域外的 source）都只能算「没报」。
-      { ok: true, json: { providers: [] } },
-      { ok: true, json: { ocrBinary: { source: "installed" } } },
-      { ok: false, json: {} },
+      async () => ({ providers: [] }),
+      async () => ({ ocrBinary: { source: "installed" } }),
     ]);
-    vi.stubGlobal("fetch", stub.fetch);
-    await expect(loadCliStatus()).resolves.toStrictEqual({
+    await expect(loadCliStatus(stub.reader)).resolves.toStrictEqual({
       source: "path",
       path: PATH_LAUNCHER,
       measuredVersion: null,
     });
-    await expect(loadCliStatus()).resolves.toBeNull();
-    await expect(loadCliStatus()).resolves.toBeNull();
-    await expect(loadCliStatus()).resolves.toBeNull();
-    // 四处贡献点共用这一个口：URL 必须是那条 GET providers，另开一条就等于另算一份判据。
-    expect(stub.calls).toStrictEqual([PROVIDERS_URL, PROVIDERS_URL, PROVIDERS_URL, PROVIDERS_URL]);
+    await expect(loadCliStatus(stub.reader)).resolves.toBeNull();
+    await expect(loadCliStatus(stub.reader)).resolves.toBeNull();
+    // 部署里没有远程面：三处贡献点共用这一个口，判据必须在口上而不是各点各写一份。
+    await expect(loadCliStatus(undefined)).resolves.toBeNull();
+    expect(stub.calls()).toBe(3);
   });
 
   it("loadCliStatus 传输失败也归成 null（这三处只负责显示，不叠错误条）", async () => {
-    vi.stubGlobal("fetch", fetchRefused);
-    await expect(loadCliStatus()).resolves.toBeNull();
+    const stub = readerStub([
+      async () => {
+        throw new TypeError(REFUSAL);
+      },
+    ]);
+    await expect(loadCliStatus(stub.reader)).resolves.toBeNull();
   });
 });
 
@@ -1134,25 +1125,25 @@ interface ProbeMsg {
   text: string;
 }
 
-/** runProbe 的落态记录：忙位依次经过哪些值、回执依次写出哪些内容、打的是哪条 URL、
+/** runProbe 的落态记录：忙位依次经过哪些值、回执依次写出哪些内容、调的是哪条动作、
  *  载荷被重读了几次。 */
 interface ProbeRun {
-  urls: string[];
+  actions: string[];
   busy: (CardActionKind | null)[];
   messages: (ProbeMsg | null)[];
   refreshes: number;
 }
 
 /**
- * 跑一次 runProbe。`post` 由注入给（与卡片里那条 postWithCsrf 同一个口），
+ * 跑一次 runProbe。`post` 由注入给（与卡片里那条读取器接出来的 `post` 同一个口），
  * 替身只送 runProbe 真读的 json()。`fails` 用来模拟传输层失败。
  */
 async function probeOnce(json: unknown, fails = false): Promise<ProbeRun> {
-  const run: ProbeRun = { urls: [], busy: [], messages: [], refreshes: 0 };
+  const run: ProbeRun = { actions: [], busy: [], messages: [], refreshes: 0 };
   await runProbe({
     t: tZh,
-    post: async (url: string): Promise<Response> => {
-      run.urls.push(url);
+    post: async (action: string): Promise<Response> => {
+      run.actions.push(action);
       if (fails) {
         throw new TypeError(REFUSAL);
       }
@@ -1172,15 +1163,15 @@ async function probeOnce(json: unknown, fails = false): Promise<ProbeRun> {
   return run;
 }
 
-describe("检测版本这条动作：URL、回执文本与忙位回收", () => {
+describe("检测版本这条动作：动作名、回执文本与忙位回收", () => {
   it("成功带回版本 + 上游 output 时，回执是「版本行 + 原样附上的 output」", async () => {
     const run = await probeOnce({
       ok: true,
       version: "1.12.13",
       output: "npm i -g @alibaba-group/open-code-review@1.13.0",
     });
-    // URL 逐字钉：写端点改名而卡片没跟上，症状正是「点了没反应」之外的那句报错。
-    expect(run.urls).toStrictEqual([PROBE_URL]);
+    // 动作名逐字钉：读取器的 descriptor 改了而卡片没跟上，症状正是「点了没反应」之外的那句报错。
+    expect(run.actions).toStrictEqual(["probe"]);
     expect(run.messages).toStrictEqual([
       null,
       { ok: true, text: "ocr 版本：1.12.13\nnpm i -g @alibaba-group/open-code-review@1.13.0" },

@@ -3,7 +3,7 @@
 // get-cred.mjs —— open-code-review 的 api_key_cmd 入口（本包唯一还在读宿主凭据
 // 文件的地方，且**只读不问服务**）。
 //
-// 为什么这个脚本必须存在（官方通道改造后仍然保留）：
+// 为什么这个脚本必须存在：
 //   - dsh 侧的 provider 清单与 key 状态已经改走官方通道（ctx.settings.describe() /
 //     ctx.credentials），但 OCR 是**另一个进程树**里的外部 CLI：它只会按
 //     ~/.opencodereview/config.json 里的 api_key_cmd 起子进程取 key，够不到 cordis
