@@ -33,8 +33,9 @@
 //     与传输方式无关。
 //   - 评审/扫描输出统一走 --output 临时文件（防宿主 stdout 截断），解析后即删。
 //   - review/scan 命令经 wrapWithHostReaper 包装（lib/cli.ts）：dsh 任何方式退出
-//     （含 kill -9 后 macOS launchd 收养）OCR 进程都会被 TERM→1s→KILL 回收；
-//     后台模式另把 exec.signal 接到 proc.kill()，工具调用被取消即停进程。
+//     （含 kill -9 后 macOS launchd 收养）OCR 进程都会被 TERM→1s→KILL 回收。
+//     前台另把 exec.signal 交下去（调用被中止即停进程）；后台**不接**那个信号，
+//     否则一次程序执行结束就会停掉后台评审（见 startBackground 的生命周期注释）。
 //
 // 运行方式：dsh 的 cordis Loader 直接 import 本 .ts（Node ≥22.18 类型剥离）。
 // 运行时值导入只有 @deepseek-ai/schemastery（Config schema：`.volatile()` 与
@@ -53,7 +54,7 @@
 // ctx.credentials——服务面没有因此开口。
 
 import Schema from "@deepseek-ai/schemastery";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Context, Fiber, Volatile } from "@deepseek-ai/cordis";
@@ -215,6 +216,10 @@ const LLM_TEST_TIMEOUT_MS = 90_000;
  *  人按下「检测」时跑，不进任何热路径，因此不做成设置项。 */
 const VERSION_PROBE_TIMEOUT_MS = 15_000;
 const STDOUT_MAX_BYTES = 400_000;
+/** `--output` 落盘结果的读取上限（字节）。**刻意不取 STDOUT_MAX_BYTES**：`--output` 存在的
+ *  理由正是「结果比 stdout 缓冲大」，用 400 KB 卡它等于把正常的大仓评审判死。这一枚只是
+ *  护栏，把「整份读进内存」的失败形态从 OOM 换成一条点名文件的错误。 */
+const OUT_FILE_MAX_BYTES = 64 * 1024 * 1024;
 /** 解析失败时回显给模型的原始内容长度上限（UTF-16 码元；已脱敏）。
  *  单位写码元而不是"字符"：本常量喂给 `echoRaw`→`truncateEnd`，那一刀按码元数计
  *  （一张 emoji = 2 枚），写"字符"会把给模型的说明夸大约一倍。 */
@@ -1376,8 +1381,26 @@ function echoRaw(text: string, limit: number): string {
 }
 
 /** 读 --output 落盘结果。OCR exit 0 却没写出文件（版本漂移/被中途 kill）时给
- *  可行动的错误，而不是把裸 ENOENT 栈丢给模型。 */
+ *  可行动的错误，而不是把裸 ENOENT 栈丢给模型。
+ *  超过 OUT_FILE_MAX_BYTES 的先拒掉：`readFileSync` + `JSON.parse` 是两倍内存的整份读，
+ *  病理级的大回执只该换回一条点名文件的错误。大小探测失败（文件不在）不在这里报——
+ *  交给下面那条 `outputFileMissing` 统一说话。 */
 function readOutFile(outPath: string, messages: OcrReviewMessages): string {
+  let size = 0;
+  try {
+    ({ size } = statSync(outPath));
+  } catch {
+    // 读不到大小：读文件那一步会给出同一条可行动错误，这里不重复造文案。
+  }
+  if (size > OUT_FILE_MAX_BYTES) {
+    throw new Error(
+      format(messages.outputFileTooLarge, {
+        path: outPath,
+        size: String(size),
+        limit: String(OUT_FILE_MAX_BYTES),
+      }),
+    );
+  }
   try {
     return readFileSync(outPath, "utf8");
   } catch (error) {
@@ -1388,14 +1411,47 @@ function readOutFile(outPath: string, messages: OcrReviewMessages): string {
   }
 }
 
+/**
+ * 非零退出时把 `--output` 里已经发布的 coverage.failed 明细附到失败详情上。
+ *
+ * 上游的退出契约只对 run-level 失败、或「每个被选中的文件都失败」给非零，而那份 manifest
+ * 照发（`review_cmd.go` 的 reviewResultError：“Partial results are published regardless”）
+ * ——只回 stderr 的话模型读到「N of M selected item(s) failed」，却不知道是哪些文件、
+ * 哪一类失败。读不出或没有失败明细时原样交回那个错误，不改变既有失败形态。
+ *
+ * 这里刻意不复用 `readOutFile`：那条路会给「文件缺失/过大」抛错，而失败详情里再加一层
+ * 「读不到落盘结果」的错误只会盖住 OCR 自己的报错。
+ */
+function withCoverageDetail(error: unknown, outPath: string, messages: OcrReviewMessages): unknown {
+  let text: string;
+  try {
+    text = readFileSync(outPath, "utf8");
+  } catch {
+    return error;
+  }
+  const items = parseReviewOutput(text, messages).coverage?.failedItems ?? [];
+  if (items.length === 0) {
+    return error;
+  }
+  const note = format(messages.failureCoverage, {
+    items: redactKeyMaterial(items.join("; ")),
+  });
+  return new Error(`${errorText(error)}${note}`, { cause: error });
+}
+
 // ── 插件体 ─────────────────────────────────────────────────────────────────
 
 /**
  * OCR 原生数值参数的 tool schema 片段（忠实透传语义，桥接层不设钳制）。
- * unit 区分 review（每组）/ scan（每文件）的措辞（取消息表的 unitGroup/unitFile，
- * 语言随设置页偏好走）；OCR 侧语义见 shared_flags.go:52-58 与同文件的 registerScanFlags。
+ * unit 区分 review（每组）/ scan（每文件）的措辞；maxToolsTemplate 也按命令分开，因为
+ * 两侧的 --max-tools 语义本就不同：review 把 1-49 抬到 50，scan 只在大于模板默认时生效。
+ * 语言随设置页偏好走；OCR 侧语义见 shared_flags.go 的 registerReviewFlags/registerScanFlags。
  */
-function tuningParams(messages: OcrReviewMessages, unit: string): Record<string, unknown> {
+function tuningParams(
+  messages: OcrReviewMessages,
+  unit: string,
+  maxToolsTemplate: string,
+): Record<string, unknown> {
   const of = (template: string): { type: "integer"; description: string } => ({
     type: "integer",
     description: format(template, { unit }),
@@ -1403,7 +1459,7 @@ function tuningParams(messages: OcrReviewMessages, unit: string): Record<string,
   return {
     concurrency: of(messages.tuningConcurrency),
     timeoutMinutes: of(messages.tuningTimeout),
-    maxTools: of(messages.tuningMaxTools),
+    maxTools: of(maxToolsTemplate),
     maxTokens: of(messages.tuningMaxTokens),
     maxTokensBudget: {
       type: "integer",
@@ -1752,11 +1808,18 @@ function effortOf(value: unknown, config: Config, messages: OcrReviewMessages): 
   return clampEffort(value, "medium");
 }
 
-/** wait 入参闸：undefined → true（前台缺省）；布尔透传；其余类型抛错——字符串
- *  "false" 若被 `!== false` 当真值处理会静默从后台变前台，吞掉用户的等待语义。 */
+/**
+ * wait 入参闸：undefined → **false（后台缺省）**；布尔透传；其余类型抛错——字符串
+ * "false" 若被 `!== false` 当真值处理会静默从后台变前台，吞掉用户的等待语义。
+ *
+ * 为什么缺省改成后台：一次 review 是分钟级长任务（真跑过 8 分钟以上），前台缺省会让模型
+ * 在一次工具调用里干等，既占住轮次又容易撞上宿主超时；后台立刻返回作业 id，模型用
+ * `ocr_session` 轮询，等待因此发生在**模型自己的节奏里**而不是一次阻塞调用里。
+ * 想要旧行为（一次拿到结果）显式传 `wait: true` 即可。
+ */
 function waitOf(value: unknown, messages: OcrReviewMessages): boolean {
   if (value === undefined || value === null) {
-    return true;
+    return false;
   }
   if (typeof value !== "boolean") {
     throw new TypeError(format(messages.waitMustBeBoolean, { received: describeValue(value) }));
@@ -2248,7 +2311,7 @@ function registerReviewTool(
           items: { type: "string" },
           description: msgs.paramExclude,
         },
-        ...tuningParams(msgs, msgs.unitGroup),
+        ...tuningParams(msgs, msgs.unitGroup, msgs.tuningMaxTools),
         wait: { type: "boolean", description: msgs.paramWait },
         provider: { type: "string", description: msgs.paramProvider },
         model: { type: "string", description: msgs.paramModel },
@@ -2298,7 +2361,12 @@ function registerReviewTool(
             env: ocrEnv(config),
           });
         }
-        await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+        try {
+          await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+        } catch (error) {
+          // 非零退出时 CLI 仍会写出 --output：那里面才有「哪些文件没审成」。
+          throw withCoverageDetail(error, outPath, runMsgs);
+        }
         const text = readOutFile(outPath, runMsgs);
         const parsed = parseReviewOutput(text, runMsgs);
         if (!parsed.ok) {
@@ -2360,7 +2428,7 @@ function registerScanTool(
         // 与 ocr_review 对齐。
         provider: { type: "string", description: msgs.paramProvider },
         model: { type: "string", description: msgs.paramModel },
-        ...tuningParams(msgs, msgs.unitFile),
+        ...tuningParams(msgs, msgs.unitFile, msgs.tuningMaxToolsScan),
         wait: { type: "boolean", description: msgs.paramWait },
       },
     },
@@ -2396,7 +2464,12 @@ function registerScanTool(
             env: ocrEnv(config),
           });
         }
-        await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+        try {
+          await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+        } catch (error) {
+          // 非零退出时 CLI 仍会写出 --output：那里面才有「哪些文件没审成」。
+          throw withCoverageDetail(error, outPath, runMsgs);
+        }
         const text = readOutFile(outPath, runMsgs);
         const parsed = parseReviewOutput(text, runMsgs);
         if (!parsed.ok) {

@@ -166,7 +166,21 @@ describe("delegate 解析", () => {
     expect(preview.reviewable).toHaveLength(1);
     expect(preview.reviewable[0]?.path).toBe("app.js");
     expect(preview.reviewable[0]?.insertions).toBe(4);
-    expect(preview.totalFiles).toBe(1);
+    expect(preview.totalFiles).toBe(2);
+  });
+
+  it("preview：excluded 的理由读的是 CLI 的 exclude_reason（不是脑补的 reason）", () => {
+    // 真回执（ocr 1.13.0 delegate_cmd.go 的 delegatePreviewFileJSON）发的键是
+    // `exclude_reason`；fixture 里那条按真实形态写。此前本包读 `reason`，真回执里
+    // 那个键不存在 ⇒ 每条 excluded 的 reason 都是空串，而工具描述与 output schema
+    // 都在承诺「被排除文件及原因」。
+    const preview = parseDelegatePreview(read("delegate-preview.json"));
+    expect(preview.excluded).toStrictEqual([{ path: "package-lock.json", reason: "default_path" }]);
+    // 旧形态（只有 `reason`）仍读得出来：回退不是死分支。
+    const legacy = parseDelegatePreview(
+      '{"mode":"workspace","excluded_files":[{"path":"a.ts","reason":"binary"}]}',
+    );
+    expect(legacy.excluded).toStrictEqual([{ path: "a.ts", reason: "binary" }]);
   });
 
   it("preview：total_files 缺失时用 reviewable_count；非对象/坏 JSON 一律 ok=false", () => {

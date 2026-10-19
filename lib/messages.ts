@@ -73,6 +73,10 @@ export interface OcrReviewMessages {
   readonly missingRequiredArgs: string;
   readonly bodyMustBeObject: string;
   readonly outputFileMissing: string;
+  /** --output 落盘结果超过读取上限（不整份读进内存）。 */
+  readonly outputFileTooLarge: string;
+  /** 非零退出时附上 --output 里已发布的 coverage.failed 明细。 */
+  readonly failureCoverage: string;
   /** describe() 之后 settings 服务被卸载（createGateway 的降级出口）。 */
   readonly settingsServiceGone: string;
   // ── 命令构造层的入参拒绝理由（lib/cli.ts 消费本表）──────────────────────────
@@ -84,6 +88,8 @@ export interface OcrReviewMessages {
   readonly repoMustBeAbsolute: string;
   /** 任意字符串参数里出现 NUL 字节。 */
   readonly noNulBytes: string;
+  /** 列表取值超上限、有条目被丢弃时的告警（{name} 字段名、{dropped} 丢弃条数、{limit} 上限）。 */
+  readonly listTruncated: string;
   /** 字符串标量参数错类型（点名参数与收到的形态）。 */
   readonly mustBeString: string;
   /** 数组型参数的元素错类型。 */
@@ -92,6 +98,8 @@ export interface OcrReviewMessages {
   readonly mustBeStringOrList: string;
   /** 数值 flag 非整数或越界（点名 flag 与下限）。 */
   readonly intFlagMustBeInt: string;
+  /** --format 只支持 json：text/sarif 没有解析层（直连调用方能传进这个不在 schema 里的参数）。 */
+  readonly formatNotJson: string;
   /** branch 与 commit 同时给出。 */
   readonly scopeBranchCommitExclusive: string;
   /** branch 模式缺 from 或 to。 */
@@ -210,6 +218,8 @@ export interface OcrReviewMessages {
   readonly tuningConcurrency: string;
   readonly tuningTimeout: string;
   readonly tuningMaxTools: string;
+  /** scan 的 maxTools：scan 侧不抬到 50，只在大于模板默认时生效（review 侧才是 min 50）。 */
+  readonly tuningMaxToolsScan: string;
   readonly tuningMaxTokens: string;
   readonly tuningMaxTokensBudget: string;
   // ── 工具结果里的 hint ─────────────────────────────────────────────────────
@@ -274,15 +284,24 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     bodyMustBeObject: "body 必须是 JSON 对象",
     outputFileMissing:
       "ocr 未写出 --output 文件（{path}）：{cause}——请确认 ocr 版本支持 --output，或用 ocr_session 查询会话结果",
+    outputFileTooLarge:
+      "ocr 的 --output 文件过大（{path}，{size} 字节 > {limit} 字节上限）：不整份读进内存。" +
+      "请缩小审查范围（exclude / --commit / 更小的目录）后重试，或用 ocr_session 查这一场的结果",
+    failureCoverage:
+      "\n这一场未完成的文件（取自 OCR 已发布的 --output）：{items}；完整清单见 ocr_session(action=comments/show)",
     settingsServiceGone: "{ns} 所在的设置服务在读取过程中已不可用",
     repoRequired: "repo 必填，且为 Git 仓库绝对路径",
     repoRequiredUnknownWorkspace: "repo 必填：当前会话工作区未知，请显式传入 Git 仓库绝对路径",
     repoMustBeAbsolute: "repo 必须是绝对路径（以 / 开头）：{root}",
     noNulBytes: "{name} 不能包含 NUL 字节",
+    listTruncated: "{name} 超过 {limit} 条上限，已丢弃 {dropped} 条——审查范围会因此小于你给的清单",
     mustBeString: "{name} 必须是字符串（收到 {received}）",
     listItemsMustBeString: "{name} 数组元素必须是字符串",
     mustBeStringOrList: "{name} 必须是字符串或字符串数组",
     intFlagMustBeInt: "{flag} 需要为 ≥{min} 的整数，收到 {received}",
+    formatNotJson:
+      "本包只支持 --format json（收到 {format}）：text/sarif 没有解析层，" +
+      "交下去只会把参数错报成「OCR 输出解析失败」",
     scopeBranchCommitExclusive: "scope=branch/from/to 与 commit 互斥（一次只能选一种审查范围）",
     branchNeedsFromAndTo: "scope=branch 需要同时提供 from 与 to",
     commitNeedsValue: "scope=commit 需要 commit 参数",
@@ -390,16 +409,17 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "需求/业务上下文（官方 skill 推荐：调用前先用 git log/diff/提交信息快速分析变更意图，提取 3-5 句业务背景传入，是提升评审质量最有效的参数；从其它 agent 调用时始终携带 PR 描述/需求）",
     paramBackgroundShort: "需求/业务上下文",
     paramBackgroundPreview: "业务上下文（会出现在输出中供审查参考）",
-    paramExclude: "gitignore 风格排除模式（可多值）",
-    paramExcludeShort: "排除模式",
+    paramExclude: "gitignore 风格排除模式（可多值；上限 2000 条，超出会直接报错而不是静默丢弃）",
+    paramExcludeShort: "排除模式（上限 2000 条，超出会报错）",
     paramWait:
-      "true（缺省）=等待完成并返回聚合摘要；false=后台启动立即返回（兜底窗口 " +
-      "ocrBackgroundMaxMs 默认 2 小时），用 ocr_session 轮询结果。两种模式都带宿主回收守护：" +
+      "false（缺省）=后台启动、立即返回作业 id，用 ocr_session 轮询结果——一次 review 是分钟级长任务，" +
+      "阻塞等待会占住整轮；true=前台阻塞到完成并直接返回聚合摘要。后台模式的兜底窗口由设置项 " +
+      "ocrBackgroundMaxMs 给出（默认 0 = 不设窗口）。两种模式都带宿主回收守护：" +
       "dsh 退出（含 kill -9）时 OCR 进程一并结束",
     paramProvider: "本次运行临时指定已配置 provider",
     paramModel: "本次运行临时覆盖 model",
     paramResume: "从之前中断的会话 id 恢复（会话 id 在返回结果里）",
-    paramScanPath: "仓库相对目录或文件（缺省整仓，可多值）",
+    paramScanPath: "仓库相对目录或文件（缺省整仓，可多值；上限 2000 条，超出会直接报错）",
     paramBatch: "分批策略",
     paramPaths: "待查询的仓库相对文件路径（至少 1 个，最多 200）",
     paramSessionAction: "list：列最近会话（缺省）/ show：查看单个 / comments：取评论",
@@ -411,6 +431,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     tuningTimeout: "每{unit}任务超时分钟（OCR --timeout；0=不限时；缺省不传=OCR 原生 15）",
     tuningMaxTools:
       "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；1-49 会被 OCR 抬到 50，帮助文本 min 50；缺省不传=模板默认）",
+    tuningMaxToolsScan:
+      "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；只在大于模板默认值时生效，不抬到 50；缺省不传=模板默认）",
     tuningMaxTokens:
       "每{unit}提示词 token 上限（OCR --max-tokens；0=配置/模板默认；缺省不传=模板默认）",
     tuningMaxTokensBudget:
@@ -512,16 +534,28 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     bodyMustBeObject: "body must be a JSON object",
     outputFileMissing:
       "ocr did not write the --output file ({path}): {cause} — check that your ocr version supports --output, or query the session with ocr_session",
+    outputFileTooLarge:
+      "the ocr --output file is too large ({path}, {size} bytes > {limit}-byte cap): refusing to read " +
+      "it whole. Narrow the review scope (exclude / --commit / smaller directory) and retry, or read " +
+      "this run's results with ocr_session",
+    failureCoverage:
+      "\nfiles that did not finish in this run (from the --output OCR already published): {items}; " +
+      "full list via ocr_session(action=comments/show)",
     settingsServiceGone: "the settings service holding {ns} became unavailable while being read",
     repoRequired: "repo is required and must be the absolute path of a Git repository",
     repoRequiredUnknownWorkspace:
       "repo is required: the current session workspace is unknown, pass the absolute path of a Git repository explicitly",
     repoMustBeAbsolute: "repo must be an absolute path (starting with /): {root}",
+    listTruncated:
+      "{name} exceeds the {limit}-item cap; {dropped} item(s) were dropped - the review will cover less than the list you passed",
     noNulBytes: "{name} must not contain NUL bytes",
     mustBeString: "{name} must be a string (got {received})",
     listItemsMustBeString: "the items of {name} must be strings",
     mustBeStringOrList: "{name} must be a string or an array of strings",
     intFlagMustBeInt: "{flag} must be an integer ≥ {min}, got {received}",
+    formatNotJson:
+      "this package supports --format json only (got {format}): text/sarif have no parser here, " +
+      "so passing them through reports a bad parameter as an OCR output failure",
     scopeBranchCommitExclusive:
       "scope=branch/from/to and commit are mutually exclusive (only one review scope at a time)",
     branchNeedsFromAndTo: "scope=branch requires both from and to",
@@ -666,17 +700,20 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "another agent)",
     paramBackgroundShort: "Requirements/business context",
     paramBackgroundPreview: "Business context (it shows up in the output for review reference)",
-    paramExclude: "gitignore-style exclusion patterns (multiple allowed)",
-    paramExcludeShort: "Exclusion patterns",
+    paramExclude:
+      "gitignore-style exclusion patterns (multiple allowed; cap 2000 - exceeding it is an error, never a silent drop)",
+    paramExcludeShort: "Exclusion patterns (cap 2000; exceeding it errors out)",
     paramWait:
-      "true (default) = wait for completion and return the aggregated summary; false = start in the " +
-      "background and return immediately (reclaimed when the backstop window ocrBackgroundMaxMs, " +
-      "2 hours by default, elapses), poll with ocr_session. Both " +
-      "modes carry the host reaper guard: when dsh exits (including kill -9) the OCR process is terminated too",
+      "false (default) = start in the background, return the job id immediately and poll with ocr_session - " +
+      "a review is a minutes-long task and blocking the call ties up the whole turn; true = block until it " +
+      "finishes and return the aggregated summary directly. The background backstop window is the " +
+      "ocrBackgroundMaxMs setting (default 0 = none). Both modes carry the host reaper guard: when dsh " +
+      "exits (including kill -9) the OCR process is terminated too",
     paramProvider: "Temporarily use a configured provider for this run",
     paramModel: "Temporarily override the model for this run",
     paramResume: "Resume from a previously interrupted session id (the id is in the result)",
-    paramScanPath: "Repo-relative directories or files (default: whole repo, multiple allowed)",
+    paramScanPath:
+      "Repo-relative directories or files (default: whole repo, multiple allowed; cap 2000 - exceeding it is an error, never a silent drop)",
     paramBatch: "Batching strategy",
     paramPaths: "Repo-relative file paths to look up (at least 1, at most 200)",
     paramSessionAction:
@@ -690,6 +727,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "Per-{unit} task timeout in minutes (OCR --timeout; 0 = unlimited; unset = OCR native 15)",
     tuningMaxTools:
       "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; 1-49 is raised to 50 by OCR, help text says min 50; unset = template default)",
+    tuningMaxToolsScan:
+      "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; only takes effect above the template default, never raised to 50; unset = template default)",
     tuningMaxTokens:
       "Per-{unit} prompt token cap (OCR --max-tokens; 0 = config/template default; unset = template default)",
     tuningMaxTokensBudget:

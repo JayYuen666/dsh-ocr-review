@@ -107,17 +107,25 @@ function takeTrimmedItems(
   // 一个保守默认，而不是让它悄悄失效。
   const cap = Number.isSafeInteger(limit) && limit > 0 ? limit : DEFAULT_LIST_LIMIT;
   const out: string[] = [];
+  let dropped = 0;
   for (const item of items) {
     if (item.includes("\u0000")) {
       throw new Error(format(messages.noNulBytes, { name }));
     }
     const trimmed = item.trim();
-    if (trimmed.length > 0) {
+    // 超出上限不静默丢：审查范围会因此小于模型给的清单，而"少审了几份"在回执上
+    // 看不出任何线索。空串与非空串分别处理，条件写在一起以避免 continue（本包 lint 禁它）。
+    const skipForCap = trimmed.length > 0 && out.length >= cap;
+    if (skipForCap) {
+      dropped += 1;
+    } else if (trimmed.length > 0) {
       out.push(trimmed);
     }
-    if (out.length >= cap) {
-      break;
-    }
+  }
+  if (dropped > 0) {
+    throw new Error(
+      format(messages.listTruncated, { name, dropped: String(dropped), limit: String(cap) }),
+    );
   }
   return out;
 }

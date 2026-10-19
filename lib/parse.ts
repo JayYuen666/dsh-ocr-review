@@ -56,6 +56,7 @@ const REVIEW_STATUSES = [
   "success",
   "complete",
   "partial",
+  "failed",
   "completed_with_warnings",
   "completed_with_errors",
   "skipped",
@@ -681,7 +682,13 @@ function toDelegateFiles(raw: unknown): DelegateFile[] | null {
   return raw.length > 0 && files.length === 0 ? null : files;
 }
 
-/** excluded_files 同款门：条目形状与 reviewable 一致，缺 path 即不可用。 */
+/** excluded_files 同款门：条目形状与 reviewable 一致，缺 path 即不可用。
+ *
+ *  理由的键名以 CLI 侧 `delegatePreviewFileJSON` 为准，那是 `exclude_reason`
+ *  （`delegate_cmd.go` 的 `ExcludeReason string \`json:"exclude_reason,omitempty"\``）。
+ *  读 `reason` 是照自己脑补的形状写的：真回执里那个键不存在，`str()` 把缺失读成空串，
+ *  于是「被排除文件及原因」永远只有文件没有原因——schema 与工具描述都在承诺后者。
+ *  `reason` 作回退保留：形如 `{"reason":…}` 的旧形态/别家产物仍读得出来。 */
 function toExcludedFiles(raw: unknown): { path: string; reason: string }[] | null {
   if (!Array.isArray(raw)) {
     return [];
@@ -695,7 +702,8 @@ function toExcludedFiles(raw: unknown): { path: string; reason: string }[] | nul
       if (entryPath === "") {
         return null;
       }
-      return { path: entryPath, reason: str(entry["reason"]) };
+      const reason = str(entry["exclude_reason"]) || str(entry["reason"]);
+      return { path: entryPath, reason };
     })
     .filter((fileEntry): fileEntry is { path: string; reason: string } => fileEntry !== null);
   return raw.length > 0 && files.length === 0 ? null : files;

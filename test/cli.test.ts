@@ -158,6 +158,9 @@ function makeEmptyDir(): string {
   return dir;
 }
 
+/** 命令串里的 `--format json`：多处以断言与拼接两种方式出现，抽一份免得字面量散落。 */
+const FORMAT_JSON_FLAG = "--format json";
+
 describe("commaList 的边界闸", () => {
   it("数组项自身含逗号 ⇒ 拒绝（join 后与「两项数组」无法区分）", () => {
     // ["a,b"] 与 ["a","b"] join 后都是 "a,b"，而 glob 花括号（{ts,tsx}）恰好含逗号：
@@ -170,11 +173,14 @@ describe("commaList 的边界闸", () => {
 
   it("limit 非法（NaN / ≤0）回落到保守默认，而不是静默放开上限", () => {
     const many = [...Array.from({ length: 260 }).keys()].map((index) => `f${index}.ts`);
-    // out.length >= NaN 恒为 false ⇒ 修复前上限完全失效。
-    expect(listOf(many, "paths", Number.NaN)).toHaveLength(200);
-    expect(listOf(many, "paths", 0)).toHaveLength(200);
-    expect(listOf(many, "paths", -1)).toHaveLength(200);
-    expect(listOf(many, "paths", 5)).toHaveLength(5);
+    // out.length >= NaN 恒为 false ⇒ 修复前上限完全失效。回落默认后 260 条超限 ⇒ 抛错，
+    // 而不是悄悄只留 200 条（默认 200 仍在，只是超限从静默变成明说）。
+    expect(() => listOf(many, "paths", Number.NaN)).toThrow(/超过 200 条上限，已丢弃 60 条/u);
+    expect(() => listOf(many, "paths", 0)).toThrow(/超过 200 条上限/u);
+    expect(() => listOf(many, "paths", -1)).toThrow(/超过 200 条上限/u);
+    // 恰好不超限时照常放行（上限仍是上限，只是不静默丢）。
+    expect(listOf(many.slice(0, 200), "paths", 200)).toHaveLength(200);
+    expect(listOf(many, "paths", 260)).toHaveLength(260);
   });
 });
 
@@ -720,8 +726,8 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
       expect(resolveOutputFormat(payload)).toBe("json");
       const review = reviewCmd({ repo: "/r", format: payload }, "/o").command;
       const scan = scanCmd({ repo: "/r", format: payload }, "/o").command;
-      expect(review).toContain("--format json");
-      expect(scan).toContain("--format json");
+      expect(review).toContain(FORMAT_JSON_FLAG);
+      expect(scan).toContain(FORMAT_JSON_FLAG);
       expect(review).not.toContain("touch");
       expect(skeleton(review)).not.toMatch(METACHARS);
       expect(skeleton(scan)).not.toMatch(METACHARS);
@@ -729,6 +735,20 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
     // 非字符串同样进不了命令串
     expect(resolveOutputFormat({ toString: () => "text" })).toBe("json");
     expect(resolveOutputFormat(42)).toBe("json");
+  });
+
+  it("白名单放行的 text/sarif 在执行层被拒：本包只解 JSON，交下去只会把契约问题说成 OCR 的错", () => {
+    // 三层口径不同是刻意的：resolveOutputFormat 管**注入面**（只放行枚举值，挡住拼接），
+    // 而 buildReviewCommand/buildScanCommand 管**下游能力**（解析层只解 JSON）。白名单里
+    // 留着 text/sarif 是为了让"传了非法值"与"传了本包不支持的合法值"给出不同的错，
+    // 这一条钉的正是后面那句。
+    for (const format of ["text", "sarif"] as const) {
+      expect(() => reviewCmd({ repo: "/r", format }, "/o")).toThrow(/只支持 --format json/u);
+      expect(() => scanCmd({ repo: "/r", format }, "/o")).toThrow(/只支持 --format json/u);
+    }
+    // 反向：json 与缺省都必须照常出命令，别把正常档一起拦掉。
+    expect(reviewCmd({ repo: "/r", format: "json" }, "/o").command).toContain(FORMAT_JSON_FLAG);
+    expect(reviewCmd({ repo: "/r" }, "/o").command).toContain(FORMAT_JSON_FLAG);
   });
 
   it("review：每个可控槽位喂注入载荷，命令骨架仍全是固定字面量", () => {
@@ -847,7 +867,8 @@ describe("错类型参数：静默回落会扩大审查范围，一律抛错", (
     expect(() => listOf(42, "exclude", 5)).toThrow(/必须是字符串或字符串数组/u);
     expect(() => listOf(["a\u0000b"], "path", 5)).toThrow(/NUL/u);
     expect(listOf("a,b", "path", 5)).toStrictEqual(["a", "b"]);
-    expect(listOf(["a", "b"], "path", 1)).toStrictEqual(["a"]);
+    // 超限不再静默截断：审查范围会因此小于模型给的清单，而回执上看不出少审了。
+    expect(() => listOf(["a", "b"], "path", 1)).toThrow(/超过 1 条上限，已丢弃 1 条/u);
   });
 
   it("session action 白名单、id 类型严格", () => {

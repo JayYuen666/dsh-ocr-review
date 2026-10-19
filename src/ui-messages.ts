@@ -71,7 +71,7 @@ export interface UiMessages {
   readonly noReason: string;
   /** 数据源不可用整行（含宿主给的原因）。 */
   readonly readProvidersFailed: string;
-  /** 装载期端点自检失败的一行（含宿主给的原始输出）。 */
+  /** 装载期端点自检未通过的一行（含宿主给的原始输出）。 */
   readonly endpointVerifyFailed: string;
   /** 回执：应用成功。 */
   readonly applied: string;
@@ -251,7 +251,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noProvider: "当前未配置 provider",
     noReason: "宿主未给出原因（重启 dsh 或重试可恢复）",
     readProvidersFailed: "未能从 dsh 配置服务读取 provider 列表：{reason}",
-    endpointVerifyFailed: "装载期端点自检失败（配置仍可修改）：{reason}",
+    endpointVerifyFailed:
+      "装载期端点自检未通过：{reason}（这条是端点给的回执，不是本插件的故障；配置照样能改，也可点「测试连接」重跑）",
     applied: "已应用：{provider} / {model}\n{test}",
     notVerified: "（未自动验证，可点「测试连接」手动验证）",
     llmTestPassed: "✓ ocr llm test 通过",
@@ -278,7 +279,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     maxCommentsHint: "返回给模型的 top 评论条数；0 = 全部（含未锚定行，输出大）（默认 12）",
     timeoutLabel: "运行超时 (timeoutMinutes)",
     timeoutHint:
-      "前台墙钟超时（分钟）；0 = 宿主上限（shell.maxTimeoutMs，当前 60 分钟）；更长的评审用工具 wait=false 后台模式（不设宿主 deadline，2 小时后兜底回收）（默认 0）",
+      "前台墙钟超时（分钟）；0 = 宿主上限（shell.maxTimeoutMs，当前 60 分钟）；更长的评审用工具 wait=false 后台模式（不设宿主 deadline，兜底窗口看设置项 ocrBackgroundMaxMs，默认 0 = 不设窗口）（默认 0）",
     configPathLabel: "OCR 配置文件 (ocrConfigPath)",
     configPathHint:
       "外部 open-code-review CLI 自己的配置位置；留空 = ~/.opencodereview/config.json。自定义时必须是 <X>/.opencodereview/config.json 布局（OCR 只认该形状，插件经 HOME 重定向让它生效）",
@@ -342,7 +343,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noProvider: "No provider configured yet",
     noReason: "the host gave no reason (restart dsh or retry to recover)",
     readProvidersFailed: "Could not read the provider list from the dsh settings service: {reason}",
-    endpointVerifyFailed: "Startup endpoint check failed (the config is still editable): {reason}",
+    endpointVerifyFailed:
+      "Startup endpoint check did not pass: {reason} (this is the endpoint's reply, not a fault of this plugin; the config stays editable, and “Test connection” reruns it)",
     applied: "Applied: {provider} / {model}\n{test}",
     notVerified: "(not verified automatically — use “Test connection” to check manually)",
     llmTestPassed: "✓ ocr llm test passed",
@@ -371,7 +373,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "Top comments returned to the model; 0 = all (including unanchored lines, large output) (default 12)",
     timeoutLabel: "Run timeout (timeoutMinutes)",
     timeoutHint:
-      "Foreground wall-clock timeout in minutes; 0 = host cap (shell.maxTimeoutMs, currently 60 min); for longer reviews use the tool's wait=false background mode (no host deadline, reclaimed by a 2-hour backstop) (default 0)",
+      "Foreground wall-clock timeout in minutes; 0 = host cap (shell.maxTimeoutMs, currently 60 min); for longer reviews use the tool's wait=false background mode (no host deadline; the backstop window is the ocrBackgroundMaxMs setting, default 0 = none) (default 0)",
     configPathLabel: "OCR config file (ocrConfigPath)",
     configPathHint:
       "Where the external open-code-review CLI keeps its own config; empty = ~/.opencodereview/config.json. A custom value must follow the <X>/.opencodereview/config.json layout (OCR only reads that shape; the plugin makes it effective via a HOME redirect)",

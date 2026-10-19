@@ -34,9 +34,17 @@ import {
   resolveOutputFormat,
   shq,
 } from "./argv-guard.ts";
+import type { ReviewOutputFormat } from "./argv-guard.ts";
 
 /** `ocr review|scan|delegate preview` 的背景说明 flag（三处命令构造共用一条）。
  *  pushTextFlag 按 `flag.slice(2)` 反推报错用的参数名，故值必须带 `--` 前缀。 */
+/** `--exclude` 的模式条数上限。**不是审查范围的上限**，只是防一条失控输入把命令串撑爆；
+ *  真实使用里几十条就到头，给到 2000 是为了"尽量不截断"——超了会明确告警，不静默丢。 */
+const EXCLUDE_LIST_LIMIT = 2000;
+
+/** `--path` 的路径条数上限（同 EXCLUDE_LIST_LIMIT 的取向：够大 + 超限告警）。 */
+const PATH_LIST_LIMIT = 2000;
+
 const BACKGROUND_FLAG = "--background";
 
 /**
@@ -144,13 +152,34 @@ export interface BuiltCommand {
   workdir: string;
 }
 
+/** 纯十进制整数的文本形态：数值槽位接受的唯一字符串写法。 */
+const DECIMAL_INTEGER_TEXT = /^\d+$/u;
+
+/**
+ * 数值槽位的**唯一**取值口：只接受 `number` 与纯十进制数字串，其余一律 null。
+ *
+ * 为什么单列一份：`Number()` 会把 true 当 1、把 [] 当 0、把 "0x10" 当 16、把 "1e2" 当 100，
+ * 于是错类型或怪写法的输入会被静默读成**另一个数**。数值 flag 与 session limit 两处槽位
+ * 共用这一条判据，包里就不会存在第二种数值口径（此前 session limit 用 `Number()`，
+ * `{limit: "0x10"}` 被读成 16）。
+ * 非安全整数（1e300、1e21）与非法形态同样 null，由调用点按各自的范围判据拒绝。
+ */
+function decimalInteger(value: unknown): number | null {
+  const isDecimalText = typeof value === "string" && DECIMAL_INTEGER_TEXT.test(value.trim());
+  if (typeof value !== "number" && !isDecimalText) {
+    return null;
+  }
+  const num = Number(value);
+  return Number.isSafeInteger(num) ? num : null;
+}
+
 /**
  * 数值 flag 忠实透传（桥接层不设钳制——OCR 原生语义：0 = 配置/模板默认或不限，
  * 负数/非整数由 OCR 侧报错，但桥接层先做同源校验给出更早的错误）。
  * value 为 undefined/null 时省略 flag（跟随 OCR flag 默认值）。
  *
  * 注入面：数值经 `String(num)` 落进命令串（不走 shq）。数值 token 结构上不可能带
- * shell 元字符，「只含数字」的形态校验顺带把 1e21 写成 `1e+21` 这类形态也挡住。
+ * shell 元字符；安全整数经 String() 只产出 `-?[0-9]+`，而 min ≥ 0 挡掉负号。
  */
 function pushIntFlag(
   parts: string[],
@@ -162,7 +191,8 @@ function pushIntFlag(
   if (value === undefined || value === null) {
     return;
   }
-  const reject = (): never => {
+  const num = decimalInteger(value);
+  if (num === null || num < min) {
     throw new Error(
       format(messages.intFlagMustBeInt, {
         flag,
@@ -170,21 +200,8 @@ function pushIntFlag(
         received: describeValue(value),
       }),
     );
-  };
-  // 只接受 number 与纯十进制数字串（口径与本文件的 sessionLimit 一致）：`Number()`
-  // 会把 true 当 1、把 [] 当 0、把 ["5"] 当 5，于是 `{timeoutMinutes: false}` 静默变成
-  // `--timeout 0`，而 OCR 侧 0 的语义是「不限时」——错类型悄悄改掉的是「有没有超时
-  // 上限」，比报错危险得多。
-  const decimalString = typeof value === "string" && /^\d+$/u.test(value.trim());
-  if (typeof value !== "number" && !decimalString) {
-    reject();
   }
-  const num = Number(value);
-  const text = String(num);
-  if (!Number.isSafeInteger(num) || num < min || !/^\d+$/u.test(text)) {
-    reject();
-  }
-  parts.push(flag, text);
+  parts.push(flag, String(num));
 }
 
 /** 模式参数解析：workspace（默认）/commit/branch 互斥，非法组合与错类型抛错。
@@ -241,7 +258,7 @@ function pushTextFlag(
  * buildReviewCommand 在拿到 scopeFlags 结果后前置校验。 */
 function optionalFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[] {
   const parts: string[] = [];
-  const excludes = commaList(args.exclude, "exclude", 50, messages);
+  const excludes = commaList(args.exclude, "exclude", EXCLUDE_LIST_LIMIT, messages);
   if (excludes.length > 0) {
     parts.push("--exclude", shq(excludes.join(",")));
   }
@@ -612,6 +629,21 @@ export function parseOcrVersion(text: string): string | null {
 }
 
 /**
+ * `--format` 交给 OCR 的取值：本包只认 json——`lib/parse.ts` 的解析层只解 JSON 一份形状。
+ *
+ * 白名单（`resolveOutputFormat`）管的是注入面，它放行的 text/sarif 在这里被拒：
+ * 那两个值没有下游，交下去只会换回一条「OCR 输出解析失败」，把「参数不在本包支持面内」
+ * 说成 OCR 的错。`format` 不在任何工具的 parameters 里，走到这里的只有 PTC/直连调用方。
+ */
+function jsonOnlyFormat(value: unknown, messages: OcrReviewMessages): ReviewOutputFormat {
+  const outputFormat = resolveOutputFormat(value);
+  if (outputFormat !== "json") {
+    throw new Error(format(messages.formatNotJson, { format: outputFormat }));
+  }
+  return outputFormat;
+}
+
+/**
  * 构造 `ocr review` 命令。--output 固定为调用方给定的临时文件路径（防截断），
  * --audience agent --format json 是默认（结构化、无进度行）。
  * outputPath 缺省（后台模式）省略 --output：结果以 OCR 会话记录为准。
@@ -623,14 +655,8 @@ export function buildReviewCommand(
   messages: OcrReviewMessages,
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
-  const parts: string[] = [
-    ocrCommand(),
-    "review",
-    "--audience",
-    "agent",
-    "--format",
-    resolveOutputFormat(args.format),
-  ];
+  const outputFormat = jsonOnlyFormat(args.format, messages);
+  const parts: string[] = [ocrCommand(), "review", "--audience", "agent", "--format", outputFormat];
   const effort = clampEffort(args.effort, "medium");
   parts.push("--effort", effort);
   pushIntFlag(parts, "--concurrency", args.concurrency, 1, messages);
@@ -666,19 +692,13 @@ export function buildScanCommand(
   messages: OcrReviewMessages,
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
-  const parts: string[] = [
-    ocrCommand(),
-    "scan",
-    "--audience",
-    "agent",
-    "--format",
-    resolveOutputFormat(args.format),
-  ];
-  const paths = commaList(args.path, "path", 100, messages);
+  const outputFormat = jsonOnlyFormat(args.format, messages);
+  const parts: string[] = [ocrCommand(), "scan", "--audience", "agent", "--format", outputFormat];
+  const paths = commaList(args.path, "path", PATH_LIST_LIMIT, messages);
   if (paths.length > 0) {
     parts.push("--path", shq(paths.join(",")));
   }
-  const excludes = commaList(args.exclude, "exclude", 50, messages);
+  const excludes = commaList(args.exclude, "exclude", EXCLUDE_LIST_LIMIT, messages);
   if (excludes.length > 0) {
     parts.push("--exclude", shq(excludes.join(",")));
   }
@@ -722,7 +742,7 @@ export function buildDelegatePreviewCommand(
     "json",
     ...scopeFlags(scopeArgs, messages),
   ];
-  const excludes = commaList(args.exclude, "exclude", 50, messages);
+  const excludes = commaList(args.exclude, "exclude", EXCLUDE_LIST_LIMIT, messages);
   if (excludes.length > 0) {
     parts.push("--exclude", shq(excludes.join(",")));
   }
@@ -769,14 +789,10 @@ function sessionLimit(value: unknown, messages: OcrReviewMessages): number {
   if (value === undefined || value === null) {
     return 10;
   }
-  // 数字字符串接受（"3"），与 pushIntFlag 的数值槽位同一口径；布尔/其它一律 NaN 落到抛错。
-  let num = Number.NaN;
-  if (typeof value === "number") {
-    num = value;
-  } else if (typeof value === "string") {
-    num = Number(value);
-  }
-  if (!Number.isInteger(num) || num < 1 || num > 100) {
+  // 取值口径与 pushIntFlag 共用同一枚 decimalInteger：数字字符串 "3" 接受，
+  // 而 `Number()` 才会放行的 "0x10" / "1e2" 一律抛错（错写法不该被静默读成另一个数）。
+  const num = decimalInteger(value);
+  if (num === null || num < 1 || num > 100) {
     throw new Error(format(messages.sessionLimitRange, { received: describeValue(value) }));
   }
   return num;

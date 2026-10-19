@@ -60,6 +60,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 - 包在公共 npm 上，安装不需要凭据。
 - 发布面只含 `host.js`、`client.js`、`cordis.patch.yml`、`scripts` 与 `THIRD_PARTY_NOTICES.md`（随包运行时依赖的第三方许可证；`prepack` 重建两个 bundle），源码仓见 package.json 的 `repository.url`。
 
+
+## shared 的版本下限
+
+如果你的 profile 用 pnpm `overrides` 把 `@jayyuen66/dsh-plugin-shared` 钉在某个版本，那个钉住的值必须不低于本包声明的 `@jayyuen66/dsh-plugin-shared` 版本。钉得更低就会装到一份缺少本包运行期所导入的名字的产物，宿主起来时报 `N entries did not activate` 加 `does not provide an export named ...`——包装得上、永远不生效，而各仓单仓 CI 看不见这一类。
+
 ## 外部 CLI 的安装与升级
 
 本包只 spawn `ocr`，不安装它。两条命令任选：
@@ -191,7 +196,7 @@ npm i -g @alibaba-group/open-code-review@1.13.0      # 钉在本包核对的那�
 ## 开发
 
 - `npm run check` 是发布前的一条门：typecheck（两侧 tsconfig）+ `oxlint` + 重建两个 bundle + `npm test`（vitest 带 coverage）+ `oxfmt --check`。
-- `npm test` 带 `--coverage`，全局阈值 **100%**（lines/statements/branches/functions）——任何一行或分支没被用例钉住，测试套件当场红，这是本仓的既定质量门。
+- `npm test` 带 `--coverage`，阈值 **100%**（lines/statements/branches/functions），但分母是本仓 `vitest.config.ts` 里 `coverageInclude` 选定的那一面（`host.ts` + `lib/**`）——那一面里任何一行或分支没被用例钉住就当场红。客户端半（`src/**`）**刻意在分母外**：那几份模块是经 bundle 与设置卡用例覆盖的，不是按单元测的。
 - `npm run build` / `npm run build:client` 产出发布物 `host.js` / `client.js`；改动 `host.ts`、`lib/*` 或 `src/*` 后必须重建（`test/build-host.test.ts` 钉了产物与源码的新鲜度，过期产物会让套件变红）。发布物不手改。
 - 插件源码是 TS，由宿主的 cordis Loader 直接加载（Node ≥ 22.18 类型剥离）；bundle 只为 npm 发布面存在。
 

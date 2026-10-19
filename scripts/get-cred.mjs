@@ -212,13 +212,17 @@ function unquotedValue(raw) {
 }
 
 /**
- * 继承来的进程环境层：去首尾空白，空白按「这一层没有值」处理。
+ * 继承来的进程环境层：去首尾空白，空白按「这一层没有值」处理；含内嵌换行的值整层作废。
+ *
+ * 单行是 OCR 的 api_key_cmd 契约（多行 stdout = 硬错误，见文件头），托管文档层已按同一条
+ * 判据丢弃——环境层不能是例外：把带内嵌换行的值原样吐出去，用户拿到的是隔了一层的
+ * 「resolve LLM endpoint」报错，而这一层本可以当没有值、继续往下回退。
  * @param {string | undefined} raw
  * @returns {string | undefined}
  */
 function fromInheritedEnv(raw) {
   const value = typeof raw === "string" ? raw.trim() : "";
-  return value === "" ? undefined : value;
+  return value === "" || /[\r\n]/u.test(value) ? undefined : value;
 }
 
 /**

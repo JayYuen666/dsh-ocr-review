@@ -20,6 +20,9 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  openSync,
+  closeSync,
+  truncateSync,
 } from "node:fs";
 import { symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -109,6 +112,10 @@ interface RunScript {
   stderrTruncated?: boolean;
   /** --output 文件正文：给出即按命令里的路径反写；缺省则不写（ENOENT 分支）。 */
   output?: string;
+  /** --output 文件按这个字节数截成**稀疏**文件：造「超上限」那一档而不真写这么多字节。 */
+  sparseBytes?: number;
+  /** 把 --output 指到一个**目录**：让插件读回落盘结果时抛错（失败路径的降级分支）。 */
+  outputDirectory?: boolean;
   /** 前台 result() 直接抛出的值（含非 Error，覆盖 shared 的 errorText 两支）。 */
   throws?: unknown;
 }
@@ -447,8 +454,17 @@ function makeShell(): FakeShell {
           throw script.throws;
         }
         const outPath = outputPathOf(call.command);
+        if (outPath !== undefined && script.outputDirectory === true) {
+          // 建成目录：后续 readFileSync 会抛 EISDIR，走插件那条「读不到就原样交回」的分支。
+          mkdirSync(outPath, { recursive: true });
+        }
         if (outPath !== undefined && script.output !== undefined) {
           writeFileSync(outPath, script.output);
+        }
+        if (outPath !== undefined && script.sparseBytes !== undefined) {
+          // 稀疏：只落一页元数据，不真占这么多盘。
+          closeSync(openSync(outPath, "w"));
+          truncateSync(outPath, script.sparseBytes);
         }
         return {
           // 显式给了 null 就保留 null：那是「进程被墙钟/信号收走」的真实形状（执行器交回
@@ -1013,6 +1029,13 @@ const REVIEW_JSON = JSON.stringify({
   ],
 });
 
+/** 失败覆盖度样本：`failed` 里一条真实的预算失败条目（多处用例共用同一形状）。 */
+const FAILED_ITEM_BUDGET = {
+  path: "src/b.ts",
+  classification: "budget",
+  reason: "token budget",
+};
+
 describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote 方法）", () => {
   // ── 沙箱复位（每个用例只清外部 ocr CLI 的配置；宿主侧已无文件）────────────────
 
@@ -1362,7 +1385,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       // 一起提升会把扫描扩到整个 monorepo；而它不落会话，无需与 review 对齐。
       host.shell.gitTopLevel = MONO_TOP;
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB }, makeExec());
+      await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB, wait: true }, makeExec());
       expect(host.shell.resolveCalls.at(-1)?.workdir).toBe(MONO_SUB);
     });
 
@@ -1378,7 +1401,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: MONO_SUB }, makeExec());
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB }, makeExec());
+      await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB, wait: true }, makeExec());
 
       // 覆盖 review 与 scan 两条执行路径（前台）；background 那条由 startBackground 另发。
       expect(host.shell.resolveCalls.length).toBeGreaterThanOrEqual(2);
@@ -1419,7 +1442,13 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("命令构造：守护包装 + --output 临时文件；评论摘要锚定数字字符串行号", async () => {
       host.shell.scripts.push({ output: REVIEW_JSON });
       const view = (await toolOf(host, "ocr_review").execute(
-        { repo: "/repo", background: "登录改造", exclude: ["**/gen/*"], effort: "high" },
+        {
+          repo: "/repo",
+          wait: true,
+          background: "登录改造",
+          exclude: ["**/gen/*"],
+          effort: "high",
+        },
         makeExec(),
       )) as {
         status: string;
@@ -1440,7 +1469,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
 
     it("execute 直返 canonical 对象（不再把结果 stringify 进 {text} 双重编码）", async () => {
       host.shell.scripts.push({ output: REVIEW_JSON });
-      const result = await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      const result = await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      );
       // 双重编码回归钉：值本身就是结构化对象，而不是「JSON 字符串里再包一份 JSON」；
       // 也不再有包着字符串的 text 字段（PTC 的 await tools.ocr_review(...) 拿到的就是它）。
       expect(result).toBeTypeOf("object");
@@ -1476,13 +1508,16 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
               selected: [{}],
               completed: [{}],
               reused: [],
-              failed: [{ path: "src/b.ts", classification: "budget", reason: "token budget" }],
+              failed: [FAILED_ITEM_BUDGET],
               waived: [],
             },
           },
         }),
       });
-      const view = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+      const view = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as {
         status: string;
         totalCommentCount: number;
         warnings: string[];
@@ -1518,7 +1553,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       mkdirSync(path.dirname(custom), { recursive: true });
       host.settingsValue["ocrConfigPath"] = custom;
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       const command = String(host.shell.resolveCalls[0]?.command);
       // withHomeEnv 的 shq 引号被守护的 shq 二次转义成 '\''——按真实落串形态断言。
       const homeAssignment = shq(customHome).replaceAll("'", String.raw`'\''`);
@@ -1526,13 +1561,13 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       // 未设置时命令不含 HOME=：默认路径零重定向。
       host.settingsValue["ocrConfigPath"] = undefined;
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       expect(String(host.shell.resolveCalls[1]?.command)).not.toContain("HOME=");
     });
 
     it("临时目录解析后即删", async () => {
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       const outPath = String(outputPathOf(String(host.shell.resolveCalls[0]?.command)));
       expect(existsSync(outPath)).toBe(false);
       expect(existsSync(path.dirname(outPath))).toBe(false);
@@ -1542,7 +1577,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       host.shell.scripts.push({ output: `{"error":"auth failed api_key=${PLAIN_KEY}"}` });
       // 解析失败分支的诚实值就是一段说明字符串（不再包 { text }）。
       const message = (await toolOf(host, "ocr_review").execute(
-        { repo: "/repo" },
+        { repo: "/repo", wait: true },
         makeExec(),
       )) as string;
       expect(message).toMatch(/status 非法或缺失/u);
@@ -1553,17 +1588,137 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("exit 0 却没写出 --output 文件 ⇒ 可行动错误而非裸 ENOENT", async () => {
       host.shell.scripts.push({});
       await expect(
-        toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec()),
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
       ).rejects.toThrow(/未写出 --output 文件/u);
+    });
+
+    it("非零退出但 CLI 已写出 --output ⇒ 失败详情带上哪些文件没审成", async () => {
+      // 上游退出契约：只有 run-level 失败或「每个被选中的文件都失败」才非零，而那份
+      // manifest 照发（review_cmd.go 的 reviewResultError）。只回 stderr 的话模型看到
+      // 「2 of 2 selected item(s) failed」却不知道是哪些文件、哪一类失败。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "review failed: 2 of 2 selected item(s) failed",
+        output: JSON.stringify({
+          status: "failed",
+          comments: [],
+          manifest: {
+            coverage: {
+              selected: [{}],
+              completed: [],
+              reused: [],
+              waived: [],
+              failed: [FAILED_ITEM_BUDGET],
+            },
+          },
+        }),
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(
+        /2 of 2 selected item\(s\) failed[\s\S]*src\/b\.ts \[budget\] token budget/u,
+      );
+    });
+
+    it("ocr_scan 也走同一条失败详情路径（两处调用点各要一份回执）", async () => {
+      // withCoverageDetail 在 review 与 scan 各挂一次。只验 review 那一侧，等于让 scan 的
+      // 接线在无覆盖的情况下存在——改错了没有任何用例会红。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "scan failed: 1 of 1 selected item(s) failed",
+        output: JSON.stringify({
+          status: "failed",
+          comments: [],
+          manifest: {
+            coverage: {
+              selected: [{}],
+              completed: [],
+              reused: [],
+              waived: [],
+              failed: [{ path: "src/c.ts", classification: "budget", reason: "token budget" }],
+            },
+          },
+        }),
+      });
+      await expect(
+        toolOf(host, "ocr_scan").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(
+        /1 of 1 selected item\(s\) failed[\s\S]*src\/c\.ts \[budget\] token budget/u,
+      );
+    });
+
+    it("非零退出但 --output 里没有失败明细 ⇒ 原样交回错误，不追加空说明", async () => {
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "boom",
+        output: JSON.stringify({
+          status: "failed",
+          comments: [],
+          manifest: {
+            coverage: { selected: [], completed: [], reused: [], waived: [], failed: [] },
+          },
+        }),
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/^ocr 执行失败（exit=1）：boom$/u);
+    });
+
+    it("非零退出但 --output 落在读不回来的位置 ⇒ 原样交回错误，不把「读不到」说成 OCR 的失败", async () => {
+      // 裁剪分支：readFileSync 抛错时 withCoverageDetail 必须原样返回原错误。这条保证失败
+      // 详情里不会冒出第二层「读不到落盘结果」，把真正的 exit 原因盖住。
+      // 制造方式：让 --output 指向一个**目录**——writeFileSync 会静默失败（替身里那句
+      // 写在 try 外，所以这里改用 shell 替身的 throws 之外的手段：把目录预先建好）。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "boom",
+        outputDirectory: true,
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/^ocr 执行失败（exit=1）：boom$/u);
+    });
+
+    it("非零退出但 --output 里没有 manifest ⇒ failedItems 落到空集，原样交回错误", async () => {
+      // 覆盖 `coverage?.failedItems ?? []` 的**空值分支**：回执存在但没有 manifest（上游在
+      // run-level 失败时可能什么都不写），此时没有可附的明细，错误必须原样交回。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "boom",
+        output: JSON.stringify({ status: "failed", comments: [] }),
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/^ocr 执行失败（exit=1）：boom$/u);
+    });
+
+    it("非零退出且没写出 --output ⇒ 失败详情原样，不凭空加一句", async () => {
+      host.shell.scripts.push({ exitCode: 1, stderrText: "boom" });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/^ocr 执行失败（exit=1）：boom$/u);
+    });
+
+    it("--output 超过读取上限 ⇒ 点名文件与上限，不整份读进内存", async () => {
+      // 稀疏文件：truncate 立刻给出这个大小，而插件在 readFileSync 之前就该拒掉。
+      // 512 MiB 刻意远大于任何合理上限：这条断言不绑定 OUT_FILE_MAX_BYTES 的具体取值。
+      const oversize = 512 * 1024 * 1024;
+      host.shell.scripts.push({ sparseBytes: oversize });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/--output 文件过大/u);
     });
 
     it("maxComments 0（不截断）与非法值（回退 12）都能跑通", async () => {
       host.settingsValue["maxComments"] = 0;
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       host.settingsValue["maxComments"] = "many";
       host.shell.scripts.push({ output: REVIEW_JSON });
-      const result = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+      const result = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as {
         status: string;
       };
       expect(result.status).toBe("success");
@@ -1572,33 +1727,35 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("effort 缺省取设置卡值（low/high 直通，其它归 medium）", async () => {
       host.settingsValue["effort"] = "low";
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       expect(String(host.shell.resolveCalls[0]?.command)).toContain("--effort low");
       host.settingsValue["effort"] = "high";
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       expect(String(host.shell.resolveCalls[1]?.command)).toContain("--effort high");
       host.settingsValue["effort"] = "ultra";
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       expect(String(host.shell.resolveCalls[2]?.command)).toContain("--effort medium");
     });
 
     it("effort/wait 错类型一律抛错（静默回落会改变审查深度或等待语义），null 仍按缺省", async () => {
       await expect(
-        toolOf(host, "ocr_review").execute({ repo: "/repo", effort: 3 }, makeExec()),
+        toolOf(host, "ocr_review").execute({ repo: "/repo", effort: 3, wait: true }, makeExec()),
       ).rejects.toThrow(/effort 必须是字符串（收到 3）/u);
       await expect(
         toolOf(host, "ocr_review").execute({ repo: "/repo", wait: "false" }, makeExec()),
       ).rejects.toThrow(/wait 必须是布尔值（true\/false），收到 false/u);
-      // null 与 undefined 同口径：按缺省处理，不抛。
-      host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute(
+      // null 与 undefined 同口径：按**缺省**处理，不抛。缺省现在是后台（see waitOf），
+      // 所以这条走后台通道：没有 --output，但 --effort 仍按缺省 medium 下发。
+      const bg = (await toolOf(host, "ocr_review").execute(
         { repo: "/repo", effort: null, wait: null },
         makeExec(),
-      );
+      )) as { jobId?: string };
+      expect(bg.jobId).toBeDefined();
+      expect(bg.jobId === undefined ? 0 : bg.jobId.length).toBeGreaterThan(0);
       expect(String(host.shell.resolveCalls[0]?.command)).toContain("--effort medium");
-      expect(String(host.shell.resolveCalls[0]?.command)).toContain("--output");
+      expect(String(host.shell.resolveCalls[0]?.command)).not.toContain("--output");
     });
 
     it("wait=false 走后台通道：无 --output、无 timeoutMs、宿主 deadline 关闭", async () => {
@@ -1620,7 +1777,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
 
     it("前台执行不得关闭宿主 deadline（onExpiry 只在后台通道下发）", async () => {
       host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       expect(host.shell.resolveCalls[0]?.onExpiry).toBeUndefined();
       expect(host.shell.resolveCalls[0]?.timeoutMs).toBeTypeOf("number");
     });
@@ -2079,7 +2236,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("前台扫描：--path 合并、结果聚合", async () => {
       host.shell.scripts.push({ output: REVIEW_JSON });
       const result = (await toolOf(host, "ocr_scan").execute(
-        { repo: "/repo", path: ["src", "test"] },
+        { repo: "/repo", path: ["src", "test"], wait: true },
         makeExec(),
       )) as { totalCommentCount: number };
       // 命令词可能是 PATH 上的裸 `ocr`，也可能是随包 launcher 的绝对路径；
@@ -2094,15 +2251,15 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("解析失败 ⇒ 回显脱敏原文；未写出文件 ⇒ 抛错且临时目录已清", async () => {
       host.shell.scripts.push({ output: "not json at all" });
       const failed = (await toolOf(host, "ocr_scan").execute(
-        { repo: "/repo" },
+        { repo: "/repo", wait: true },
         makeExec(),
       )) as string;
       expect(failed).toMatch(/合法 JSON/u);
       const outPath = String(outputPathOf(String(host.shell.resolveCalls[0]?.command)));
       host.shell.scripts.push({});
-      await expect(toolOf(host, "ocr_scan").execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
-        /未写出 --output 文件/u,
-      );
+      await expect(
+        toolOf(host, "ocr_scan").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/未写出 --output 文件/u);
       expect(existsSync(path.dirname(outPath))).toBe(false);
     });
 
@@ -2129,7 +2286,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("超时 ⇒ 点名实际生效分钟数与行动建议", async () => {
       host.settingsValue["timeoutMinutes"] = 3;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /实际生效 3 分钟/u,
       );
     });
@@ -2141,7 +2298,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       host.settingsValue["timeoutMinutes"] = 60;
       host.shell.maxTimeoutMs = 600_000;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /实际生效 10 分钟/u,
       );
       // 下发给宿主的仍是请求值本身（收口是宿主 resolve 的事）。
@@ -2152,27 +2309,33 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       host.settingsValue["timeoutMinutes"] = 10;
       host.shell.maxTimeoutMs = 600_000;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /实际生效 10 分钟/u,
       );
     });
 
     it("aborted ⇒ 被中止；exit 127 ⇒ 安装指引", async () => {
       host.shell.scripts.push({ exitCode: null, aborted: true });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(/被中止/u);
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
+        /被中止/u,
+      );
       host.shell.scripts.push({ exitCode: 127 });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(/命令不存在/u);
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
+        /命令不存在/u,
+      );
     });
 
     it("其它退出码 ⇒ stderr（空则退 stdout）、超 800 字符走中间省略、全空只报退出码", async () => {
       host.shell.scripts.push({ exitCode: 1, stderrText: "boom: provider 未配置" });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /exit=1）：boom: provider 未配置/u,
       );
       host.shell.scripts.push({ exitCode: 2, stderrText: "", stdoutText: "y".repeat(900) });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(/中间省略/u);
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
+        /中间省略/u,
+      );
       host.shell.scripts.push({ exitCode: 3, stderrText: "", stdoutText: "" });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /^ocr 执行失败（exit=3）$/u,
       );
     });
@@ -2182,13 +2345,15 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
         exitCode: 1,
         stderrText: `HEAD ${"y".repeat(900)} ${PLAIN_KEY} tail`,
       });
-      await expect(preview.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(/REDACTED/u);
+      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
+        /REDACTED/u,
+      );
     });
 
     it("stdout 截断 ⇒ 追加截断说明，有落盘路径时一并给出", async () => {
       host.shell.scripts.push({ stdoutText: "partial", stdoutTruncated: true });
       // "partial" 不是合法 JSON ⇒ preview 走解析失败分支，诚实值就是那段说明字符串。
-      const result = (await preview.execute({ repo: "/repo" }, makeExec())) as string;
+      const result = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as string;
       expect(result).toContain("已截断");
       expect(result).not.toContain("完整输出已落盘");
       host.shell.scripts.push({
@@ -2196,14 +2361,14 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
         stdoutTruncated: true,
         stdoutSpillPath: "/tmp/spill.txt",
       });
-      const spilled = (await preview.execute({ repo: "/repo" }, makeExec())) as string;
+      const spilled = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as string;
       expect(spilled).toContain("/tmp/spill.txt");
     });
 
     it("timeoutMinutes 非法 ⇒ 按 0 处理并请求宿主上限", async () => {
       host.settingsValue["timeoutMinutes"] = "soon";
       host.shell.scripts.push({ stdoutText: "{}" });
-      await preview.execute({ repo: "/repo" }, makeExec());
+      await preview.execute({ repo: "/repo", wait: true }, makeExec());
       expect(host.shell.resolveCalls[0]?.timeoutMs).toBe(2_147_483_647);
     });
 
@@ -2224,7 +2389,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       // 与上一条互为备份。
       expect(cjkEmoji.slice(0, 500).isWellFormed()).toBe(false);
       host.shell.scripts.push({ stdoutText: cjkEmoji });
-      const result = (await preview.execute({ repo: "/repo" }, makeExec())) as string;
+      const result = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as string;
       // 自守三：另两条空转通道——回显原文这条路真走了吗？真截断了吗？（parseDelegatePreview
       // 哪天收下这份输入就不进 echoRaw 分支；上限哪天形同不设也不留孤立代理。两种都白过。）
       expect(result).toContain("输出解析失败");
@@ -2248,7 +2413,9 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       host.shell.scripts.push({ exitCode: 2, stderrText: detail });
       // 拒绝消息就是进会话日志的那一条，要的是全串而不是正则命中的一截。
       const message = String(
-        await preview.execute({ repo: "/repo" }, makeExec()).catch((error: unknown) => error),
+        await preview
+          .execute({ repo: "/repo", wait: true }, makeExec())
+          .catch((error: unknown) => error),
       );
       expect(message.isWellFormed()).toBe(true);
       const halves = message.split(zh.middleEllipsis);
@@ -2287,7 +2454,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
           excluded_files: [{ path: "b.lock" }, "nope", { path: "" }],
         }),
       });
-      const result = (await preview.execute({ repo: "/repo" }, makeExec())) as {
+      const result = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as {
         mergeBase: string | null;
         reviewableCount: number;
         insertions: number;
@@ -2300,7 +2467,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       expect(result.deletions).toBe(1);
       expect(result.excludedFiles).toHaveLength(1);
       host.shell.scripts.push({ stdoutText: '{"error":"nope"}' });
-      const bad = (await preview.execute({ repo: "/repo" }, makeExec())) as string;
+      const bad = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as string;
       expect(bad).toMatch(/preview 输出解析失败/u);
     });
 
@@ -2314,7 +2481,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
           reviewable_files: [],
         }),
       });
-      const result = (await preview.execute({ repo: "/repo" }, makeExec())) as {
+      const result = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as {
         mergeBase: string | null;
       };
       expect(result.mergeBase).toBeNull();
@@ -2442,7 +2609,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("实测与核对版本不同 ⇒ 摘要的 hint 尾部多出那一句，并把两个数字都写出来", async () => {
       const host = await hostWithMeasuredVersion("open-code-review 9.9.9 darwin/arm64\n");
       host.shell.scripts.push({ output: REVIEW_JSON });
-      const ok = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+      const ok = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as {
         hint: string;
       };
       expect(ok.hint.startsWith(zh.reviewSummaryHint)).toBe(true);
@@ -2453,7 +2623,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("实测就是核对的那一版 ⇒ hint 一字不多（不给模型编一个没发生过的问题）", async () => {
       const host = await hostWithMeasuredVersion(VERSION_OK_OUT);
       host.shell.scripts.push({ output: REVIEW_JSON });
-      const ok = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+      const ok = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as {
         hint: string;
       };
       expect(ok.hint).toBe(zh.reviewSummaryHint);
@@ -2463,7 +2636,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       const host = makeHost();
       applyPlugin(host);
       host.shell.scripts.push({ output: REVIEW_JSON });
-      const ok = (await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec())) as {
+      const ok = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as {
         hint: string;
       };
       expect(ok.hint).toBe(zh.reviewSummaryHint);
@@ -2473,7 +2649,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("ocr_scan 走同一句：两个自驱 LLM 的工具都吃同一份实测值", async () => {
       const host = await hostWithMeasuredVersion("open-code-review 0.0.1 linux/amd64\n");
       host.shell.scripts.push({ output: REVIEW_JSON });
-      const ok = (await toolOf(host, "ocr_scan").execute({ repo: "/repo" }, makeExec())) as {
+      const ok = (await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as {
         hint: string;
       };
       expect(ok.hint).toContain("0.0.1");
@@ -2517,11 +2696,11 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       const review = toolOf(host, "ocr_review");
       host.settingsValue["timeoutMinutes"] = 2;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
-      await expect(review.execute({ repo: "/repo" }, makeExec())).rejects.toThrow(
+      await expect(review.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /^ocr timed out \(effective 2 min = min\(request, shell\.maxTimeoutMs\)\)/u,
       );
       host.shell.scripts.push({ output: `{"error":"auth failed api_key=${PLAIN_KEY}"}` });
-      const failed = (await review.execute({ repo: "/repo" }, makeExec())) as string;
+      const failed = (await review.execute({ repo: "/repo", wait: true }, makeExec())) as string;
       expect(failed).toMatch(
         /ocr output parsing failed: OCR output has an invalid or missing status: \(none\)/u,
       );
@@ -2531,7 +2710,9 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       expect(failed).toContain("first 500 UTF-16 code units of the raw output (redacted)");
       expect(failed).not.toContain(PLAIN_KEY);
       host.shell.scripts.push({ output: REVIEW_JSON });
-      const ok = (await review.execute({ repo: "/repo" }, makeExec())) as { hint: string };
+      const ok = (await review.execute({ repo: "/repo", wait: true }, makeExec())) as {
+        hint: string;
+      };
       expect(ok.hint).toBe(MESSAGES.en.reviewSummaryHint);
     });
 
@@ -2566,7 +2747,10 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       expect(receipt.polling).toBe(MESSAGES.en.backgroundPolling);
       const preview = toolOf(host, "ocr_delegate_preview");
       host.shell.scripts.push({ stdoutText: '{"error":"nope"}' });
-      const badPreview = (await preview.execute({ repo: "/repo" }, makeExec())) as string;
+      const badPreview = (await preview.execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as string;
       expect(badPreview).toMatch(/^ocr delegate preview output parsing failed/u);
       const rule = toolOf(host, "ocr_delegate_rule");
       host.shell.scripts.push({
@@ -2676,7 +2860,10 @@ describe("外部 CLI 可用性前置：两条路都没有候选时不起进程",
     const host = makeHost();
     applyPlugin(host, pathProbe);
     host.shell.scripts.push({ output: REVIEW_JSON });
-    const result = await toolOf(host, "ocr_review").execute({ repo: "/repo" }, makeExec());
+    const result = await toolOf(host, "ocr_review").execute(
+      { repo: "/repo", wait: true },
+      makeExec(),
+    );
     expect(result).toBeTypeOf("object");
     expect(host.shell.resolveCalls).toHaveLength(1);
   });

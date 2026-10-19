@@ -658,12 +658,13 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(zh).toContain("⚠ get-cred 脚本缺失");
   });
 
-  it("装载期自检失败 ⇒ ready 分支上方多一行提示；通过/未跑都不出这行", () => {
+  it("装载期自检未通过 ⇒ ready 分支上方多一行提示；通过/未跑都不出这行", () => {
     const failed = withVerify({ ok: false, message: "MissingSessionID" });
-    expect(failed).toContain("装载期端点自检失败");
+    expect(failed).toContain("装载期端点自检未通过");
+    expect(failed).toContain("这条是端点给的回执，不是本插件的故障");
     expect(failed).toContain("MissingSessionID");
-    expect(withVerify({ ok: true, message: "" })).not.toContain("装载期端点自检失败");
-    expect(withVerify(null)).not.toContain("装载期端点自检失败");
+    expect(withVerify({ ok: true, message: "" })).not.toContain("装载期端点自检");
+    expect(withVerify(null)).not.toContain("装载期端点自检");
   });
 
   it("Provider 区三条降级路径按语言（含宿主没给原因时的兜底）", () => {

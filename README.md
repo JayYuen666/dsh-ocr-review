@@ -32,6 +32,11 @@ English · [中文](README.zh-CN.md)
 - When either is missing the card shows the degradation reason while tools and settings keep working.
 - The host must be `>= 0.2.1-rc.2`. That floor sits in `engines.dsh`, which is documentation only — no loader or installer reads it. What actually gates installation is the exact spelling of the four peer pins: the host compares every peer range against its own runtime version (prereleases participate) and refuses with `incompatible-version` when one does not match. On a machine still running dsh 0.2.1-rc.2, upgrade dsh first, or record an exemption for this package in the profile's `compatibility.json` (`dsh plugin --profile <profile> allow-version <name@version> --dsh-version <runtime version> --accept-risk`). This bundle imports no symbol from the `@deepseek-ai/dsh` package itself (every service face comes from the `@deepseek-ai/dsh-*` sub-packages), so it is not declared as a dependency of any kind.
 
+
+## Shared version floor
+
+If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entry, that pin must be at least the `@jayyuen66/dsh-plugin-shared` version this package declares. A lower pin installs a copy without the names this package imports at runtime, and the host then reports `N entries did not activate` with `does not provide an export named ...` when it boots -- the package installs fine and never loads, and no per-repo CI run can see it.
+
 ## External CLI status and version
 
 One judgement, `resolveOcrAvailability` in `lib/cli.ts`, answers "is there an `ocr` here, which copy, and how was it installed": the first executable found on `PATH` (with `PATHEXT` extensions on Windows), otherwise a copy inside this package's own dependency tree. "How it was installed" is read off the file the symlink in `bin` actually points at (`realpathSync`): anything under a `node_modules` is an npm-style global install, anything under `Cellar`/`Homebrew` is a formula, and neither of those is reported as unrecognised rather than guessed — the brew-vs-npm order matters because a formula-installed Node puts its own global npm packages under the same `homebrew` prefix. It is pure filesystem — `statSync(...).isFile()`, never a spawn — and it answers **candidate**, not **runnable**: a file that exists but cannot execute (no executable bit, or the bundled entry present while its platform binary is missing) passes the probe and is reported by the real spawn instead, which is why the "command not found" wording is kept as a separate fallback.
@@ -191,7 +196,7 @@ The external `ocr` subprocess started by `wait: false` is also registered as an 
 ## Development
 
 - `npm run check` is the single gate to run before publishing: typecheck (both tsconfigs) + `oxlint` + rebuild both bundles + `npm test` (vitest with coverage) + `oxfmt --check`.
-- `npm test` runs with `--coverage` under a **100% global threshold** (lines/statements/branches/functions) — any line or branch not pinned by a test turns the suite red by design.
+- `npm test` runs with `--coverage` under a **100% threshold** (lines/statements/branches/functions) over the coverage surface this repo opts into (`coverageInclude` in `vitest.config.ts`: `host.ts` + `lib/**`). Anything inside that surface not pinned by a test turns the suite red by design; the client half (`src/**`) is deliberately outside it, since those modules are exercised through the bundle and the settings-card tests rather than as units.
 - `npm run build` / `npm run build:client` produce the published `host.js` / `client.js`. After editing `host.ts`, `lib/*` or `src/*` they must be rebuilt (`test/build-host.test.ts` pins bundle freshness against the sources, so a stale bundle fails the suite). Never hand-edit the bundles.
 - The plugin source is TypeScript loaded directly by the host's cordis loader (Node ≥ 22.18 type stripping); the bundles exist for the published npm surface.
 
