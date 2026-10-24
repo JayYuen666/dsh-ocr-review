@@ -23,6 +23,11 @@ interface RunResult {
 /** 以当前环境为底，覆盖指定项（值为 undefined 即从结果里剔除该键）。 */
 function envFor(overrides: Record<string, string | undefined>): Record<string, string> {
   const merged: Record<string, string | undefined> = { ...process.env, ...overrides };
+  // 子进程的 os.homedir() 在 Windows 读 USERPROFILE；用例只改 HOME 时同步一份，避免
+  // "测试以为改的是家目录、实际读到的仍是 runner 真实家目录"。
+  if (merged["HOME"] !== undefined && overrides["USERPROFILE"] === undefined) {
+    merged["USERPROFILE"] = merged["HOME"];
+  }
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(merged)) {
     if (value !== undefined) {
@@ -190,5 +195,66 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     writeFileSync(path.join(home, ".env"), "OCR_TEST_KEY=sk-after-bad-doc\n");
     const rescued = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
     expect(rescued.stdout).toBe("sk-after-bad-doc\n");
+    // 回退成功也要说话：用户必须知道生效的 key 不是最高优先级那层给的。
+    expect(rescued.code).toBe(0);
+    expect(rescued.stderr).toMatch(/不是合法 YAML/u);
+    expect(rescued.stderr).toMatch(/取自更低的一层/u);
+  });
+
+  it(".env 行内注释剥离：未加引号从「 #」剥离，# 前无空格视为值的一部分", async () => {
+    const home = homeWith({ dotEnv: "OCR_TEST_KEY=sk-inline # tail comment\n" });
+    const res = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.stdout).toBe("sk-inline\n");
+    const noSpace = homeWith({ dotEnv: "OCR_TEST_KEY=sk#tag\n" });
+    const res2 = await runCred(["OCR_TEST_KEY", noSpace], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res2.stdout).toBe("sk#tag\n");
+    const quoted = homeWith({ dotEnv: 'OCR_TEST_KEY="sk-q" # tail\n' });
+    const res3 = await runCred(["OCR_TEST_KEY", quoted], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res3.stdout).toBe("sk-q\n");
+  });
+
+  it(".env 同名 key 最后一行生效；末行空值把这层 unset", async () => {
+    const lastWins = homeWith({ dotEnv: "OCR_TEST_KEY=sk-first\nOCR_TEST_KEY=sk-second\n" });
+    const res = await runCred(["OCR_TEST_KEY", lastWins], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.stdout).toBe("sk-second\n");
+    const lastEmpty = homeWith({ dotEnv: "OCR_TEST_KEY=sk-first\nOCR_TEST_KEY=\n" });
+    const res2 = await runCred(["OCR_TEST_KEY", lastEmpty], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res2.code).toBe(1);
+    expect(res2.stderr).toMatch(/取不到 OCR_TEST_KEY/u);
+  });
+
+  it(".env 双引号内转义成立，单引号内全字面", async () => {
+    const escaped = homeWith({ dotEnv: 'OCR_TEST_KEY="a\\"b\\\\c"\n' });
+    const res = await runCred(["OCR_TEST_KEY", escaped], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.stdout).toBe('a"b\\c\n');
+    const literal = homeWith({ dotEnv: "OCR_TEST_KEY='a\"b'\n" });
+    const res2 = await runCred(["OCR_TEST_KEY", literal], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res2.stdout).toBe('a"b\n');
+  });
+
+  it(".env 引号写坏 ⇒ 该行作废并记 problem，不硬砍出半个 key", async () => {
+    // 单边引号：硬砍首尾等于把凭据改短一位，拿错 key 打 401 比报「未配置」难排查。
+    const unpaired = homeWith({ dotEnv: 'OCR_TEST_KEY="abc\n' });
+    const res = await runCred(["OCR_TEST_KEY", unpaired], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.code).toBe(1);
+    expect(res.stderr).toMatch(/引号未配对/u);
+    // 闭引号后跟多余字符同样作废。
+    const trailing = homeWith({ dotEnv: 'OCR_TEST_KEY="abc"x\n' });
+    const res2 = await runCred(["OCR_TEST_KEY", trailing], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res2.code).toBe(1);
+    expect(res2.stderr).toMatch(/多余字符/u);
+    // 坏行不抹掉前面好的值；但成功路径必须带出警告。
+    const mixed = homeWith({ dotEnv: 'OCR_TEST_KEY=sk-good\nOCR_TEST_KEY="broken\n' });
+    const res3 = await runCred(["OCR_TEST_KEY", mixed], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res3.code).toBe(0);
+    expect(res3.stdout).toBe("sk-good\n");
+    expect(res3.stderr).toMatch(/引号未配对/u);
+  });
+
+  it(".env 引号内的纯空白按未配置处理（剥引号后 trim 判空）", async () => {
+    const home = homeWith({ dotEnv: 'OCR_TEST_KEY="   "\n' });
+    const res = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.code).toBe(1);
+    expect(res.stderr).toMatch(/取不到 OCR_TEST_KEY/u);
   });
 });

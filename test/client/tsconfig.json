@@ -1,0 +1,11 @@
+// ocr-review/test/client/tsconfig.json —— 本目录走包内那份 client 程序（一行 extends，
+// 不复制任何选项或范围）。
+//
+// 为什么要在这里再放一份：oxlint 的类型引擎按「离被 lint 文件最近的 tsconfig.json」给每个
+// 文件挑程序。client 侧用例（本目录）若没有自己的 tsconfig，最近的包根 tsconfig.json 是
+// host 程序且按目录排除它们 ⇒ 落进默认程序（lib 低于 ES2024、无 DOM），ES2023+ API 与
+// document 一类的假报会在这些文件上复发。extends 上一级的 tsconfig.client.json 后，程序
+// 内容（include 的解析、compilerOptions）仍以基配置单源，这里只声明「本目录属于哪份程序」。
+{
+  "extends": "../../tsconfig.client.json"
+}

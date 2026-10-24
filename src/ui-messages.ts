@@ -99,6 +99,7 @@ export interface UiMessages {
   readonly effortLabel: string;
   /** effort 行说明。 */
   readonly effortHint: string;
+  readonly effortAuto: string;
   readonly effortLow: string;
   readonly effortMedium: string;
   readonly effortHigh: string;
@@ -126,6 +127,25 @@ export interface UiMessages {
   readonly configPathLabel: string;
   /** ocrConfigPath 行说明。 */
   readonly configPathHint: string;
+  /** MCP 管理区标题。 */
+  readonly mcpTitle: string;
+  readonly mcpHint: string;
+  readonly mcpSave: string;
+  readonly mcpSaving: string;
+  readonly mcpSaved: string;
+  readonly mcpLoadFailed: string;
+  /** ChatGPT 管理区标题。 */
+  readonly chatGptTitle: string;
+  readonly chatGptHint: string;
+  readonly chatGptCheck: string;
+  readonly chatGptChecking: string;
+  readonly chatGptModelLabel: string;
+  readonly chatGptUse: string;
+  readonly chatGptUsing: string;
+  readonly chatGptSaved: string;
+  readonly chatGptLoginHint: string;
+  /** 当前部署没有远程面。 */
+  readonly adminUnavailable: string;
   /** 设置快照还在加载时的提示。 */
   readonly settingsLoading: string;
   /** key 走动态读取的说明。 */
@@ -265,9 +285,11 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     skippedPrefix: "\n跳过（settings 中无对应 apiKeyEnv）：",
     migrateFailed: "迁移失败",
     effortLabel: "审查深度 (effort)",
-    effortHint: "low=1 轮快速反馈 / medium=2 轮默认 / high=3 轮深查（越深越贵）",
+    effortHint:
+      "auto=跟随 OCR 自身配置 / low=1 轮快速反馈 / medium=2 轮 / high=3 轮深查（越深越贵）",
+    effortAuto: "auto — 跟随 OCR 配置",
     effortLow: "low — 快速",
-    effortMedium: "medium — 均衡（默认）",
+    effortMedium: "medium — 均衡",
     effortHigh: "high — 深入",
     languageLabel: "评审语言",
     languageHint: "OCR 评论输出语言（写入 config.language）",
@@ -276,13 +298,31 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     onLabel: "开启",
     offLabel: "关闭",
     maxCommentsLabel: "摘要评论条数 (maxComments)",
-    maxCommentsHint: "返回给模型的 top 评论条数；0 = 全部（含未锚定行，输出大）（默认 12）",
+    maxCommentsHint:
+      "返回给模型的 top 评论条数；0 = 全部（含未锚定行，输出大）（默认见本行设置项的初值）",
     timeoutLabel: "运行超时 (timeoutMinutes)",
     timeoutHint:
-      "前台墙钟超时（分钟）；0 = 宿主上限（shell.maxTimeoutMs，当前 60 分钟）；更长的评审用工具 wait=false 后台模式（不设宿主 deadline，兜底窗口看设置项 ocrBackgroundMaxMs，默认 0 = 不设窗口）（默认 0）",
+      "前台墙钟超时（分钟）；0 = 请求宿主上限（实际生效值由 shell 执行器自己的 maxTimeoutMs 设置项决定，可在 bash-local / pwsh-local 的设置行里改）；更长的评审用工具 wait=false 后台模式（不设宿主 deadline，兜底窗口看设置项 ocrBackgroundMaxMs，默认 0 = 不设窗口）（默认 0）",
     configPathLabel: "OCR 配置文件 (ocrConfigPath)",
     configPathHint:
       "外部 open-code-review CLI 自己的配置位置；留空 = ~/.opencodereview/config.json。自定义时必须是 <X>/.opencodereview/config.json 布局（OCR 只认该形状，插件经 HOME 重定向让它生效）",
+    mcpTitle: "MCP servers",
+    mcpHint:
+      "编辑外部 OCR 的 mcp_servers（JSON）。stdio server 会在评审时执行命令，只在这里由人配置；保存只改这一支，其他配置原样保留。",
+    mcpSave: "保存 MCP",
+    mcpSaving: "保存中…",
+    mcpSaved: "MCP servers 已保存",
+    mcpLoadFailed: "读取 MCP 配置失败：",
+    chatGptTitle: "ChatGPT（OCR auth）",
+    chatGptHint: "登录态由 ocr auth 管理；本卡片只读查询状态，并在登录后把 provider 切到 chatgpt。",
+    chatGptCheck: "检查登录态",
+    chatGptChecking: "检查中…",
+    chatGptModelLabel: "ChatGPT 模型 slug",
+    chatGptUse: "使用 ChatGPT",
+    chatGptUsing: "应用中…",
+    chatGptSaved: "已切换到 ChatGPT provider",
+    chatGptLoginHint: "登录请在终端运行：",
+    adminUnavailable: "当前部署没有远程面，MCP/ChatGPT 管理区不可用",
     settingsLoading: "设置加载中，稍候可改",
     keyDynamicHint: "key 走 get-cred.mjs 动态读取，OCR 配置不留明文",
     keyScriptMissing: "⚠ get-cred 脚本缺失，api_key_cmd 无法工作",
@@ -358,9 +398,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     migrateFailed: "migration failed",
     effortLabel: "Review depth (effort)",
     effortHint:
-      "low = 1 pass quick feedback / medium = 2 passes default / high = 3 passes deep review (deeper costs more)",
+      "auto = follow the OCR config / low = 1 pass quick feedback / medium = 2 passes / high = 3 passes deep review (deeper costs more)",
+    effortAuto: "auto — follow the OCR config",
     effortLow: "low — quick",
-    effortMedium: "medium — balanced (default)",
+    effortMedium: "medium — balanced",
     effortHigh: "high — thorough",
     languageLabel: "Review language",
     languageHint: "Output language of OCR comments (written into config.language)",
@@ -370,13 +411,32 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     offLabel: "Off",
     maxCommentsLabel: "Summary comment cap (maxComments)",
     maxCommentsHint:
-      "Top comments returned to the model; 0 = all (including unanchored lines, large output) (default 12)",
+      "Top comments returned to the model; 0 = all (including unanchored lines, large output) (default: the row's initial value)",
     timeoutLabel: "Run timeout (timeoutMinutes)",
     timeoutHint:
-      "Foreground wall-clock timeout in minutes; 0 = host cap (shell.maxTimeoutMs, currently 60 min); for longer reviews use the tool's wait=false background mode (no host deadline; the backstop window is the ocrBackgroundMaxMs setting, default 0 = none) (default 0)",
+      "Foreground wall-clock timeout in minutes; 0 = ask for the host cap (the effective value comes from the maxTimeoutMs setting of the shell executor itself — edit it on the bash-local / pwsh-local settings row); for longer reviews use the tool's wait=false background mode (no host deadline; the backstop window is the ocrBackgroundMaxMs setting, default 0 = none) (default 0)",
     configPathLabel: "OCR config file (ocrConfigPath)",
     configPathHint:
       "Where the external open-code-review CLI keeps its own config; empty = ~/.opencodereview/config.json. A custom value must follow the <X>/.opencodereview/config.json layout (OCR only reads that shape; the plugin makes it effective via a HOME redirect)",
+    mcpTitle: "MCP servers",
+    mcpHint:
+      "Edit the external OCR mcp_servers JSON. A stdio server runs commands during reviews, so this is human-managed here; saving touches only this key and preserves everything else.",
+    mcpSave: "Save MCP",
+    mcpSaving: "Saving…",
+    mcpSaved: "MCP servers saved",
+    mcpLoadFailed: "Failed to read the MCP config: ",
+    chatGptTitle: "ChatGPT (OCR auth)",
+    chatGptHint:
+      "Sign-in is managed by ocr auth; this card only reports the status and switches OCR's provider to chatgpt after you sign in.",
+    chatGptCheck: "Check sign-in",
+    chatGptChecking: "Checking…",
+    chatGptModelLabel: "ChatGPT model slug",
+    chatGptUse: "Use ChatGPT",
+    chatGptUsing: "Applying…",
+    chatGptSaved: "Switched to the ChatGPT provider",
+    chatGptLoginHint: "Run the sign-in in a terminal:",
+    adminUnavailable:
+      "No remote surface in this deployment; the MCP/ChatGPT admin section is unavailable",
     settingsLoading: "settings still loading — editable in a moment",
     keyDynamicHint: "Keys are read dynamically via get-cred.mjs; OCR config keeps no plain text",
     keyScriptMissing: "⚠ get-cred script missing, api_key_cmd cannot work",

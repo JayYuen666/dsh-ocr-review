@@ -32,6 +32,7 @@ import {
   clampEffort,
   commaList,
   resolveOutputFormat,
+  resolveRepoFile,
   shq,
 } from "./argv-guard.ts";
 import type { ReviewOutputFormat } from "./argv-guard.ts";
@@ -45,6 +46,11 @@ const EXCLUDE_LIST_LIMIT = 2000;
 /** `--path` 的路径条数上限（同 EXCLUDE_LIST_LIMIT 的取向：够大 + 超限告警）。 */
 const PATH_LIST_LIMIT = 2000;
 
+/** `--rule` / `--background-file` 的文件大小上限：规则是检查清单，背景是需求文档。 */
+const RULE_FILE_MAX_BYTES = 256 * 1024;
+const BACKGROUND_FILE_MAX_BYTES = 1024 * 1024;
+const MAX_GIT_PROCS_FLAG = "--max-git-procs";
+
 const BACKGROUND_FLAG = "--background";
 
 /**
@@ -56,22 +62,7 @@ const BACKGROUND_FLAG = "--background";
  * test/readme-parity.test.ts 再断言两侧 README 写的也是它。三处只有一处是人写的、
  * 靠门禁钉住另两处，就不会出现「README 教用户装 A、代码按 B 校验」这种两边各自自洽的错。
  */
-export const EXPECTED_OCR_CLI_VERSION = "1.13.0";
-
-/** root 解析：显式绝对路径优先；缺失/空串回退到当前会话工作区。 */
-export function resolveRoot(
-  value: unknown,
-  fallback: string | undefined,
-  messages: OcrReviewMessages,
-): string {
-  if (typeof value === "string" && value.trim().length > 0) {
-    return assertAbsoluteRoot(value.trim(), messages);
-  }
-  if (typeof fallback === "string" && fallback.trim().length > 0) {
-    return assertAbsoluteRoot(fallback.trim(), messages);
-  }
-  throw new Error(messages.repoRequiredUnknownWorkspace);
-}
+export const EXPECTED_OCR_CLI_VERSION = "1.13.3";
 
 /** 报错用的值形态（永不调用可能被劫持的 toJSON/toString）。host.ts 的入参闸
  *  （effort/wait）复用同一口径，故导出。 */
@@ -80,6 +71,30 @@ export function describeValue(value: unknown): string {
     return String(value);
   }
   return Array.isArray(value) ? "array" : typeof value;
+}
+
+/** root 解析：显式绝对路径优先；缺失/空串回退到当前会话工作区。
+ *
+ * 错类型必须抛错，不能落进 fallback：宿主对工具入参零校验（见 `idValue` 的说明），
+ * `{repo: 123}` 静默回退成当前会话工作区，等于「调用方明确指定了仓库」被换成另一个
+ * 仓库去审，而回执里不会留下任何痕迹。空串/缺省才是「没指定」。 */
+export function resolveRoot(
+  value: unknown,
+  fallback: string | undefined,
+  messages: OcrReviewMessages,
+): string {
+  if (value !== undefined && value !== null && typeof value !== "string") {
+    throw new TypeError(
+      format(messages.mustBeString, { name: "repo", received: describeValue(value) }),
+    );
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    return assertAbsoluteRoot(value.trim(), messages);
+  }
+  if (typeof fallback === "string" && fallback.trim().length > 0) {
+    return assertAbsoluteRoot(fallback.trim(), messages);
+  }
+  throw new Error(messages.repoRequiredUnknownWorkspace);
 }
 
 /** 字符串标量参数：键存在即必须是字符串。
@@ -121,6 +136,12 @@ export interface ReviewScopeArgs {
   provider?: unknown;
   model?: unknown;
   resume?: unknown;
+  /** 只列文件清单、不调 LLM；与 resume/wait=false 互斥（由 host 前置拒绝）。 */
+  preview?: unknown;
+  noFilter?: unknown;
+  maxGitProcs?: unknown;
+  rule?: unknown;
+  backgroundFile?: unknown;
   /** 未知来源值：调用方（host.ts 直接 spread 模型入参）可塞任意类型，故按
    *  未知声明、由 resolveOutputFormat 白名单钳制。 */
   format?: unknown;
@@ -141,6 +162,13 @@ export interface ScanScopeArgs {
   /** OCR scan 原生 --provider/--model（shared_flags.go 的 registerScanFlags），与 review 对齐。 */
   provider?: unknown;
   model?: unknown;
+  preview?: unknown;
+  noPlan?: unknown;
+  noDedup?: unknown;
+  noSummary?: unknown;
+  resume?: unknown;
+  maxGitProcs?: unknown;
+  rule?: unknown;
   /** 同 ReviewScopeArgs.format：未知来源、白名单钳制。 */
   format?: unknown;
 }
@@ -204,17 +232,112 @@ function pushIntFlag(
   parts.push(flag, String(num));
 }
 
+/** 布尔 flag：undefined/null 视为 false；其余非布尔值抛错（字符串 "false" 不能当真值）。 */
+function boolFlag(value: unknown, name: string, messages: OcrReviewMessages): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value !== "boolean") {
+    throw new TypeError(
+      format(messages.boolMustBeBoolean, { name, received: describeValue(value) }),
+    );
+  }
+  return value;
+}
+
+function pushBoolFlag(
+  parts: string[],
+  flag: string,
+  value: unknown,
+  name: string,
+  messages: OcrReviewMessages,
+): void {
+  if (boolFlag(value, name, messages)) {
+    parts.push(flag);
+  }
+}
+
+/** `--rule` / `--background-file`：缺省/空串视为未给；其余交给路径闸（repo 根内普通文件）。 */
+function repoFileOf(
+  value: unknown,
+  repo: string,
+  name: string,
+  maxBytes: number,
+  messages: OcrReviewMessages,
+): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value === "string" && value.trim() === "") {
+    return null;
+  }
+  return resolveRepoFile(repo, value, name, maxBytes, messages);
+}
+
+/** 预览与正常审查共用的选择面：exclude、rule、max-git-procs。 */
+function selectionFlags(
+  args: ReviewScopeArgs | ScanScopeArgs,
+  repo: string,
+  messages: OcrReviewMessages,
+): string[] {
+  const parts: string[] = [];
+  const excludes = commaList(args.exclude, "exclude", EXCLUDE_LIST_LIMIT, messages);
+  if (excludes.length > 0) {
+    parts.push("--exclude", shq(excludes.join(",")));
+  }
+  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
+  if (rule !== null) {
+    parts.push("--rule", shq(rule));
+  }
+  pushIntFlag(parts, MAX_GIT_PROCS_FLAG, args.maxGitProcs, 1, messages);
+  return parts;
+}
+
 /** 模式参数解析：workspace（默认）/commit/branch 互斥，非法组合与错类型抛错。
  *
  * 互斥判定必须在两个模式分支之前一次做完：若先判 commit（`commit 非空` 时条件
  * 恒真），后面的「branch 与 commit 互斥」就永不可达，`{scope:branch, commit:x}`
  * 会被静默降级成 commit 审查——审错范围却按结论上报。 */
-function scopeFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[] {
+const KNOWN_SCOPES: ReadonlySet<string> = new Set(["workspace", "commit", "branch"]);
+
+/** 与 `scope` 冲突时报告的是哪一种范围参数（两者都没给时返回空串）。 */
+function otherScopeOf(commit: string, from: string, to: string): string {
+  if (commit !== "") {
+    return "commit";
+  }
+  return from === "" && to === "" ? "" : "from/to";
+}
+
+/**
+ * `scope` 是**声明**，不是从别的参数反推出来的结论：先按 from/to/commit 推模式再看
+ * scope，`{scope:"nope", from:"a", to:"b"}` 会被当成 branch 静默放行，而调用方声明的
+ * 范围与真正审的范围不是一回事。
+ */
+function declaredScopeOf(args: ReviewScopeArgs, messages: OcrReviewMessages): string {
   const scopeName = idValue(args.scope, "scope", messages).toLowerCase();
-  const scope = scopeName === "" ? "workspace" : scopeName;
+  if (scopeName === "") {
+    return "workspace";
+  }
+  if (!KNOWN_SCOPES.has(scopeName)) {
+    throw new Error(format(messages.unknownScope, { scope: scopeName }));
+  }
+  return scopeName;
+}
+
+function scopeFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[] {
+  const scope = declaredScopeOf(args, messages);
+  const explicit = idValue(args.scope, "scope", messages) !== "";
   const from = idValue(args.from, "from", messages);
   const to = idValue(args.to, "to", messages);
   const commit = idValue(args.commit, "commit", messages);
+  // 显式声明 workspace 却给了另一种范围：两个来源互相矛盾，按哪个审都没有正确答案。
+  // 缺省（没写 scope）时给 commit 仍是合法用法，所以只拦「显式声明」这一支。
+  if (explicit && scope === "workspace") {
+    const given = otherScopeOf(commit, from, to);
+    if (given !== "") {
+      throw new Error(format(messages.scopeMismatch, { scope, given }));
+    }
+  }
   const wantsBranch = scope === "branch" || from !== "" || to !== "";
   const wantsCommit = scope === "commit" || commit !== "";
   if (wantsBranch && wantsCommit) {
@@ -232,9 +355,7 @@ function scopeFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[
     }
     return ["--commit", shq(commit)];
   }
-  if (scope !== "workspace") {
-    throw new Error(format(messages.unknownScope, { scope }));
-  }
+  // scope 已在入口处过白名单，走到这里只剩 workspace。
   return [];
 }
 
@@ -656,9 +777,24 @@ export function buildReviewCommand(
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
   const outputFormat = jsonOnlyFormat(args.format, messages);
+  const preview = boolFlag(args.preview, "preview", messages);
   const parts: string[] = [ocrCommand(), "review", "--audience", "agent", "--format", outputFormat];
+  const resume = idValue(args.resume, "resume", messages);
+  if (preview) {
+    if (resume !== "") {
+      throw new Error(messages.previewRejectsResume);
+    }
+    parts.push("--preview", ...scopeFlags(args, messages), ...selectionFlags(args, repo, messages));
+    if (outputPath !== undefined) {
+      parts.push("--output", shq(outputPath));
+    }
+    return { command: parts.join(" "), workdir: repo };
+  }
+  // auto = 不传 --effort：让 OCR 自己的 config 决定；缺省仍按 medium（保持 CLI 直调契约）。
   const effort = clampEffort(args.effort, "medium");
-  parts.push("--effort", effort);
+  if (effort !== "auto") {
+    parts.push("--effort", effort);
+  }
   pushIntFlag(parts, "--concurrency", args.concurrency, 1, messages);
   pushIntFlag(parts, "--timeout", args.timeoutMinutes, 0, messages);
   pushIntFlag(parts, "--max-tools", args.maxTools, 0, messages);
@@ -666,7 +802,22 @@ export function buildReviewCommand(
   pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
   const scopeParts = scopeFlags(args, messages);
   parts.push(...scopeParts, ...optionalFlags(args, messages));
-  const resume = idValue(args.resume, "resume", messages);
+  pushBoolFlag(parts, "--no-filter", args.noFilter, "noFilter", messages);
+  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
+  if (rule !== null) {
+    parts.push("--rule", shq(rule));
+  }
+  const backgroundFile = repoFileOf(
+    args.backgroundFile,
+    repo,
+    "backgroundFile",
+    BACKGROUND_FILE_MAX_BYTES,
+    messages,
+  );
+  if (backgroundFile !== null) {
+    parts.push("--background-file", shq(backgroundFile));
+  }
+  pushIntFlag(parts, MAX_GIT_PROCS_FLAG, args.maxGitProcs, 1, messages);
   if (resume !== "") {
     // OCR 契约：workspace 模式禁 resume（"resume requires --from/--to or --commit"，
     // registerReviewFlags 的 --resume；review_cmd.go:364-366）。scopeFlags 返回空 = workspace，
@@ -693,24 +844,39 @@ export function buildScanCommand(
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
   const outputFormat = jsonOnlyFormat(args.format, messages);
+  const preview = boolFlag(args.preview, "preview", messages);
+  const resume = idValue(args.resume, "resume", messages);
+  if (preview && resume !== "") {
+    throw new Error(messages.previewRejectsResume);
+  }
   const parts: string[] = [ocrCommand(), "scan", "--audience", "agent", "--format", outputFormat];
+  if (preview) {
+    parts.push("--preview");
+  }
   const paths = commaList(args.path, "path", PATH_LIST_LIMIT, messages);
   if (paths.length > 0) {
     parts.push("--path", shq(paths.join(",")));
   }
-  const excludes = commaList(args.exclude, "exclude", EXCLUDE_LIST_LIMIT, messages);
-  if (excludes.length > 0) {
-    parts.push("--exclude", shq(excludes.join(",")));
+  if (!preview) {
+    pushTextFlag(parts, "--batch", args.batch, messages);
+    pushTextFlag(parts, "--provider", args.provider, messages);
+    pushTextFlag(parts, "--model", args.model, messages);
+    pushIntFlag(parts, "--concurrency", args.concurrency, 1, messages);
+    pushIntFlag(parts, "--timeout", args.timeoutMinutes, 0, messages);
+    pushIntFlag(parts, "--max-tools", args.maxTools, 0, messages);
+    pushIntFlag(parts, "--max-tokens", args.maxTokens, 0, messages);
+    pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
+    pushBoolFlag(parts, "--no-plan", args.noPlan, "noPlan", messages);
+    pushBoolFlag(parts, "--no-dedup", args.noDedup, "noDedup", messages);
+    pushBoolFlag(parts, "--no-summary", args.noSummary, "noSummary", messages);
+    if (resume !== "") {
+      parts.push("--resume", shq(resume));
+    }
   }
-  pushTextFlag(parts, "--batch", args.batch, messages);
-  pushTextFlag(parts, "--provider", args.provider, messages);
-  pushTextFlag(parts, "--model", args.model, messages);
-  pushIntFlag(parts, "--concurrency", args.concurrency, 1, messages);
-  pushIntFlag(parts, "--timeout", args.timeoutMinutes, 0, messages);
-  pushIntFlag(parts, "--max-tools", args.maxTools, 0, messages);
-  pushIntFlag(parts, "--max-tokens", args.maxTokens, 0, messages);
-  pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
-  pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
+  parts.push(...selectionFlags(args, repo, messages));
+  if (!preview) {
+    pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
+  }
   if (outputPath !== undefined) {
     parts.push("--output", shq(outputPath));
   }
@@ -724,7 +890,10 @@ export interface DelegatePreviewArgs {
   to?: unknown;
   commit?: unknown;
   background?: unknown;
+  backgroundFile?: unknown;
   exclude?: unknown;
+  rule?: unknown;
+  maxGitProcs?: unknown;
 }
 
 /** 构造 `ocr delegate preview` 命令（只列文件清单，不跑 LLM）。 */
@@ -747,12 +916,27 @@ export function buildDelegatePreviewCommand(
     parts.push("--exclude", shq(excludes.join(",")));
   }
   pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
+  const backgroundFile = repoFileOf(
+    args.backgroundFile,
+    repo,
+    "backgroundFile",
+    BACKGROUND_FILE_MAX_BYTES,
+    messages,
+  );
+  if (backgroundFile !== null) {
+    parts.push("--background-file", shq(backgroundFile));
+  }
+  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
+  if (rule !== null) {
+    parts.push("--rule", shq(rule));
+  }
+  pushIntFlag(parts, MAX_GIT_PROCS_FLAG, args.maxGitProcs, 1, messages);
   return { command: parts.join(" "), workdir: repo };
 }
 
 /** 构造 `ocr delegate rule` 命令（路径为位置参数，逐条 shq 转义）。 */
 export function buildDelegateRuleCommand(
-  args: { repo: unknown; paths?: unknown },
+  args: { repo: unknown; paths?: unknown; rule?: unknown },
   messages: OcrReviewMessages,
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
@@ -763,23 +947,81 @@ export function buildDelegateRuleCommand(
     throw new Error(messages.pathsRequired);
   }
   // 位置参数以 -- 分隔，避免路径以 '-' 开头被当 flag（clap 同 zvec-grep 处理，
-  // cobra 实测支持 -- 分隔）。
-  const parts: string[] = [ocrCommand(), "delegate", "rule", "--format", "json", "--", ...paths];
+  // cobra 实测支持 -- 分隔）。--rule 必须放在 -- 之前，否则会被当成位置参数。
+  const parts: string[] = [ocrCommand(), "delegate", "rule", "--format", "json"];
+  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
+  if (rule !== null) {
+    parts.push("--rule", shq(rule));
+  }
+  parts.push("--", ...paths);
   return { command: parts.join(" "), workdir: repo };
 }
+
+/** `ocr rules check <file>`：只做规则解析，不跑 LLM；`path` 是待查询的文件路径。 */
+export function buildRulesCheckCommand(
+  args: { repo: unknown; path?: unknown; rule?: unknown },
+  messages: OcrReviewMessages,
+): BuiltCommand {
+  const repo = assertAbsoluteRoot(args.repo, messages);
+  const filePath = idValue(args.path, "path", messages);
+  if (filePath === "") {
+    throw new Error(messages.rulesPathRequired);
+  }
+  const parts: string[] = [ocrCommand(), "rules", "check", "--repo", shq(repo)];
+  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
+  if (rule !== null) {
+    parts.push("--rule", shq(rule));
+  }
+  // 位置参数在 -- 之后：文件路径以 '-' 开头时不会被 cobra 当成 flag。
+  parts.push("--", shq(filePath));
+  return { command: parts.join(" "), workdir: repo };
+}
+
+/** `ocr llm providers|models`：只读诊断命令，不需要仓库目录。 */
+export function buildLlmCommand(action: "providers" | "models"): string {
+  const sub = action === "providers" ? "providers" : "models";
+  return `${ocrCommand()} llm ${sub} --color never`;
+}
+
+/** `ocr auth status`：卡片只读查询 ChatGPT 登录态。 */
+export function buildAuthStatusCommand(): string {
+  return `${ocrCommand()} auth status --provider chatgpt --color never`;
+}
+
+/** 登录动作保持人工执行（OAuth 要浏览器 + 本地回调），卡片只显示这条命令。 */
+export const CHATGPT_LOGIN_COMMAND = "ocr auth login --provider chatgpt";
 
 export interface SessionArgs {
   repo: unknown;
   limit?: unknown;
-  /** 查看/评论的目标会话 id（缺省表示仅 list）。 */
+  /** 查看/评论/导出的目标会话 id（缺省表示 list / export 最新一场）。 */
   id?: unknown;
-  /** 输出 comments 子命令结构（comments/show）。 */
+  before?: unknown;
+  after?: unknown;
+  severity?: unknown;
+  category?: unknown;
+  /** export 的 HTML 落盘路径（宿主注入，不是模型参数）。 */
+  output?: unknown;
+  /** 输出 comments 子命令结构（comments/show/compare/export）。 */
   action?: unknown;
 }
 
-/** session 子命令白名单（子命令名裸拼进命令串，只可能是这三个字面量）。 */
-const SESSION_ACTIONS = ["list", "show", "comments"] as const;
+/** session 子命令白名单（子命令名裸拼进命令串，只可能是这些字面量）。 */
+const SESSION_ACTIONS = ["list", "show", "comments", "compare", "export"] as const;
 type SessionAction = (typeof SESSION_ACTIONS)[number];
+
+const SESSION_SEVERITIES = ["critical", "high", "medium", "low"] as const;
+
+/** severity 过滤：大小写归一 + 白名单；未知值报错而不是交给 CLI 返回空集。 */
+function severityFilter(value: unknown, messages: OcrReviewMessages): string[] {
+  return commaList(value, "severity", SESSION_SEVERITIES.length, messages).map((item) => {
+    const lower = item.toLowerCase();
+    if (!(SESSION_SEVERITIES as readonly string[]).includes(lower)) {
+      throw new Error(format(messages.invalidSeverity, { value: item }));
+    }
+    return lower;
+  });
+}
 
 /** session list --limit：缺省 10（OCR 原生默认 20，本包收紧；OCR 的 0=不限在本包
  * 上限 100 下无意义）。显式给出时必须是 1-100 的整数（与工具 description 的承诺
@@ -798,10 +1040,142 @@ function sessionLimit(value: unknown, messages: OcrReviewMessages): number {
   return num;
 }
 
-/** 构造 `ocr session list/show/comments` 命令（历史评审会话闭环，Json 输出）。 */
+interface SessionContext {
+  repo: string;
+  id: string;
+  before: string;
+  after: string;
+  severities: string[];
+  categories: string[];
+  hasFilters: boolean;
+  limit: unknown;
+  output: string;
+  messages: OcrReviewMessages;
+}
+
+function sessionListParts(ctx: SessionContext): string[] {
+  if (ctx.id !== "") {
+    throw new Error(ctx.messages.listRejectsId);
+  }
+  if (ctx.before !== "" || ctx.after !== "") {
+    throw new Error(ctx.messages.beforeAfterOnlyForCompare);
+  }
+  if (ctx.hasFilters) {
+    throw new Error(ctx.messages.filtersOnlyForComments);
+  }
+  return [
+    ocrCommand(),
+    "session",
+    "list",
+    "--json",
+    "--repo",
+    shq(ctx.repo),
+    "--limit",
+    String(sessionLimit(ctx.limit, ctx.messages)),
+  ];
+}
+
+function sessionCompareParts(ctx: SessionContext): string[] {
+  if (ctx.before === "" || ctx.after === "") {
+    throw new Error(ctx.messages.compareNeedsBoth);
+  }
+  if (ctx.id !== "" || (ctx.limit !== undefined && ctx.limit !== null) || ctx.hasFilters) {
+    throw new Error(ctx.messages.compareRejectsArgs);
+  }
+  // 两个 id 都是位置参数；`--` 挡住以 '-' 开头的选项注入。
+  return [
+    ocrCommand(),
+    "session",
+    "compare",
+    "--json",
+    "--repo",
+    shq(ctx.repo),
+    "--",
+    shq(ctx.before),
+    shq(ctx.after),
+  ];
+}
+
+function sessionExportParts(ctx: SessionContext): string[] {
+  if (ctx.before !== "" || ctx.after !== "" || (ctx.limit !== undefined && ctx.limit !== null)) {
+    throw new Error(ctx.messages.exportRejectsArgs);
+  }
+  if (ctx.hasFilters) {
+    throw new Error(ctx.messages.filtersOnlyForComments);
+  }
+  if (ctx.output === "") {
+    throw new Error(ctx.messages.exportOutputRequired);
+  }
+  const parts = [ocrCommand(), "session", "export", "--repo", shq(ctx.repo), "-o", shq(ctx.output)];
+  if (ctx.id !== "") {
+    parts.push("--", shq(ctx.id));
+  }
+  return parts;
+}
+
+function sessionCommentsParts(ctx: SessionContext): string[] {
+  if (ctx.before !== "" || ctx.after !== "") {
+    throw new Error(ctx.messages.beforeAfterOnlyForCompare);
+  }
+  if (ctx.id === "") {
+    if (ctx.hasFilters) {
+      throw new Error(ctx.messages.filtersNeedId);
+    }
+    // 与旧行为一致：没有 id 就退回 list，绝不输出空 id 的 comments。
+    return sessionListParts({ ...ctx, hasFilters: false });
+  }
+  const parts = [ocrCommand(), "session", "comments", "--json", "--repo", shq(ctx.repo)];
+  if (ctx.severities.length > 0) {
+    parts.push("--severity", shq(ctx.severities.join(",")));
+  }
+  if (ctx.categories.length > 0) {
+    parts.push("--category", shq(ctx.categories.join(",")));
+  }
+  parts.push("--", shq(ctx.id));
+  return parts;
+}
+
+function sessionShowParts(ctx: SessionContext): string[] {
+  if (ctx.before !== "" || ctx.after !== "") {
+    throw new Error(ctx.messages.beforeAfterOnlyForCompare);
+  }
+  if (ctx.hasFilters) {
+    throw new Error(ctx.messages.filtersOnlyForComments);
+  }
+  if (ctx.id === "") {
+    return sessionListParts({ ...ctx, hasFilters: false });
+  }
+  return [ocrCommand(), "session", "show", "--json", "--repo", shq(ctx.repo), "--", shq(ctx.id)];
+}
+
+const SESSION_BUILDERS: Record<SessionAction, (ctx: SessionContext) => string[]> = {
+  list: sessionListParts,
+  compare: sessionCompareParts,
+  export: sessionExportParts,
+  comments: sessionCommentsParts,
+  show: sessionShowParts,
+};
+
+function sessionPartsOf(sub: SessionAction, ctx: SessionContext): string[] {
+  return SESSION_BUILDERS[sub](ctx);
+}
+
+function inferSessionAction(
+  requested: SessionAction | undefined,
+  ctx: SessionContext,
+): SessionAction {
+  if (requested !== undefined) {
+    return requested;
+  }
+  if (ctx.before !== "" || ctx.after !== "") {
+    return "compare";
+  }
+  return ctx.id === "" ? "list" : "show";
+}
+
+/** 构造 `ocr session list/show/comments/compare/export` 命令（历史评审会话闭环）。 */
 export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessages): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
-  const id = idValue(args.id, "id", messages);
   const action = idValue(args.action, "action", messages);
   const requested = SESSION_ACTIONS.find((name) => name === action);
   if (action !== "" && requested === undefined) {
@@ -809,31 +1183,20 @@ export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessag
       format(messages.invalidAction, { action, expected: SESSION_ACTIONS.join("/") }),
     );
   }
-  // action=list 与 id 同给是自相矛盾：静默改写成 show 属于「悄悄换语义」，抛错让模型改参。
-  if (requested === "list" && id !== "") {
-    throw new Error(messages.listRejectsId);
-  }
-  // action=show/comments 但 id 缺失 → 优雅降级为 list（防御：绝不输出空 id 的 show/comments）。
-  // 未声明 action 时带 id 视为 show（查单个）。
-  let sub: SessionAction;
-  if (requested === "comments" || requested === "show") {
-    sub = id === "" ? "list" : requested;
-  } else if (requested === "list") {
-    sub = "list";
-  } else {
-    sub = id === "" ? "list" : "show";
-  }
-  const parts: string[] = [ocrCommand(), "session", sub];
-  if (sub === "list") {
-    parts.push(
-      "--json",
-      "--repo",
-      shq(repo),
-      "--limit",
-      String(sessionLimit(args.limit, messages)),
-    );
-  } else {
-    parts.push("--json", "--repo", shq(repo), shq(id));
-  }
+  const ctx: SessionContext = {
+    repo,
+    id: idValue(args.id, "id", messages),
+    before: idValue(args.before, "before", messages),
+    after: idValue(args.after, "after", messages),
+    severities: severityFilter(args.severity, messages),
+    categories: commaList(args.category, "category", 50, messages),
+    hasFilters: false,
+    limit: args.limit,
+    output: idValue(args.output, "output", messages),
+    messages,
+  };
+  ctx.hasFilters = ctx.severities.length > 0 || ctx.categories.length > 0;
+  const sub = inferSessionAction(requested, ctx);
+  const parts = sessionPartsOf(sub, ctx);
   return { command: parts.join(" "), workdir: repo };
 }

@@ -1,0 +1,24 @@
+# 钉住行尾，不让 checkout 跟着平台走：Windows runner 上 Git for Windows 的机器级
+# core.autocrlf=true 会把工作树换成 CRLF，而 oxfmt 的 endOfLine 默认是 lf —— 于是
+# fmt:check 只在 windows 那一格把每个文件都判成未格式化（内容一字不差）。
+#
+# 这条规则管的是**下一次检出与下一次 add**：它改写不了索引里已有的 CRLF blob。历史里若
+# 真有按 CRLF 存进去的文件，加属性之后它们会立刻显示为已修改，需要一次
+# `git add --renormalize .` 才能收敛。当前索引实测全是 lf（`git ls-files --eol` 只有
+# icon.svg 是 none），所以没有待归一化的存量；其他长期分支或 fork 未必如此，合并时若
+# 出现成片「仅行尾」diff，先想到这一条。
+* text=auto eol=lf
+
+# Windows 上必须有 CRLF 的脚本类文件：cmd.exe 解析 .bat/.cmd 的 goto/label 依赖行尾，
+# PowerShell 的 .ps1 被强制成 LF 后在部分宿主上同样出问题。本仓现在没有这类文件，留着
+# 是给以后真加进来时不必再想起这条规则。
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# 二进制资源显式声明，不依赖 text=auto 的 NUL 探测：它只看文件前若干字节，遇到没有扩展名
+# 的伪文本二进制仍可能误判并改写行尾，而那种改写是不可逆的内容损坏。
+*.svg  binary
+*.png  binary
+*.jpg  binary
+*.ico  binary

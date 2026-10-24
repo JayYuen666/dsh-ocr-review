@@ -1,5 +1,8 @@
 // ocr-review 卡片的 locale 接线与双语（@deepseek-ai/dsh-client-locale 契约）。
 //
+// 本文件住在 test/client/：client 程序（tsconfig.client.json）按**目录**收录成员，
+// 宿主程序按同一目录排除——归属由路径决定，不靠两份清单逐文件登记。
+//
 // 与 ctx-observe 的同名测试同形态，但**没有 jsdom / @testing-library 可用**
 // （本包 devDeps 里没有，全仓也不为此新装依赖）：改用两步等价验证——
 //   1. `apply(fakeCtx)`：断言两语字典都注册进官方 locale、bind 到的 translator
@@ -17,6 +20,8 @@ import {
   SaveBar,
   buildProviderSection,
   buildSettingsSection,
+  buildAdminSection,
+  saveSettingsDraft,
   buildCliStatusRow,
   buildCliBadge,
   buildCliSection,
@@ -31,15 +36,20 @@ import {
   runProbe,
   currentConfigText,
   providerOptionLabel,
-} from "../src/client-entry.ts";
-import type { CardActionKind, OcrBinaryView, OcrCardDeps } from "../src/client-entry.ts";
+} from "../../src/client-entry.ts";
+import type {
+  CardActionKind,
+  OcrBinaryView,
+  OcrCardDeps,
+  SaveDraftDeps,
+} from "../../src/client-entry.ts";
 import type {
   PluginPackageRef,
   PluginsSubject,
 } from "@deepseek-ai/dsh-client-ui-plugin-manager/client";
-import { UI_MESSAGES } from "../src/ui-messages.ts";
-import type { LocaleNs, Translate } from "../src/ui-messages.ts";
-import type { OcrReader } from "../src/remote.ts";
+import { UI_MESSAGES } from "../../src/ui-messages.ts";
+import type { LocaleNs, Translate } from "../../src/ui-messages.ts";
+import type { OcrReader } from "../../src/remote.ts";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 import type { LocaleDictOf } from "@deepseek-ai/dsh-client-ui-slots";
@@ -703,12 +713,14 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
   it("设置区：行标题/说明与下拉项文本整体换语言", () => {
     const zh = textOf(buildSettingsSection(depsWith(tZh), true, noop));
     expect(zh).toContain("审查深度 (effort)");
-    expect(zh).toContain("medium — 均衡（默认）");
+    expect(zh).toContain("auto — 跟随 OCR 配置");
+    expect(zh).toContain("medium — 均衡");
     expect(zh).toContain("摘要评论条数 (maxComments)");
     expect(zh).toContain("开启");
     const en = textOf(buildSettingsSection(depsWith(tEn), true, noop));
     expect(en).toContain("Review depth (effort)");
-    expect(en).toContain("medium — balanced (default)");
+    expect(en).toContain("auto — follow the OCR config");
+    expect(en).toContain("medium — balanced");
     expect(en).toContain("Summary comment cap (maxComments)");
     expect(en).toContain("On");
     // 评审语言的两项：value 是写进 config.language 的枚举值、label 是语言自称，
@@ -743,6 +755,7 @@ interface ElementProps {
   children?: unknown;
   className?: string;
   disabled?: boolean;
+  value?: unknown;
   onClick?: (() => void) | undefined;
 }
 
@@ -767,6 +780,56 @@ function fieldProps(node: unknown, field: string): ElementProps | null {
   return props["data-field"] === field ? props : fieldProps(props.children, field);
 }
 
+describe("admin section", () => {
+  it("管理区：MCP 编辑器与 ChatGPT 按钮的双语/禁用/回调", () => {
+    let saved = 0;
+    let checked = 0;
+    let used = 0;
+    const base = {
+      t: tZh,
+      writable: true,
+      available: true,
+      mcpJson: '{"docs":{"command":"npx"}}',
+      mcpBusy: false,
+      mcpMsg: null,
+      authOutput: "Logged in as a@b",
+      authBusy: false,
+      authMsg: null,
+      authModel: "gpt-6",
+      loginCommand: "ocr auth login --provider chatgpt",
+      onMcpChange: noop,
+      onMcpSave: () => {
+        saved += 1;
+      },
+      onAuthModelChange: noop,
+      onCheckAuth: () => {
+        checked += 1;
+      },
+      onUseChatGpt: () => {
+        used += 1;
+      },
+    };
+    const node = buildAdminSection(base);
+    const zh = textOf(node);
+    expect(zh).toContain("MCP servers");
+    expect(zh).toContain("检查登录态");
+    expect(zh).toContain("ocr auth login --provider chatgpt");
+    expect(zh).toContain("Logged in as a@b");
+    expect(fieldProps(node, "mcpJson")?.value).toBe(base.mcpJson);
+    expect(fieldProps(node, "chatGptModel")?.value).toBe("gpt-6");
+    fieldProps(node, "mcpSave")?.onClick?.();
+    fieldProps(node, "authCheck")?.onClick?.();
+    fieldProps(node, "chatGptUse")?.onClick?.();
+    expect([saved, checked, used]).toStrictEqual([1, 1, 1]);
+    const disabled = textOf(buildAdminSection({ ...base, available: false }));
+    expect(disabled).toContain("不可用");
+    const en = textOf(buildAdminSection({ ...base, t: tEn }));
+    expect(en).not.toMatch(HAN);
+    expect(en).toContain("MCP servers");
+    expect(en).toContain("Use ChatGPT");
+  });
+});
+
 /** 随包 launcher 的样本路径（三处断言共用，写三遍就成了会各漂各的期望值）。 */
 const BUNDLED_LAUNCHER = "/pkg/bin/ocr.js";
 /** PATH 上那份全局安装的样本路径。 */
@@ -777,11 +840,11 @@ const PROBE_RESULT = "probe-result";
 const REFUSAL = "connection refused";
 
 /** host 送来的核对版本样本（不引 lib/cli.ts 的那枚常量：卡片只认载荷，写独立字面量才测得到「读到什么报什么」）。 */
-const VIEW_EXPECTED = "1.13.0";
+const VIEW_EXPECTED = "1.13.3";
 /** 装法那句由 host 组好，卡片只原样显示：这里用一段可辨认的样本。 */
 const VIEW_INSTALL = "两条命令任选：brew install open-code-review";
 /** 「核对版本」那一行的中文原文（多处断言共用，写几遍就成了各漂各的期望值）。 */
-const ZH_VERSION_EXPECTED = "本插件的契约按 ocr 1.13.0 逐条核对";
+const ZH_VERSION_EXPECTED = "本插件的契约按 ocr 1.13.3 逐条核对";
 /** 徽标「来自 PATH」那档短文案（同样多处共用）。 */
 const ZH_BADGE_PATH = "ocr 来自 PATH";
 
@@ -840,6 +903,10 @@ function readerStub(replies: readonly (() => Promise<Record<string, unknown>>)[]
     migrate: unusedReaderMethod,
     test: unusedReaderMethod,
     probe: unusedReaderMethod,
+    mcp: unusedReaderMethod,
+    saveMcp: unusedReaderMethod,
+    auth: unusedReaderMethod,
+    chatGpt: unusedReaderMethod,
   };
   return { reader, calls: () => count };
 }
@@ -900,12 +967,12 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
 
   it("版本那一行：没测过只说核对版本，测过再补一句一致/不一致", () => {
     expect(cliVersionText(tZh, viewOf({ measuredVersion: null }))).toBe(ZH_VERSION_EXPECTED);
-    expect(cliVersionText(tZh, viewOf({ measuredVersion: "1.13.0" }))).toContain(
-      "本机实测 1.13.0，与核对版本一致",
+    expect(cliVersionText(tZh, viewOf({ measuredVersion: "1.13.3" }))).toContain(
+      "本机实测 1.13.3，与核对版本一致",
     );
     const diverged = cliVersionText(tZh, viewOf({ measuredVersion: "1.12.13" }));
     expect(diverged).toContain("本机实测 1.12.13");
-    expect(diverged).toContain("与核对版本 1.13.0 不一致");
+    expect(diverged).toContain("与核对版本 1.13.3 不一致");
     // 宿主没报或没给核对版本 ⇒ 整行不说（不编一句「版本未知」的结论）。
     expect(cliVersionText(tZh, null)).toBe("");
     expect(cliVersionText(tZh, viewOf({ expectedVersion: null }))).toBe("");
@@ -926,7 +993,7 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     expect(text).toContain("外部 CLI（ocr）");
     expect(text).toContain("未找到 ocr");
     expect(text).toContain(VIEW_INSTALL);
-    expect(text).toContain("本插件的契约按 ocr 1.13.0 逐条核对");
+    expect(text).toContain("本插件的契约按 ocr 1.13.3 逐条核对");
     expect(text).toContain("检测版本");
     expect(fieldProps(node, "probe")).not.toBeNull();
   });
@@ -1169,13 +1236,13 @@ describe("检测版本这条动作：动作名、回执文本与忙位回收", (
     const run = await probeOnce({
       ok: true,
       version: "1.12.13",
-      output: "npm i -g @alibaba-group/open-code-review@1.13.0",
+      output: "npm i -g @alibaba-group/open-code-review@1.13.3",
     });
     // 动作名逐字钉：读取器的 descriptor 改了而卡片没跟上，症状正是「点了没反应」之外的那句报错。
     expect(run.actions).toStrictEqual(["probe"]);
     expect(run.messages).toStrictEqual([
       null,
-      { ok: true, text: "ocr 版本：1.12.13\nnpm i -g @alibaba-group/open-code-review@1.13.0" },
+      { ok: true, text: "ocr 版本：1.12.13\nnpm i -g @alibaba-group/open-code-review@1.13.3" },
     ]);
     // 忙位必须成对：先占位（按钮禁用）再在 finally 里放开，漏第二步就是永久转圈。
     expect(run.busy).toStrictEqual(["probe", null]);
@@ -1202,8 +1269,8 @@ describe("检测版本这条动作：动作名、回执文本与忙位回收", (
       "open-code-review 1.12.13 darwin/arm64",
     ]);
     // 一致那一档 host 交回空串：多一行「怎么换版」是噪音。
-    const without = await probeOnce({ ok: true, version: "1.13.0", changeText: "" });
-    expect(without.messages[1]?.text).toBe("ocr 版本：1.13.0");
+    const without = await probeOnce({ ok: true, version: "1.13.3", changeText: "" });
+    expect(without.messages[1]?.text).toBe("ocr 版本：1.13.3");
   });
 
   it("host 报失败时把原因写进回执，并把 ok 落成假", async () => {
@@ -1222,5 +1289,123 @@ describe("检测版本这条动作：动作名、回执文本与忙位回收", (
     expect(run.busy).toStrictEqual(["probe", null]);
     // 请求根本没成：拿不到任何新事实，就不该再打一次 GET（与 migrate 同一分工）。
     expect(run.refreshes).toBe(0);
+  });
+});
+
+/** 保存动作的替身：按字段给出 true / false / reject，其余记录到 sinks。 */
+function saveDeps(
+  results: Record<string, boolean | Error>,
+  touched: Record<string, unknown>,
+  sinks: {
+    setTouched: (next: Record<string, unknown>) => void;
+    setSaveError: (message: string | null) => void;
+    setSettingsBusy: (value: boolean) => void;
+  },
+): SaveDraftDeps {
+  return {
+    t: tZh,
+    value: {},
+    touched,
+    set: (field: string) => {
+      // 表里没列出的字段按「宿主受理」处理：本替身只关心被点名的那些。
+      const result = results[field] ?? true;
+      return result instanceof Error ? Promise.reject(result) : Promise.resolve(result);
+    },
+    ...sinks,
+  };
+}
+
+describe("saveSettingsDraft：按字段收集受理结果，不是一处失败全丢", () => {
+  it("部分字段被拒 ⇒ 只把被拒的留在 touched 上，成功的算已写", async () => {
+    let touchedAfter: Record<string, unknown> = { seeded: true };
+    let error: string | null = null;
+    let busyAfter: boolean | undefined;
+    await saveSettingsDraft(
+      saveDeps(
+        { maxComments: true, timeoutMinutes: false },
+        { maxComments: 20, timeoutMinutes: 30 },
+        {
+          setTouched: (next) => {
+            touchedAfter = next;
+          },
+          setSaveError: (message) => {
+            error = message;
+          },
+          setSettingsBusy: (value) => {
+            busyAfter = value;
+          },
+        },
+      ),
+    );
+    // 重试只会重写真正没落盘的那一个；已写入的若留在 touched 上会被重复提交。
+    expect(touchedAfter).toStrictEqual({ timeoutMinutes: 30 });
+    expect(error).toContain("timeoutMinutes");
+    expect(error).not.toContain("maxComments");
+    expect(busyAfter).toBe(false);
+  });
+
+  it("某个 set 拒绝时其余仍在飞行 ⇒ 等全部 settle，不提前释放 busy", async () => {
+    // 比检查点晚两拍才 settle：用 async IIFE 而不是 `new Promise` 手搓挂起态，
+    // 后者要一个外部 resolve 变量，测试里只为制造「还在飞行」这一瞬不值得。
+    const slow = (async (): Promise<boolean> => {
+      await Promise.resolve();
+      await Promise.resolve();
+      return true;
+    })();
+    const seen: string[] = [];
+    let busyAfter: boolean | undefined;
+    const deps: SaveDraftDeps = {
+      t: tZh,
+      value: {},
+      touched: { maxComments: 20, timeoutMinutes: 30 },
+      set: (field: string) => {
+        seen.push(field);
+        if (field === "maxComments") {
+          return Promise.reject(new Error("boom"));
+        }
+        return slow;
+      },
+      setTouched: () => {
+        /* 本用例只看 busy 与调用顺序 */
+      },
+      setSaveError: () => {
+        /* 同上 */
+      },
+      setSettingsBusy: (value) => {
+        busyAfter = value;
+      },
+    };
+    const running = saveSettingsDraft(deps);
+    // 第一个字段已拒绝，但第二个还没 settle：此时 busy 必须仍是 true，
+    // 否则用户能再点保存，对飞行中的那个字段重复写入。
+    await Promise.resolve();
+    expect(busyAfter).not.toBe(false);
+    await running;
+    expect(busyAfter).toBe(false);
+    expect(seen).toStrictEqual(["maxComments", "timeoutMinutes"]);
+  });
+
+  it("全部受理 ⇒ 清空 touched 且不报错", async () => {
+    let touchedAfter: Record<string, unknown> | null = { seeded: true };
+    let error: string | null = "stale";
+    await saveSettingsDraft(
+      saveDeps(
+        { maxComments: true },
+        { maxComments: 20 },
+        {
+          setTouched: (next) => {
+            touchedAfter = next;
+          },
+          setSaveError: (message) => {
+            error = message;
+          },
+          setSettingsBusy: () => {
+            /* 本用例不看 busy */
+          },
+        },
+      ),
+    );
+    expect(touchedAfter).toStrictEqual({});
+    expect(error).toBeNull();
   });
 });

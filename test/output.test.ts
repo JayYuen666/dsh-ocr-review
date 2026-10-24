@@ -138,8 +138,43 @@ describe("assertToolOutput", () => {
       items: { type: "string", pattern: "x" },
     };
     expect(() => guardOf(["x"], withPattern as JsonSchemaNode)).toThrow(/关键字 pattern/u);
-    const nestedOneOf: Record<string, unknown> = { oneOf: [{ type: "string", minLength: 1 }] };
+    // 两支起（官方子集要求 oneOf 至少两项）：这一条测的是「递归进分支后仍能发现子集外
+    // 关键字」，所以不能靠列表长度先被拦下。
+    const nestedOneOf: Record<string, unknown> = {
+      oneOf: [{ type: "string", minLength: 1 }, { type: "null" }],
+    };
     expect(() => guardOf("x", nestedOneOf as JsonSchemaNode)).toThrow(/关键字 minLength/u);
+  });
+
+  it("违规条目极多时不靠展开成实参：几十万条也只报一条可读结论，不抛 RangeError", () => {
+    // 全量评论一起不合形态（maxComments=0 时是常态）能产出几十万条违规。`push(...子结果)`
+    // 会一次性把每条都压进调用栈实参，`RangeError: Maximum call stack size exceeded`
+    // 顶掉本来的「不合形态」结论——而这个函数正是要在那种时刻给出结论的地方。
+    const arraySchema = { type: "array", items: { type: "string" } };
+    const many = Array.from({ length: 200_000 }, () => 1);
+    expect(() => guardOf(many, arraySchema as JsonSchemaNode)).toThrow(
+      /result\[0\]: expected string/u,
+    );
+  });
+
+  it("schema 的取值形态也查：type 写成数组、enum 写成字符串、oneOf 不足两支都当场抛", () => {
+    // 只查键名时这些写法会走到与官方子集无关的分支：`type: ["string","null"]` 让
+    // scalarMismatch 走最后一支（null 放行、string 反被判违规），`enum: "abc"` 变成
+    // 子串匹配且非字符串值抛 `map is not a function`。这些都是插件自己的代码写错，
+    // 必须在 schema 面炸掉，而不是继续拿错误的判据去判模型的数据。
+    const typeArray: Record<string, unknown> = { type: ["string", "null"] };
+    expect(() => guardOf("x", typeArray as JsonSchemaNode)).toThrow(/type 必须是单个类型名/u);
+    const enumString: Record<string, unknown> = { type: "string", enum: "abc" };
+    expect(() => guardOf("cd", enumString as JsonSchemaNode)).toThrow(/enum 必须是非空数组/u);
+    const shortOneOf: Record<string, unknown> = { oneOf: [{ type: "string" }] };
+    expect(() => guardOf("x", shortOneOf as JsonSchemaNode)).toThrow(/oneOf 必须是至少两项/u);
+    const bothTypeAndOneOf: Record<string, unknown> = {
+      type: "string",
+      oneOf: [{ type: "string" }, { type: "null" }],
+    };
+    expect(() => guardOf("x", bothTypeAndOneOf as JsonSchemaNode)).toThrow(
+      /type 与 oneOf 不能同时声明/u,
+    );
   });
 
   it("违规与不支持说明随注入的文案切换（en）", () => {
@@ -162,6 +197,34 @@ describe("redactKeyMaterial", () => {
       "***REDACTED*** rejected",
     );
     expect(redactKeyMaterial("SK-AbCdEfGhIjKlMnOpQrStUvWxYz012345")).toBe("***REDACTED***");
+  });
+
+  it("环境变量写法（`_` 紧贴键名）也必须抹：`\b` 在 `_` 之后不成立，曾是漏网的最大一块", () => {
+    // `_` 属 \w，`DEEPSEEK_API_KEY=` 的 `KEY` 前那个位置不是词边界。少了这条，最常见的
+    // 环境变量形态整条失配，而它恰恰是 provider 配置错误时 OCR 回显的形态。
+    expect(redactKeyMaterial("DEEPSEEK_API_KEY=sk-live-abcdefghijklmnop")).toBe(
+      "DEEPSEEK_API_KEY=***REDACTED***",
+    );
+    expect(redactKeyMaterial("DB_PASSWORD=hunter2hunter2")).toBe("DB_PASSWORD=***REDACTED***");
+    expect(redactKeyMaterial("export OPENAI_API_KEY=abcdef1234567890abcdef")).toBe(
+      "export OPENAI_API_KEY=***REDACTED***",
+    );
+  });
+
+  it("github 系 token 的下划线形态（ghp_ / github_pat_）抹掉，且不误伤带下划线的散文", () => {
+    // STANDALONE_KEY 要求「字母前缀 + 连字符」分界，这类值里没有连字符；单列一条而不是
+    // 放宽 STANDALONE_KEY 的连字符要求，是为了不连带把 kebab 小写路径抹掉。
+    expect(redactKeyMaterial("GITHUB_TOKEN=ghp_16C7e42F292c6912E7710c838347Ae178B4a")).toBe(
+      "GITHUB_TOKEN=***REDACTED***",
+    );
+    expect(redactKeyMaterial("saw ghp_16C7e42F292c6912E7710c838347Ae178B4a in stderr")).toBe(
+      "saw ***REDACTED*** in stderr",
+    );
+    expect(redactKeyMaterial("pat github_pat_11ABCDEFG0123456789_abcdefghijklmnop")).toBe(
+      "pat ***REDACTED***",
+    );
+    const prose = "db_user_password_column and password_policy are unrelated words";
+    expect(redactKeyMaterial(prose)).toBe(prose);
   });
 
   it("赋值与 Bearer 形态：只抹值、保留键名供排障", () => {
@@ -202,11 +265,11 @@ describe("stripAnsi", () => {
     // 这两句是 launcher 硬编码打到 stderr 的真实形状（`--color never` 管不到它：那句在
     // JS 包装层打印，Go 侧的旗标还没生效）。
     const nudge =
-      "\u001B[33m[ocr] A new version (v1.13.0) is available. Run to update:\u001B[0m\n" +
-      "\u001B[33m  npm i -g @alibaba-group/open-code-review@1.13.0\u001B[0m\n";
+      "\u001B[33m[ocr] A new version (v1.13.3) is available. Run to update:\u001B[0m\n" +
+      "\u001B[33m  npm i -g @alibaba-group/open-code-review@1.13.3\u001B[0m\n";
     expect(stripAnsi(nudge)).toBe(
-      "[ocr] A new version (v1.13.0) is available. Run to update:\n" +
-        "  npm i -g @alibaba-group/open-code-review@1.13.0\n",
+      "[ocr] A new version (v1.13.3) is available. Run to update:\n" +
+        "  npm i -g @alibaba-group/open-code-review@1.13.3\n",
     );
   });
 

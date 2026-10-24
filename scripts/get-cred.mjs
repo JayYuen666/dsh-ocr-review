@@ -63,6 +63,19 @@ const REF_PATTERN = /^[A-Z0-9_]+$/u;
 const CREDENTIALS_FILENAME = ".credentials.yaml";
 
 /**
+ * 失败出口：写 stderr 并置退出码，**不**硬杀进程。
+ *
+ * process.stderr.write 对管道是异步的，紧随其后的 process.exit(1) 会在缓冲未清空时把
+ * 诊断截成半句；置 exitCode 让事件循环自然排空后以非零收场，报错全文有保证。
+ * @param {string} message
+ * @returns {void}
+ */
+function fail(message) {
+  process.stderr.write(message);
+  process.exitCode = 1;
+}
+
+/**
  * 对象守卫（shared/lib/tool-events 同款防御）：typeof 收窄为 Record 而不经断言。
  * @param {unknown} value
  * @returns {value is Record<string, unknown>}
@@ -73,10 +86,8 @@ function isRecord(value) {
 
 /**
  * 数据目录：显式参数 > $DSH_HOME > homedir()/.dsh（空/全空白按未设置处理）。
- *
- * 相对路径在这里是硬错误而不是照用：本脚本的 cwd 是 OCR 当时所在的那个仓库，
- * 相对路径会被解析成 `<被审查仓库>/.dsh/…`——正是文件头声明要避免的「拿被审查
- * 仓库里的文件当用户凭据」。猜不出用户指的是哪个目录，就不猜。
+ * 只做**选择**；绝对性校验在调用点（main）做——那是一条要报错退出的硬门，与本函数
+ * 「挑出候选目录」的职责分开。
  * @param {string | undefined} fromArg
  * @returns {string}
  */
@@ -90,15 +101,13 @@ function dataDirFrom(fromArg) {
   if (arg !== "") {
     chosen = arg;
   }
-  if (!path.isAbsolute(chosen)) {
-    process.stderr.write(`[get-cred] dsh 数据目录必须是绝对路径，收到 ${JSON.stringify(chosen)}\n`);
-    process.exit(1);
-  }
   return chosen;
 }
 
-/** 取值过程中遇到的坏消息（文件损坏/权限）；只在最终失败时一并报出，
- *  免得某一层的小毛病提前 exit 1 把后面的合法层也堵掉。 */
+/** 取值过程中遇到的坏消息（文件损坏/权限/引号写坏）；收集但不提前退出——某一层的
+ *  小毛病不能把后面的合法层堵掉。出口只有两处：最终取不到时随失败原因一并报出，
+ *  或取到了更低一层时以警告形式报出（用户必须知道生效的 key 不是最高优先级给的）。
+ *  全程脱敏：明文值不进这条列表，YAML 报错走 yamlErrorDetail。 */
 const problems = [];
 
 /**
@@ -196,22 +205,6 @@ function fromCredentialsDoc(credPath, refName) {
 }
 
 /**
- * `.env` 的单行取值：去首尾空白，长度 > 1 且以引号开头时剥掉包裹引号。
- * @param {string} raw
- * @returns {string}
- */
-function unquotedValue(raw) {
-  const trimmed = raw.trim();
-  const [first] = trimmed;
-  // 只有首尾**配对**的引号才剥。单边引号是用户写坏了，硬砍首尾等于把凭据改短
-  // 一位，拿一个错 key 去打上游（401），比报「未配置」难排查得多。
-  if (trimmed.length > 1 && (first === '"' || first === "'") && trimmed.endsWith(first)) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-/**
  * 继承来的进程环境层：去首尾空白，空白按「这一层没有值」处理；含内嵌换行的值整层作废。
  *
  * 单行是 OCR 的 api_key_cmd 契约（多行 stdout = 硬错误，见文件头），托管文档层已按同一条
@@ -225,8 +218,87 @@ function fromInheritedEnv(raw) {
   return value === "" || /[\r\n]/u.test(value) ? undefined : value;
 }
 
+/** 未加引号的取值：trim，含「 #」时从那里剥离行内注释；剥完为空白按没有值。 */
+function unquotedValueOf(trimmed) {
+  const commentAt = trimmed.indexOf(" #");
+  const bare = commentAt === -1 ? trimmed : trimmed.slice(0, commentAt).trim();
+  return { value: bare === "" ? undefined : bare, problem: undefined };
+}
+
 /**
- * $DSH_HOME/.env 的 KEY=VALUE（去掉可选引号；文件不存在按「该层没有值」处理）。
+ * 扫描带引号的值：交出引号内文本、是否闭合、闭合后的游标。双引号内 `\"` 与 `\\`
+ * 是转义（交出的文本已还原），单引号内全部字面——与 dotenv 的两套引号语义一致。
+ * @param {string} trimmed
+ * @param {string} quote
+ * @returns {{ value: string, closed: boolean, end: number }}
+ */
+function scanQuoted(trimmed, quote) {
+  let value = "";
+  let index = 1;
+  while (index < trimmed.length) {
+    const ch = trimmed[index];
+    const escaped =
+      quote === '"' && ch === "\\" && (trimmed[index + 1] === '"' || trimmed[index + 1] === "\\");
+    if (escaped) {
+      value += trimmed[index + 1];
+      index += 2;
+    } else if (ch === quote) {
+      return { value, closed: true, end: index + 1 };
+    } else {
+      value += ch;
+      index += 1;
+    }
+  }
+  return { value, closed: false, end: index };
+}
+
+/**
+ * 带引号形态的取值：成对才剥；闭引号之后只允许空白或行内注释。单边引号、闭引号后跟
+ * 多余字符都记 problem——硬砍首尾等于把凭据改短一位，拿一个错 key 去打上游（401），
+ * 比报「未配置」难排查得多。剥引号后再 trim 并判空：`KEY=""` / `KEY="   "` 与另两层
+ * （托管文档、进程环境）的口径一致——纯空白不是可用凭据，按「该行没有值」处理。
+ * @param {string} trimmed
+ * @param {string} quote
+ * @returns {{ value: string | undefined, problem: string | undefined }}
+ */
+function quotedValueOf(trimmed, quote) {
+  const scanned = scanQuoted(trimmed, quote);
+  if (!scanned.closed) {
+    return { value: undefined, problem: "引号未配对" };
+  }
+  const rest = trimmed.slice(scanned.end).trim();
+  if (rest !== "" && !rest.startsWith("#")) {
+    return { value: undefined, problem: "闭引号之后还有多余字符" };
+  }
+  const unquoted = scanned.value.trim();
+  return { value: unquoted === "" ? undefined : unquoted, problem: undefined };
+}
+
+/**
+ * .env 一行里「=」右侧的取值：按首字符分派到未加引号 / 带引号两条解析路径（判据各自
+ * 见下）。只实现与官方 dotenv 相交且本脚本用得到的语义；拿不准的形态 fail-closed
+ * （按该行未配置处理并记 problem），绝不猜一个值出去。
+ * @param {string} raw
+ * @returns {{ value: string | undefined, problem: string | undefined }}
+ */
+function parseDotEnvValue(raw) {
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return { value: undefined, problem: undefined };
+  }
+  const quote = trimmed.charAt(0);
+  if (quote === '"' || quote === "'") {
+    return quotedValueOf(trimmed, quote);
+  }
+  return unquotedValueOf(trimmed);
+}
+
+/**
+ * $DSH_HOME/.env 的 KEY=VALUE（文件不存在按「该层没有值」处理）。
+ *
+ * 同名 key 取**最后一行**的值（dotenv 语义：后者覆盖前者）；空值行同样参与覆盖——
+ * 最后一行写 `KEY=` 就是把这层 unset。解析出 problem 的行不参与覆盖（该行整条作废，
+ * 不能拿一个坏行抹掉前面好好的值），但会记进 problems。
  * @param {string} envPath
  * @param {string} refName
  * @returns {string | undefined}
@@ -241,41 +313,65 @@ function fromUserDotEnv(envPath, refName) {
     }
   }
   const pattern = new RegExp(`^\\s*(?:export\\s+)?${refName}\\s*=\\s*(?<value>.*)$`, "u");
-  let hit = "";
+  let hit;
   // 按 /\r?\n/ 拆而不是 "\n"：上面那条正则的 `.*` 不匹配 \r、`$` 又要求串尾，
   // 而按 "\n" 拆出来的 CRLF 行每行都带尾随 \r，于是每一行都匹配不上——整个 .env
   // 层对所有 key 静默失配，用户只看到隔了一层的「取不到凭据」。
-  for (const line of (text ?? "").split(/\r?\n/u)) {
-    const value = unquotedValue(pattern.exec(line)?.groups?.value ?? "");
-    if (value.length > 0) {
-      hit = value;
-      break;
+  const lines = (text ?? "").split(/\r?\n/u);
+  for (const [offset, line] of lines.entries()) {
+    const match = pattern.exec(line);
+    if (match === null) {
+      continue;
+    }
+    const parsed = parseDotEnvValue(match.groups?.value ?? "");
+    if (parsed.problem === undefined) {
+      hit = parsed.value;
+    } else {
+      problems.push(
+        `${envPath} 第 ${offset + 1} 行（${refName}）${parsed.problem}，该行按未配置处理`,
+      );
     }
   }
-  return hit === "" ? undefined : hit;
+  return hit;
 }
 
-const refName = process.argv[2] ?? "";
-if (!REF_PATTERN.test(refName)) {
-  process.stderr.write(`[get-cred] 非法 env key 名：${JSON.stringify(refName)}\n`);
-  process.exit(1);
-}
+function main() {
+  const refName = process.argv[2] ?? "";
+  if (!REF_PATTERN.test(refName)) {
+    fail(`[get-cred] 非法 env key 名：${JSON.stringify(refName)}\n`);
+    return;
+  }
+  const home = dataDirFrom(process.argv[3]);
+  // 相对路径在这里是硬错误而不是照用：本脚本的 cwd 是 OCR 当时所在的那个仓库，
+  // 相对路径会被解析成 `<被审查仓库>/.dsh/…`——正是文件头声明要避免的「拿被审查
+  // 仓库里的文件当用户凭据」。猜不出用户指的是哪个目录，就不猜。
+  if (!path.isAbsolute(home)) {
+    fail(`[get-cred] dsh 数据目录必须是绝对路径，收到 ${JSON.stringify(home)}\n`);
+    return;
+  }
+  const found =
+    fromCredentialsDoc(path.join(home, CREDENTIALS_FILENAME), refName) ??
+    fromInheritedEnv(process.env[refName]) ??
+    fromUserDotEnv(path.join(home, ".env"), refName);
 
-const home = dataDirFrom(process.argv[3]);
-const found =
-  fromCredentialsDoc(path.join(home, CREDENTIALS_FILENAME), refName) ??
-  fromInheritedEnv(process.env[refName]) ??
-  fromUserDotEnv(path.join(home, ".env"), refName);
-
-if (found === undefined) {
-  // 硬失败：OCR 契约里非零退出/空输出都不回退，所以原因必须写全（含查过的目录与
-  // 各层的坏消息），否则用户只能看到「llm 请求 401」这种隔了一层的症状。
-  const notes = problems.length === 0 ? "" : `；${problems.join("；")}`;
-  process.stderr.write(
-    `[get-cred] 取不到 ${refName}：查过 ${path.join(home, CREDENTIALS_FILENAME)}、进程环境与 ${path.join(home, ".env")}${notes}\n`,
-  );
-  process.exit(1);
-} else {
-  // 成功路径与失败路径同为「一条语句」形态：exit(1) 之后的分支互斥，不落到 stdout。
+  if (found === undefined) {
+    // 硬失败：OCR 契约里非零退出/空输出都不回退，所以原因必须写全（含查过的目录与
+    // 各层的坏消息），否则用户只能看到「llm 请求 401」这种隔了一层的症状。
+    const notes = problems.length === 0 ? "" : `；${problems.join("；")}`;
+    fail(
+      `[get-cred] 取不到 ${refName}：查过 ${path.join(home, CREDENTIALS_FILENAME)}、进程环境与 ${path.join(home, ".env")}${notes}\n`,
+    );
+    return;
+  }
+  // 成功回退也要说话：托管文件损坏/无权限/ref 形状错被回退层盖过去时，用户必须知道
+  // 生效的 key 不是最高优先级那层给的。problems 在收集时已按脱敏口径拼装（YAML 报错走
+  // yamlErrorDetail，绝不带邻域原文），这里原样转述即可。
+  if (problems.length > 0) {
+    process.stderr.write(
+      `[get-cred] 注意：高优先级凭据层有坏消息（${problems.join("；")}），${refName} 实际取自更低的一层\n`,
+    );
+  }
   process.stdout.write(`${found}\n`);
 }
+
+main();

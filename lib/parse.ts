@@ -40,9 +40,13 @@ import type { CommentAggregation } from "./severity.ts";
  * 装配与 `internal/session/manifest.go` 的 TerminalState）。
  * 白名单外的一律视为失败：exit 0 不等于评审成功——`{"error":"auth failed"}`
  * 这类「没有 status 的错误对象」若被当作 ok:true，模型会把「0 条评论」读成
- * 「代码干净」，是最坏的一类假阳性。`failed` 也刻意留在白名单外：CLI 的退出契约是
- * 「全场失败才非零」（`review_cmd.go` 的 reviewResultError），那份文档随非零退出
- * 一起被 shell 侧的失败详情拦下，本解析拿不到它。
+ * 「代码干净」，是最坏的一类假阳性。
+ *
+ * `failed` 在名单里，但**单独判成 ok:false**（见 `parseReviewOutput`）。两件事要分开：
+ * ① 名字得认——非零退出时 CLI 照发的那份 manifest 就带 `status:"failed"`，
+ * `withCoverageDetail` 要靠它读出「哪些文件没审成」；不认这个值就等于把失败明细整条丢掉。
+ * ② 认了不等于成功——万一它带着 exit 0 回来，把它当 ok:true 就会把一份全场失败的回执
+ * 摘要成「0 条评论」，那正是本段开头要避免的假阳性。
  *
  * partial 是 manifest 终态之一：部分文件失败但整体有覆盖、以及 token 预算截断后仍有
  * 覆盖，都以 exit 0 + status "partial" 输出。此前白名单漏了它，整场已花费 token 的
@@ -83,7 +87,31 @@ export interface ReviewSummary {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   elapsed: string;
+}
+
+/** OCR 的 `llm` 身份：`provider` 只在命名源时出现，`model` 是规范化后的模型名。 */
+export interface LlmIdentity {
+  provider: string | null;
+  model: string;
+}
+
+/** `resume` 回执：本次续审复用了哪些文件、跨了哪些模型。 */
+export interface ResumeView {
+  resumedFrom: string;
+  reusedFiles: number;
+  rerunFiles: number;
+  previousModel: string;
+  currentModel: string;
+}
+
+/** OCR 的 `retry_report`：只保留三个能说明「这一场被限流/重试拖过」的计数。 */
+export interface RetryView {
+  totalRetries: number;
+  recoveredRequests: number;
+  failedRequests: number;
 }
 
 /**
@@ -126,6 +154,15 @@ export interface ParsedReview {
   summary: ReviewSummary | null;
   /** `summary.budget_exceeded`：被 token 预算截断过（status 仍是 partial，看不出这一层）。 */
   budgetExceeded: boolean;
+  /** 1.13.3 的 `review_limit_reached` / scan 的 `token_budget_reached`：限流截断过。 */
+  limitReached: boolean;
+  llm: LlmIdentity | null;
+  projectSummary: string | null;
+  projectSummaryTruncated: boolean;
+  resume: ResumeView | null;
+  groupCount: number;
+  retry: RetryView | null;
+  traceId: string | null;
   comments: OcrComment[];
   warnings: string[];
   toolCalls: ToolCallView | null;
@@ -156,14 +193,15 @@ function str(value: unknown): string {
  * 故作兜底值。
  */
 function nonNegativeInt(value: number): number {
-  const truncated = Math.trunc(value);
-  // 用 Number.isSafeInteger 而不是 Number.isFinite：1e300 有限但远超安全整数域，
-  // 原样传播会把行号与 insertions/deletions 变成天文数字。与 host.ts:readMaxComments
+  // 直接判原值，**不能先 Math.trunc**：3.7 → 3、0.5 → 0 之后 isSafeInteger 一律成立，
+  // 小数就被静默改写了——行号偏移一位、insertions 少算一截，而上方注释承诺的是
+  // 「负数和小数一起挡掉」。用 Number.isSafeInteger 而不是 Number.isFinite：1e300
+  // 有限但远超安全整数域，原样传播会把行号与统计变成天文数字。与 host.ts:readMaxComments
   // 的口径保持一致。
-  if (!Number.isSafeInteger(truncated) || truncated < 0) {
+  if (!Number.isSafeInteger(value) || value < 0) {
     return 0;
   }
-  return truncated;
+  return value;
 }
 
 /** 数值字段解析：number 与「数字字符串」都接受（OCR 部分 provider 实测把 start_line
@@ -194,6 +232,63 @@ const DIAGNOSTIC_DETAIL_LIMIT = 8;
 /** 布尔字段：只认真布尔，缺省与非真值一律 false（OCR 用 omitempty 表示「没有发生」）。 */
 function boolOf(value: unknown): boolean {
   return value === true;
+}
+
+/** 走 plan 预算/工具轮次上限的两枚警告：它们是「限流截断」的唯一结构化信号。 */
+const LIMIT_WARNING_TYPES: ReadonlySet<string> = new Set([
+  "review_limit_reached",
+  "token_budget_reached",
+]);
+
+/** 把 project_summary 截到摘要预算内；截断事实单独带出，别让模型把半截当全文。 */
+const PROJECT_SUMMARY_LIMIT = 4000;
+
+/** `llm` 身份：两个字段都读不出时回 null，而不是造一个空模型。 */
+function llmOf(raw: unknown): LlmIdentity | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const provider = str(raw["provider"]).trim();
+  const model = str(raw["model"]).trim();
+  if (provider === "" && model === "") {
+    return null;
+  }
+  return { provider: provider === "" ? null : provider, model };
+}
+
+/** `resume` 回执：字段全空时回 null（CLI 只在真的续审时发这个对象）。 */
+function retryOf(raw: unknown): RetryView | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const view: RetryView = {
+    totalRetries: num(raw["total_retries"]),
+    recoveredRequests: num(raw["recovered_requests"]),
+    failedRequests: num(raw["failed_requests"]),
+  };
+  return view.totalRetries === 0 && view.recoveredRequests === 0 && view.failedRequests === 0
+    ? null
+    : view;
+}
+
+function resumeOf(raw: unknown): ResumeView | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const view: ResumeView = {
+    resumedFrom: str(raw["resumed_from"]),
+    reusedFiles: num(raw["reused_files"]),
+    rerunFiles: num(raw["rerun_files"]),
+    previousModel: str(raw["previous_model"]),
+    currentModel: str(raw["current_model"]),
+  };
+  const empty =
+    view.resumedFrom === "" &&
+    view.reusedFiles === 0 &&
+    view.rerunFiles === 0 &&
+    view.previousModel === "" &&
+    view.currentModel === "";
+  return empty ? null : view;
 }
 
 /**
@@ -375,6 +470,14 @@ function reviewFailure(status: "unparseable" | "invalid", message: string): Pars
     skipped: false,
     summary: null,
     budgetExceeded: false,
+    limitReached: false,
+    llm: null,
+    projectSummary: null,
+    projectSummaryTruncated: false,
+    resume: null,
+    groupCount: 0,
+    retry: null,
+    traceId: null,
     comments: [],
     warnings: [],
     toolCalls: null,
@@ -399,13 +502,20 @@ function reviewFailure(status: "unparseable" | "invalid", message: string): Pars
 function diagnosticsOf(
   root: Record<string, unknown>,
   messages: OcrReviewMessages,
-): { warnings: string[]; toolCalls: ToolCallView | null; coverage: CoverageView | null } {
+): {
+  warnings: string[];
+  toolCalls: ToolCallView | null;
+  coverage: CoverageView | null;
+  limitReached: boolean;
+} {
   const warnings: string[] = [];
+  let limitReached = false;
   const warningsRaw = root["warnings"];
   if (warningsRaw !== undefined) {
     if (Array.isArray(warningsRaw)) {
       for (const warn of warningsRaw) {
         warnings.push(warningLineOf(warn, messages));
+        limitReached ||= isRecord(warn) && LIMIT_WARNING_TYPES.has(str(warn["type"]));
       }
     } else {
       warnings.push(messages.warningUnreadable);
@@ -419,7 +529,7 @@ function diagnosticsOf(
   if (coverage.unreadable) {
     warnings.push(format(messages.diagnosticUnreadable, { field: "manifest.coverage" }));
   }
-  return { warnings, toolCalls: toolCalls.view, coverage: coverage.view };
+  return { warnings, toolCalls: toolCalls.view, coverage: coverage.view, limitReached };
 }
 
 /**
@@ -465,13 +575,18 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
     }
   }
   const skipped = status === "skipped";
+  // 见 REVIEW_STATUSES 上方：`failed` 要被认出来（失败明细靠它），但不能算成功。
+  const ok = status !== "failed";
+  const message = str(root["message"]) || (ok ? "" : messages.ocrStatusFailed);
   const sumRaw = root["summary"];
   const sum = isRecord(sumRaw) ? sumRaw : undefined;
   const diagnostics = diagnosticsOf(root, messages);
+  const rawProjectSummary = str(root["project_summary"]);
+  const projectSummaryTruncated = rawProjectSummary.length > PROJECT_SUMMARY_LIMIT;
   return {
-    ok: true,
+    ok,
     status,
-    message: str(root["message"]),
+    message,
     skipped,
     summary: sum
       ? {
@@ -480,10 +595,21 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
           totalTokens: num(sum["total_tokens"]),
           inputTokens: num(sum["input_tokens"]),
           outputTokens: num(sum["output_tokens"]),
+          cacheReadTokens: num(sum["cache_read_tokens"]),
+          cacheWriteTokens: num(sum["cache_write_tokens"]),
           elapsed: str(sum["elapsed"]),
         }
       : null,
     budgetExceeded: sum === undefined ? false : boolOf(sum["budget_exceeded"]),
+    limitReached: diagnostics.limitReached,
+    llm: llmOf(root["llm"]),
+    projectSummary:
+      rawProjectSummary === "" ? null : rawProjectSummary.slice(0, PROJECT_SUMMARY_LIMIT),
+    projectSummaryTruncated,
+    resume: resumeOf(root["resume"]),
+    groupCount: Array.isArray(root["groups"]) ? root["groups"].length : 0,
+    retry: retryOf(root["retry_report"]),
+    traceId: str(root["trace_id"]) || null,
     comments,
     warnings: diagnostics.warnings,
     toolCalls: diagnostics.toolCalls,
@@ -540,6 +666,15 @@ export interface ReviewSummaryView {
   summary: ReviewSummary | null;
   /** 被 token 预算截断过：status 只说 partial，说不出「为什么没审完」。 */
   budgetExceeded: boolean;
+  /** 1.13.3 的 review_limit_reached / scan 的 token_budget_reached。 */
+  limitReached: boolean;
+  llm: LlmIdentity | null;
+  projectSummary: string | null;
+  projectSummaryTruncated: boolean;
+  resume: ResumeView | null;
+  groupCount: number;
+  retry: RetryView | null;
+  traceId: string | null;
   sessionId: string | null;
   aggregation: CommentAggregation;
   /** OCR 产出并经形态校验的评论总数。 */
@@ -573,7 +708,7 @@ export function summarizeReview(
   plan: SummaryPlan = DEFAULT_PLAN,
 ): ReviewSummaryView {
   const agg = aggregateComments(parsed.comments);
-  // 排序：先 critical→high→medium→low（未知按 medium，见 normalizeSeverity），
+  // 排序：先 critical→high→medium→low（未知按 medium，见 classifySeverity），
   // 再按行号。未锚定（0 行）默认靠后。
   // maxComments <= 0 = 不截断：全量评论（含未锚定条目），忠实桥接 OCR 全部产出。
   // 这里是数值比较（`SummaryPlan.maxComments: number`，生产侧经 readMaxComments 的
@@ -592,6 +727,14 @@ export function summarizeReview(
     message: parsed.message || null,
     summary: parsed.summary ?? null,
     budgetExceeded: parsed.budgetExceeded,
+    limitReached: parsed.limitReached,
+    llm: parsed.llm,
+    projectSummary: parsed.projectSummary,
+    projectSummaryTruncated: parsed.projectSummaryTruncated,
+    resume: parsed.resume,
+    groupCount: parsed.groupCount,
+    retry: parsed.retry,
+    traceId: parsed.traceId,
     sessionId: parsed.sessionId || null,
     aggregation: agg,
     totalCommentCount: parsed.comments.length,
@@ -819,4 +962,204 @@ export function parseDelegateRules(text: string): { ok: boolean; groups: RuleGro
     return { ok: false, groups: [] };
   }
   return { ok: true, groups };
+}
+
+// ── 文件选择预览（review/scan --preview）────────────────────────────────────
+
+/** 预览列表的条数上限：整仓扫描可能列出几千个文件，摘要只留足以判断范围的一截。 */
+const PREVIEW_FILE_LIMIT = 200;
+
+export interface PreviewFile {
+  path: string;
+  status: string;
+  insertions: number;
+  deletions: number;
+  willReview: boolean;
+  excludeReason: string;
+}
+
+export interface PreviewView {
+  totalFiles: number;
+  reviewableCount: number;
+  excludedCount: number;
+  totalInsertions: number;
+  totalDeletions: number;
+  reviewableFiles: PreviewFile[];
+  excludedFiles: PreviewFile[];
+  truncated: boolean;
+}
+
+function previewFileOf(raw: unknown): PreviewFile | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const filePath = str(raw["path"]);
+  if (filePath === "") {
+    return null;
+  }
+  return {
+    path: filePath,
+    status: str(raw["status"]),
+    insertions: num(raw["insertions"]),
+    deletions: num(raw["deletions"]),
+    willReview: raw["will_review"] === true,
+    excludeReason: str(raw["exclude_reason"]),
+  };
+}
+
+/**
+ * 解析 `ocr review --preview --format json` / `ocr scan --preview --format json`。
+ *
+ * 预览是 `model.Preview` 的裸对象（键 `files`），与 review/scan 的摘要**不是**同一
+ * 形状；把它喂给 parseReviewOutput 只会得到一条解析失败。契约键一个都不命中、或
+ * 条目全是坏形状时判失败，不能报成「0 个文件可审」。
+ */
+export function parsePreviewOutput(text: string): { ok: boolean; view: PreviewView | null } {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return { ok: false, view: null };
+  }
+  if (!isRecord(doc) || !Array.isArray(doc["files"])) {
+    return { ok: false, view: null };
+  }
+  const parsed = doc["files"]
+    .map((entry) => previewFileOf(entry))
+    .filter((entry): entry is PreviewFile => entry !== null);
+  if (doc["files"].length > 0 && parsed.length === 0) {
+    return { ok: false, view: null };
+  }
+  const reviewable = parsed.filter((entry) => entry.willReview);
+  const excluded = parsed.filter((entry) => !entry.willReview);
+  const countOf = (key: string, fallback: number): number => {
+    const raw = doc[key];
+    return isCount(raw) ? num(raw) : fallback;
+  };
+  return {
+    ok: true,
+    view: {
+      totalFiles: countOf("total_files", parsed.length),
+      reviewableCount: countOf("reviewable_count", reviewable.length),
+      excludedCount: countOf("excluded_count", excluded.length),
+      totalInsertions: num(doc["total_insertions"]),
+      totalDeletions: num(doc["total_deletions"]),
+      reviewableFiles: reviewable.slice(0, PREVIEW_FILE_LIMIT),
+      excludedFiles: excluded.slice(0, PREVIEW_FILE_LIMIT),
+      truncated: reviewable.length > PREVIEW_FILE_LIMIT || excluded.length > PREVIEW_FILE_LIMIT,
+    },
+  };
+}
+
+// ── 会话比较（ocr session compare --json）────────────────────────────────────
+
+/** 每个桶的展示上限：四桶全铺开会把 compare 变成第二份全量评论。 */
+const COMPARE_BUCKET_LIMIT = 20;
+
+export interface CompareSide {
+  sessionId: string;
+  reviewMode: string;
+  range: string;
+}
+
+export interface CompareComment {
+  location: string;
+  severity: string;
+  category: string;
+  content: string;
+}
+
+export interface CompareView {
+  before: CompareSide;
+  after: CompareSide;
+  new: CompareComment[];
+  persisting: CompareComment[];
+  resolved: CompareComment[];
+  notReviewed: CompareComment[];
+  counts: {
+    new: number;
+    persisting: number;
+    resolved: number;
+    notReviewed: number;
+  };
+  droppedCount: number;
+}
+
+function compareSideOf(raw: unknown): CompareSide {
+  return {
+    sessionId: isRecord(raw) ? str(raw["session_id"]) : "",
+    reviewMode: isRecord(raw) ? str(raw["review_mode"]) : "",
+    range: isRecord(raw) ? str(raw["range"]) : "",
+  };
+}
+
+function compareCommentOf(raw: unknown): CompareComment | null {
+  const comment = commentOf(raw);
+  if (comment === null) {
+    return null;
+  }
+  return {
+    location: locationOf(comment),
+    severity: comment.severity,
+    category: comment.category,
+    content: comment.content,
+  };
+}
+
+/** 一个 compare 桶：缺失/非数组判整个 compare 失败，部分条目坏只丢该条并计入 dropped。 */
+function compareBucketOf(raw: unknown): { items: CompareComment[]; total: number } | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const items = raw
+    .map((entry) => compareCommentOf(entry))
+    .filter((entry): entry is CompareComment => entry !== null);
+  return { items: items.slice(0, COMPARE_BUCKET_LIMIT), total: raw.length };
+}
+
+/** 解析 `ocr session compare --json`：四个桶与两侧会话标识。 */
+export function parseSessionCompare(text: string): { ok: boolean; view: CompareView | null } {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return { ok: false, view: null };
+  }
+  if (!isRecord(doc)) {
+    return { ok: false, view: null };
+  }
+  const newBucket = compareBucketOf(doc["new"]);
+  const persisting = compareBucketOf(doc["persisting"]);
+  const resolved = compareBucketOf(doc["resolved"]);
+  const notReviewed = compareBucketOf(doc["not_reviewed"]);
+  if (newBucket === null || persisting === null || resolved === null || notReviewed === null) {
+    return { ok: false, view: null };
+  }
+  const droppedCount =
+    newBucket.total +
+    persisting.total +
+    resolved.total +
+    notReviewed.total -
+    (newBucket.items.length +
+      persisting.items.length +
+      resolved.items.length +
+      notReviewed.items.length);
+  return {
+    ok: true,
+    view: {
+      before: compareSideOf(doc["before"]),
+      after: compareSideOf(doc["after"]),
+      new: newBucket.items,
+      persisting: persisting.items,
+      resolved: resolved.items,
+      notReviewed: notReviewed.items,
+      counts: {
+        new: newBucket.total,
+        persisting: persisting.total,
+        resolved: resolved.total,
+        notReviewed: notReviewed.total,
+      },
+      droppedCount,
+    },
+  };
 }

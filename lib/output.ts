@@ -45,9 +45,34 @@ const SUPPORTED_KEYWORDS: ReadonlySet<string> = new Set([
   "examples",
 ]);
 
-/** schema 里的关键字必须全部落在守卫支持的子集内（递归查 oneOf/properties/items）。
- *  违例抛错而不是当违规值报：schema 是插件自己的代码，错的是代码不是模型的数据。 */
-function assertGuardable(
+/** 官方子集只认这几个标量类型名（`SCHEMA_TYPES`）；`type` 写数组官方直接拒。 */
+const SCHEMA_TYPES: ReadonlySet<string> = new Set([
+  "object",
+  "array",
+  "string",
+  "number",
+  "integer",
+  "boolean",
+  "null",
+]);
+
+/**
+ * schema 里的关键字必须全部落在守卫支持的子集内（递归查 oneOf/properties/items），
+ * 关键字的**取值形态**也必须合法。
+ *
+ * 违例抛错而不是当违规值报：schema 是插件自己的代码，错的是代码不是模型的数据。
+ *
+ * 为什么取值形态也要查：只查键名的话，`type: ["string","null"]` 这种官方子集不认的
+ * 写法会让 `scalarMismatch` 走进最后那支 `value !== null`——于是 `null` 放行、字符串
+ * 反而判违规，守卫给出的结论与它自己声称支持的子集无关。`enum` 写成字符串同理：
+ * 走到 `enum.includes` 时成了子串匹配，非字符串值还会抛 `map is not a function`。
+ */
+function malformed(toolName: string, detail: string, messages: OcrReviewMessages): Error {
+  return new Error(format(messages.resultSchemaMalformed, { tool: toolName, detail }));
+}
+
+/** 关键字白名单：守卫只认官方子集，多一个都算插件自己的 schema 写错了。 */
+function assertKnownKeywords(
   schema: JsonSchemaNode,
   toolName: string,
   messages: OcrReviewMessages,
@@ -57,7 +82,70 @@ function assertGuardable(
       throw new Error(format(messages.resultSchemaUnsupported, { tool: toolName, keyword }));
     }
   }
-  for (const branch of schema.oneOf ?? []) {
+}
+
+/** `type` 的取值形态：官方明确不接受类型数组，只收单个类型名。 */
+function assertTypeShape(type: unknown, toolName: string, messages: OcrReviewMessages): void {
+  if (type === undefined) {
+    return;
+  }
+  if (typeof type === "string" && SCHEMA_TYPES.has(type)) {
+    return;
+  }
+  throw malformed(
+    toolName,
+    `type 必须是单个类型名（${[...SCHEMA_TYPES].join("/")}），收到 ${JSON.stringify(type)}`,
+    messages,
+  );
+}
+
+/** `oneOf` 的取值形态：至少两项的分支数组（单项等价于直接写那个分支，多半是漏写了别的分支）。 */
+function assertOneOfShape(oneOf: unknown, toolName: string, messages: OcrReviewMessages): void {
+  if (oneOf === undefined) {
+    return;
+  }
+  if (Array.isArray(oneOf) && oneOf.length >= 2) {
+    return;
+  }
+  throw malformed(toolName, "oneOf 必须是至少两项的数组", messages);
+}
+
+/** `enum` 的取值形态：非空数组。写成字符串时 `enum.includes` 会退化成子串匹配。 */
+function assertEnumShape(enumValues: unknown, toolName: string, messages: OcrReviewMessages): void {
+  if (enumValues === undefined) {
+    return;
+  }
+  if (Array.isArray(enumValues) && enumValues.length > 0) {
+    return;
+  }
+  throw malformed(toolName, "enum 必须是非空数组", messages);
+}
+
+/**
+ * schema 里的关键字必须全部落在守卫支持的子集内（递归查 oneOf/properties/items），
+ * 关键字的**取值形态**也必须合法。
+ *
+ * 违例抛错而不是当违规值报：schema 是插件自己的代码，错的是代码不是模型的数据。
+ *
+ * 为什么取值形态也要查：只查键名的话，`type: ["string","null"]` 这种官方子集不认的
+ * 写法会让 `scalarMismatch` 走进最后那支 `value !== null`——于是 `null` 放行、字符串
+ * 反而判违规，守卫给出的结论与它自己声称支持的子集无关。`enum` 写成字符串同理：
+ * 走到 `enum.includes` 时成了子串匹配，非字符串值还会抛 `map is not a function`。
+ */
+function assertGuardable(
+  schema: JsonSchemaNode,
+  toolName: string,
+  messages: OcrReviewMessages,
+): void {
+  assertKnownKeywords(schema, toolName, messages);
+  const { type, oneOf, enum: enumValues } = schema;
+  if (type !== undefined && oneOf !== undefined) {
+    throw malformed(toolName, "type 与 oneOf 不能同时声明", messages);
+  }
+  assertTypeShape(type, toolName, messages);
+  assertOneOfShape(oneOf, toolName, messages);
+  assertEnumShape(enumValues, toolName, messages);
+  for (const branch of Array.isArray(oneOf) ? oneOf : []) {
     assertGuardable(branch, toolName, messages);
   }
   for (const property of Object.values(schema.properties ?? {})) {
@@ -177,9 +265,21 @@ const AUTH_HEADER_VALUE =
 const BEARER_VALUE = /(?<scheme>\bbearer[ \t]+)[a-z0-9._~+/=-]{4,}/giu;
 /** `api_key: "xxx"`、`apiKey=xxx`、`token: xxx`、`x-api-key: xxx` 等赋值形态。
  *  值下限取 4 且容许一个 scheme 词：`token: Basic <base64>` 里赋值形态先能吃到的只是
- *  scheme 词（Basic 恰好 5 字符），下限更高时整条失配，后面那个 base64 就原样进了日志。 */
+ *  scheme 词（Basic 恰好 5 字符），下限更高时整条失配，后面那个 base64 就原样进了日志。
+ *
+ *  左边界用 `(?<![A-Za-z0-9])` 而**不是** `\b`：`_` 也属 `\w`，`DEEPSEEK_API_KEY=` 里
+ *  `KEY` 之前的那个位置对 `\b` 不成立，于是最常见的环境变量写法整条失配——而「把
+ *  `XXX_API_KEY=…` 抹掉」正是这道闸最该管的一类。
+ *
+ *  字符类写 `[A-Z0-9]` 而不是 `[A-Za-z0-9]`：这条正则带 `i` 标志，两者等价，
+ *  而重复的字符区间会让静态检查报 duplicates-in-character-class。 */
 const KEY_ASSIGNMENT =
-  /(?<name>\b(?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token)["'\s]*[:=]["'\s]*)(?:(?<scheme>[a-z][a-z0-9_-]*[ \t]+))?[^\s"',;)}\]]{4,}/giu;
+  /(?<name>(?<![A-Z0-9])(?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token)["'\s]*[:=]["'\s]*)(?:(?<scheme>[a-z][a-z0-9_-]*[ \t]+))?[^\s"',;)}\]]{4,}/giu;
+/** GitHub 系 token 的**下划线**形态（`ghp_…`、`github_pat_…`）：STANDALONE_KEY 要求
+ *  「字母前缀 + 连字符」分界，这类值里没有连字符，前缀后又紧跟下划线，故单列一条。
+ *  不并进 STANDALONE_KEY 是为了不放开那里的连字符要求——那条要求同时承担「别把
+ *  kebab 小写路径当 key 抹掉」的职责。 */
+const UNDERSCORE_TOKEN = /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}\b/gu;
 const REDACTION = "***REDACTED***";
 
 /** 独立 key 形态的替换臂：随机串段里真有数字或大写才抹，否则原样交回（文件路径要保持可读）。 */
@@ -205,6 +305,7 @@ export function redactKeyMaterial(text: string): string {
     .replaceAll(AUTH_HEADER_VALUE, `$<name>$<scheme>${REDACTION}`)
     .replaceAll(BEARER_VALUE, `$<scheme>${REDACTION}`)
     .replaceAll(KEY_ASSIGNMENT, `$<name>$<scheme>${REDACTION}`)
+    .replaceAll(UNDERSCORE_TOKEN, REDACTION)
     .replaceAll(STANDALONE_KEY, redactStandaloneKey);
 }
 
@@ -242,10 +343,17 @@ function violationsOf(schema: JsonSchemaNode, value: unknown, path: string): str
     }
   }
   const { type } = schema;
+  // 逐条 push 而不是 `push(...子结果)`：全量评论一起不合形态时子结果可以是几十万条，
+  // 展开成实参要一次性占满调用栈（`RangeError: Maximum call stack size exceeded`），
+  // 而这个函数正是用来在那种时刻给出可读结论的。
   if (type === "object") {
-    violations.push(...objectViolations(schema, value, path, violationsOf));
+    for (const violation of objectViolations(schema, value, path, violationsOf)) {
+      violations.push(violation);
+    }
   } else if (type === "array") {
-    violations.push(...arrayViolations(schema, value, path, violationsOf));
+    for (const violation of arrayViolations(schema, value, path, violationsOf)) {
+      violations.push(violation);
+    }
   } else if (type !== undefined && scalarMismatch(type, value)) {
     // type 缺省是官方子集的「无约束」节点：任何 JSON 值都合形态。
     violations.push(`${path}: expected ${type}`);

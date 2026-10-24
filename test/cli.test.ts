@@ -5,7 +5,7 @@
 // 一致），末尾一组用例注入 en 那份，证明同一批校验闸换语言只是换文案、不改判定。
 // 取值闸（转义/绝对路径/逗号列表/钳制）按这层边界直接取用 lib/argv-guard.ts，
 // 命令构造走 lib/cli.ts——与生产侧的引用关系一致。
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,6 +16,7 @@ import {
   clampEffort,
   commaList,
   resolveOutputFormat,
+  resolveRepoFile,
 } from "../lib/argv-guard.ts";
 import {
   resolveRoot,
@@ -27,6 +28,8 @@ import {
   buildDelegatePreviewCommand,
   buildDelegateRuleCommand,
   buildSessionCommand,
+  buildRulesCheckCommand,
+  buildLlmCommand,
   buildLlmTestCommand,
   buildVersionCommand,
   parseOcrVersion,
@@ -49,6 +52,7 @@ import type { OcrReviewMessages } from "../lib/messages.ts";
 const { zh } = MESSAGES;
 
 const REPO_ABS = "/Users/me/repo";
+const runsOnWindows = process.platform === "win32";
 /** brew 那条装法命令的原文（多处断言共用）。 */
 const BREW_INSTALL = "brew install open-code-review";
 
@@ -105,11 +109,15 @@ const scanCmd = (
 const previewCmd = (args: DelegatePreviewArgs, messages: OcrReviewMessages = zh): BuiltCommand =>
   buildDelegatePreviewCommand(args, messages);
 const ruleCmd = (
-  args: { repo: unknown; paths?: unknown },
+  args: { repo: unknown; paths?: unknown; rule?: unknown },
   messages: OcrReviewMessages = zh,
 ): BuiltCommand => buildDelegateRuleCommand(args, messages);
 const sessionCmd = (args: SessionArgs, messages: OcrReviewMessages = zh): BuiltCommand =>
   buildSessionCommand(args, messages);
+const rulesCheckCmd = (
+  args: { repo: unknown; path?: unknown; rule?: unknown },
+  messages: OcrReviewMessages = zh,
+): BuiltCommand => buildRulesCheckCommand(args, messages);
 
 /** shq 的逆：剥外层单引号并还原 '\''。 */
 function shqUnwrap(quoted: string): string {
@@ -131,10 +139,25 @@ function unwrapReaper(wrapped: string): string {
 
 const tempDirs: string[] = [];
 
+/** 仓内忽略目录 `/ .tmp/` 下造临时目录：PATH 语义的用例在 Windows 上不能传绝对路径
+ *  （盘符里的 `:` 会被 POSIX 分支当成路径分隔符），相对 cwd 的形态可以两平台通用。 */
+function makeTempDir(prefix: string): string {
+  const root = path.join(process.cwd(), ".tmp");
+  mkdirSync(root, { recursive: true });
+  const dir = mkdtempSync(path.join(root, prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+/** 给 PATH 用的相对形态；空串按 `.`（不会出现在 mkdtemp 的结果里，仍显式收口）。 */
+function pathEntry(dir: string): string {
+  const rel = path.relative(process.cwd(), dir);
+  return rel === "" ? "." : rel;
+}
+
 /** 造一只临时目录，在里面放几个普通文件（名字逐个给）。 */
 function makeBinDir(names: string[]): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
-  tempDirs.push(dir);
+  const dir = makeTempDir("ocr-avail-");
   for (const name of names) {
     writeFileSync(path.join(dir, name), "#!/bin/sh\n");
   }
@@ -144,8 +167,7 @@ function makeBinDir(names: string[]): string {
 /** 按 `/` 分隔的相对段落建一棵目录树，末端是普通文件；返回该文件的绝对路径。
  *  装法判据读的是路径里的 `node_modules` / `Cellar` 这些段落，只能靠真目录树构造。 */
 function makeNestedFile(segments: string[]): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ocr-chan-"));
-  tempDirs.push(dir);
+  const dir = makeTempDir("ocr-chan-");
   const target = path.join(dir, ...segments);
   mkdirSync(path.dirname(target), { recursive: true });
   writeFileSync(target, "#!/bin/sh\n");
@@ -153,30 +175,37 @@ function makeNestedFile(segments: string[]): string {
 }
 
 function makeEmptyDir(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ocr-avail-"));
-  tempDirs.push(dir);
-  return dir;
+  return makeTempDir("ocr-avail-");
 }
 
 /** 命令串里的 `--format json`：多处以断言与拼接两种方式出现，抽一份免得字面量散落。 */
 const FORMAT_JSON_FLAG = "--format json";
-
 describe("commaList 的边界闸", () => {
   it("数组项自身含逗号 ⇒ 拒绝（join 后与「两项数组」无法区分）", () => {
     // ["a,b"] 与 ["a","b"] join 后都是 "a,b"，而 glob 花括号（{ts,tsx}）恰好含逗号：
     // 静默拆开就把一个模式变成两个，审查/过滤范围被无声改变。
     expect(() => listOf(["src/**/*.{ts,tsx}"], "exclude", 50)).toThrow(/含逗号/u);
     expect(listOf(["a", "b"], "exclude", 50)).toStrictEqual(["a", "b"]);
-    // 字符串形态仍按逗号拆——那是唯一能表达多个模式的形式。
+    // 字符串形态仍按逗号拆——花括号外的逗号拆分语义不变。
     expect(listOf("a,b", "exclude", 50)).toStrictEqual(["a", "b"]);
+  });
+
+  it("字符串形式里花括号内含逗号 ⇒ 同样拒绝（split 会撕出无效模式）", () => {
+    // "src/**/*.{ts,tsx}" 按 split(",") 拆成 "src/**/*.{ts" 与 "tsx}" 两个无效模式，
+    // 过滤条件失效而表面照常成功——与数组分支的拒绝口径一致。
+    expect(() => listOf("src/**/*.{ts,tsx}", "exclude", 50)).toThrow(/花括号内含逗号/u);
+    expect(() => listOf("a{b,c},d", "exclude", 50)).toThrow(/花括号内含逗号/u);
+    // 花括号外逗号照常拆；成对花括号内没有逗号不受影响。
+    expect(listOf("a{b}c,d", "exclude", 50)).toStrictEqual(["a{b}c", "d"]);
+    expect(listOf("**/*.{ts}", "exclude", 50)).toStrictEqual(["**/*.{ts}"]);
   });
 
   it("limit 非法（NaN / ≤0）回落到保守默认，而不是静默放开上限", () => {
     const many = [...Array.from({ length: 260 }).keys()].map((index) => `f${index}.ts`);
     // out.length >= NaN 恒为 false ⇒ 修复前上限完全失效。回落默认后 260 条超限 ⇒ 抛错，
-    // 而不是悄悄只留 200 条（默认 200 仍在，只是超限从静默变成明说）。
-    expect(() => listOf(many, "paths", Number.NaN)).toThrow(/超过 200 条上限，已丢弃 60 条/u);
-    expect(() => listOf(many, "paths", 0)).toThrow(/超过 200 条上限/u);
+    // 而不是悄悄只留 200 条（默认 200 仍在，只是超限从静默丢变成明说拒绝）。
+    expect(() => listOf(many, "paths", Number.NaN)).toThrow(/超过 200 条上限（多出 60 条）/u);
+    expect(() => listOf(many, "paths", 0)).toThrow(/命令未构造/u);
     expect(() => listOf(many, "paths", -1)).toThrow(/超过 200 条上限/u);
     // 恰好不超限时照常放行（上限仍是上限，只是不静默丢）。
     expect(listOf(many.slice(0, 200), "paths", 200)).toHaveLength(200);
@@ -225,10 +254,48 @@ describe("assertAbsoluteRoot / resolveRoot", () => {
     expect(rootOf(`  ${REPO_ABS}  `)).toBe(REPO_ABS);
   });
 
+  it("win32 分支接受盘符与 UNC 绝对路径，并归一尾随分隔符（平台桩覆盖）", () => {
+    const real = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      const winSep = path.win32.sep;
+      expect(rootOf(String.raw`C:\repo\sub${winSep}`)).toBe(String.raw`C:\repo\sub`);
+      expect(rootOf(String.raw`C:${winSep}`)).toBe(String.raw`C:${winSep}`);
+      expect(rootOf(String.raw`\\server\share${winSep}`)).toBe(String.raw`\\server\share`);
+      expect(() => rootOf("C:relative")).toThrow(/绝对路径/u);
+    } finally {
+      if (real === undefined) {
+        Reflect.deleteProperty(process, "platform");
+      } else {
+        Object.defineProperty(process, "platform", real);
+      }
+    }
+  });
+
+  it("交出前归一成唯一形态：尾随斜杠、重复分隔符与点段折叠", () => {
+    // 同一目录的几种写法收成一种——会话目录等按路径派生的键不再随写法分叉。
+    expect(rootOf("/repo/")).toBe("/repo");
+    expect(rootOf("/repo//sub/")).toBe("/repo/sub");
+    expect(rootOf("/repo/./a")).toBe("/repo/a");
+    // 「..」段按 posix.normalize 的词法折叠落到实际目标（"/repo/../.." 即根），
+    // 不存在解析后仍含「..」的形态。
+    expect(rootOf("/repo/../other")).toBe("/other");
+    expect(rootOf("/repo/../..")).toBe("/");
+    expect(rootOf("/")).toBe("/");
+  });
+
   it("显式值优先，空串回退 fallback，都没有时报错", () => {
     expect(rootOfFallback("/a/b", "/work")).toBe("/a/b");
     expect(rootOfFallback("  ", "/work")).toBe("/work");
     expect(() => rootOfFallback(undefined, undefined)).toThrow(/repo 必填/u);
+  });
+
+  it("repo 错类型不落进 fallback：指定了仓库却被换成另一个仓库，回执里不留痕迹", () => {
+    // 与 idValue 的错类型契约一致：空串/缺省才是「没指定」，数字/对象是「指定错了」。
+    expect(() => rootOfFallback(123, "/work")).toThrow(/repo 必须是字符串/u);
+    expect(() => rootOfFallback({ path: "/a" }, "/work")).toThrow(/repo 必须是字符串/u);
+    expect(rootOfFallback(null, "/work")).toBe("/work");
+    expect(rootOfFallback(undefined, "/work")).toBe("/work");
   });
 });
 
@@ -260,13 +327,23 @@ describe("命令词的合法形态", () => {
 });
 
 describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判据）", () => {
+  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", realPlatform ?? {});
+  });
+
   it("PATH 上有候选 ⇒ 命令词是它的绝对路径，随包入口不再抢在它前面", () => {
     // 这条顺序就是「卡片报的版本 = 用户终端里跑的那一份」的全部保障：反过来的时候，
     // 用户升级了 PATH 上的 CLI，插件仍跑随包那份旧版，两处永远对不上。
     const bin = makeBinDir(["ocr"]);
     const launcher = makeBinDir(["ocr.js"]);
     const memo = {};
-    expect(ocrCommand(() => path.join(launcher, "ocr.js"), memo, { PATH: bin })).toBe(
+    expect(ocrCommand(() => path.join(launcher, "ocr.js"), memo, { PATH: pathEntry(bin) })).toBe(
       shq(path.join(bin, "ocr")),
     );
   });
@@ -275,19 +352,21 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
     const launcher = makeBinDir(["ocr.js"]);
     const empty = makeEmptyDir();
     const memo = {};
-    expect(ocrCommand(() => path.join(launcher, "ocr.js"), memo, { PATH: empty })).toBe(
+    expect(ocrCommand(() => path.join(launcher, "ocr.js"), memo, { PATH: pathEntry(empty) })).toBe(
       shq(path.join(launcher, "ocr.js")),
     );
     const bare = {};
-    expect(ocrCommand(() => null, bare, { PATH: empty })).toBe("ocr");
+    expect(ocrCommand(() => null, bare, { PATH: pathEntry(empty) })).toBe("ocr");
   });
 
   it("解析结果每进程记忆一次：第二次即便判据给出别的答案也不重解析", () => {
     const bin = makeBinDir(["ocr"]);
     const other = makeBinDir(["ocr"]);
     const memo = {};
-    expect(ocrCommand(() => null, memo, { PATH: bin })).toBe(shq(path.join(bin, "ocr")));
-    expect(ocrCommand(() => null, memo, { PATH: other })).toBe(shq(path.join(bin, "ocr")));
+    expect(ocrCommand(() => null, memo, { PATH: pathEntry(bin) })).toBe(shq(path.join(bin, "ocr")));
+    expect(ocrCommand(() => null, memo, { PATH: pathEntry(other) })).toBe(
+      shq(path.join(bin, "ocr")),
+    );
   });
 
   it("生产那一档解析出的命令词可直接执行两种装法之一", () => {
@@ -304,7 +383,7 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
     try {
       const bin = makeBinDir(["ocr"]);
       const memo = {};
-      expect(ocrCommand(() => null, memo, { PATH: bin })).toBe("ocr");
+      expect(ocrCommand(() => null, memo, { PATH: pathEntry(bin) })).toBe("ocr");
       expect(ocrCommand(() => null, {})).toBe("ocr");
     } finally {
       if (real === undefined) {
@@ -350,6 +429,16 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
 });
 
 describe("wrapWithHostReaper", () => {
+  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", realPlatform ?? {});
+  });
+
   it("外层 bash -c，内部命令完整保留且 ppid 监视带可用性探测", () => {
     const wrapped = wrapWithHostReaper(REVIEW_CMD, zh);
     expect(wrapped.startsWith("bash -c '")).toBe(true);
@@ -566,10 +655,16 @@ describe("buildSessionCommand", () => {
 
   it("id 存在 → show；action=comments → comments", () => {
     expect(sessionCmd({ repo: "/r", id: "abc" }).command).toContain(
-      `${OCR} session show --json --repo '/r' 'abc'`,
+      `${OCR} session show --json --repo '/r' -- 'abc'`,
+    );
+    // `--` 不是可省的装饰：cobra 在位置参数之前就解析 flag，以 `-` 开头的 id 会被当成
+    // flag 消化掉（实测 `ocr session show --json --repo /tmp -abc` 报
+    // "unknown shorthand flag: 'a'"）。这条断言钉的是命令骨架，`shq()` 管不到这一层。
+    expect(sessionCmd({ repo: "/r", id: "abc" }).command).toMatch(
+      / session (?:show|comments) .* -- /u,
     );
     expect(sessionCmd({ repo: "/r", action: "comments", id: "abc" }).command).toContain(
-      `${OCR} session comments --json --repo '/r' 'abc'`,
+      `${OCR} session comments --json --repo '/r' -- 'abc'`,
     );
   });
 
@@ -590,6 +685,16 @@ describe("buildSessionCommand", () => {
 });
 
 describe("withHomeEnv / buildLlmTestCommand", () => {
+  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", realPlatform ?? {});
+  });
+
   it("home 未设原样返回；设置时加 HOME= 赋值前缀且路径经 shq", () => {
     expect(withHomeEnv(`${OCR} review`, undefined)).toBe(`${OCR} review`);
     expect(withHomeEnv(`${OCR} review`, "/data/ocr")).toBe(`HOME='/data/ocr' ${OCR} review`);
@@ -718,6 +823,16 @@ const PAYLOADS = [
 const METACHARS = /[;&|`$<>*\n\\"'{}[\]()!#~%]/u;
 
 describe("注入防线：所有插值槽位都必须经 shq 或白名单", () => {
+  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", realPlatform ?? {});
+  });
+
   it("format 白名单：非枚举值（含注入 PoC）回落 json，绝不进命令串", () => {
     expect(resolveOutputFormat("json")).toBe("json");
     expect(resolveOutputFormat("text")).toBe("text");
@@ -867,8 +982,8 @@ describe("错类型参数：静默回落会扩大审查范围，一律抛错", (
     expect(() => listOf(42, "exclude", 5)).toThrow(/必须是字符串或字符串数组/u);
     expect(() => listOf(["a\u0000b"], "path", 5)).toThrow(/NUL/u);
     expect(listOf("a,b", "path", 5)).toStrictEqual(["a", "b"]);
-    // 超限不再静默截断：审查范围会因此小于模型给的清单，而回执上看不出少审了。
-    expect(() => listOf(["a", "b"], "path", 1)).toThrow(/超过 1 条上限，已丢弃 1 条/u);
+    // 超限整条拒绝：命令不构造、一条都不审，文案把「没有开始」说出口。
+    expect(() => listOf(["a", "b"], "path", 1)).toThrow(/超过 1 条上限（多出 1 条）/u);
   });
 
   it("session action 白名单、id 类型严格", () => {
@@ -894,6 +1009,23 @@ describe("scope 组合：branch 先判，commit 非空不再静默吞掉 branch"
       reviewCmd({ repo: "/r", scope: "branch", commit: "c", from: "a", to: "b" }, "/o"),
     ).toThrow(/与 commit 互斥/u);
     expect(() => reviewCmd({ repo: "/r", scope: "nope" }, "/o")).toThrow(/未知 scope/u);
+    // 白名单必须排在「按 from/to 反推模式」之前：否则 scope=nope 配上一组合法的
+    // from/to 会被当成 branch 静默放行，那条 unknownScope 永不可达。
+    expect(() => reviewCmd({ repo: "/r", scope: "nope", from: "a", to: "b" }, "/o")).toThrow(
+      /未知 scope：nope/u,
+    );
+  });
+
+  it("显式 scope 与另一种范围参数冲突时明确拒绝（不再被后者静默覆盖）", () => {
+    // 缺省 scope 时给 commit 是合法用法，所以只拦「显式声明了 workspace」这一支。
+    expect(() => reviewCmd({ repo: "/r", scope: "workspace", commit: "abc" }, "/o")).toThrow(
+      /scope=workspace 与 commit 不能同时给/u,
+    );
+    expect(() => reviewCmd({ repo: "/r", scope: "workspace", from: "a", to: "b" }, "/o")).toThrow(
+      /scope=workspace 与 from\/to 不能同时给/u,
+    );
+    expect(reviewCmd({ repo: "/r", commit: "abc" }, "/o").command).toContain("--commit");
+    expect(reviewCmd({ repo: "/r", scope: "workspace" }, "/o").command).not.toContain("--commit");
     expect(() => previewCmd({ repo: "/r", scope: "unknown" })).toThrow(/未知 scope/u);
   });
 
@@ -926,9 +1058,7 @@ describe("拒绝理由双语（注入 en 那份）", () => {
   it("repo 的四类拒绝在 en 下是英文，且把收到的值原样点名", () => {
     expect(() => rootOf("", en)).toThrow("repo is required and must be the absolute path");
     expect(() => rootOf("a\u0000b", en)).toThrow("repo must not contain NUL bytes");
-    expect(() => rootOf("relative/x", en)).toThrow(
-      "repo must be an absolute path (starting with /): relative/x",
-    );
+    expect(() => rootOf("relative/x", en)).toThrow("repo must be an absolute path: relative/x");
     expect(() => rootOfFallback(undefined, undefined, en)).toThrow(
       "repo is required: the current session workspace is unknown",
     );
@@ -969,7 +1099,7 @@ describe("拒绝理由双语（注入 en 那份）", () => {
     );
     expect(() => ruleCmd({ repo: "/r", paths: [] }, en)).toThrow("paths is required");
     expect(() => sessionCmd({ repo: "/r", action: "rm -rf /" }, en)).toThrow(
-      "invalid action: rm -rf / (expected list/show/comments)",
+      "invalid action: rm -rf / (expected list/show/comments/compare/export)",
     );
     expect(() => sessionCmd({ repo: "/r", id: 9 }, en)).toThrow("id must be a string (got 9)");
   });
@@ -1005,12 +1135,24 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
   });
 
   describe("resolveOcrAvailability：来源三档与它的假命中防线", () => {
+    // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+    // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
+    const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    beforeEach(() => {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    });
+    afterEach(() => {
+      Object.defineProperty(process, "platform", realPlatform ?? {});
+    });
+
     it("PATH 上有候选 ⇒ path，且随包入口在盘也不抢在它前面", () => {
       // 反序是缺陷形态：随包绝对路径先命中的话，用户升级了自己装在 PATH 上的 CLI，
       // 插件却仍跑随包那份，卡片报的版本与他终端里跑的永远对不上。
       const bin = makeBinDir(["ocr"]);
       const launcher = path.join(makeBinDir(["ocr.js"]), "ocr.js");
-      expect(resolveOcrAvailability({ PATH: bin }, () => launcher, "darwin")).toStrictEqual({
+      expect(
+        resolveOcrAvailability({ PATH: pathEntry(bin) }, () => launcher, "darwin"),
+      ).toStrictEqual({
         source: "path",
         path: path.join(bin, "ocr"),
         channel: "unknown",
@@ -1020,7 +1162,9 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
     it("PATH 没有候选、随包入口在盘 ⇒ bundled（那一档只剩兜底的意义）", () => {
       const empty = makeEmptyDir();
       const launcher = path.join(makeBinDir(["ocr.js"]), "ocr.js");
-      expect(resolveOcrAvailability({ PATH: empty }, () => launcher, "darwin")).toStrictEqual({
+      expect(
+        resolveOcrAvailability({ PATH: pathEntry(empty) }, () => launcher, "darwin"),
+      ).toStrictEqual({
         source: "bundled",
         path: launcher,
         channel: "unknown",
@@ -1031,15 +1175,21 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
       const dirAsBin = makeEmptyDir();
       mkdirSync(path.join(dirAsBin, "ocr"));
       const nothing = makeEmptyDir();
-      expect(resolveOcrAvailability({ PATH: dirAsBin }, () => null, "darwin").source).toBe("none");
-      expect(resolveOcrAvailability({ PATH: nothing }, () => null, "darwin").source).toBe("none");
+      expect(
+        resolveOcrAvailability({ PATH: pathEntry(dirAsBin) }, () => null, "darwin").source,
+      ).toBe("none");
+      expect(
+        resolveOcrAvailability({ PATH: pathEntry(nothing) }, () => null, "darwin").source,
+      ).toBe("none");
     });
 
     it("PATH 的空段不当 cwd：滤掉之后在真实目录里命中", () => {
       // shell 把空段解释成**当前工作目录**，跟着这条语义走就会把被审查仓库里恰好叫
       // ocr 的文件报成「PATH 上有」——而工作目录正是本包每次评审都在用的那个。
       const bin = makeBinDir(["ocr"]);
-      expect(resolveOcrAvailability({ PATH: `:${bin}` }, () => null, "linux")).toStrictEqual({
+      expect(
+        resolveOcrAvailability({ PATH: `:${pathEntry(bin)}` }, () => null, "linux"),
+      ).toStrictEqual({
         source: "path",
         path: path.join(bin, "ocr"),
         channel: "unknown",
@@ -1051,7 +1201,11 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
       const empty = makeEmptyDir();
       const bin = makeBinDir(["ocr"]);
       expect(
-        resolveOcrAvailability({ PATH: `${empty}:${bin}` }, () => null, "darwin"),
+        resolveOcrAvailability(
+          { PATH: `${pathEntry(empty)}:${pathEntry(bin)}` },
+          () => null,
+          "darwin",
+        ),
       ).toStrictEqual({
         source: "path",
         path: path.join(bin, "ocr"),
@@ -1167,5 +1321,241 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
       expect(ocrCommandsFor("unknown", true).brew).toBe(BREW_INSTALL);
       expect(ocrCommandsFor("npm", true).brew).toBe(BREW_INSTALL);
     });
+  });
+});
+
+describe("1.13.3 新增参数：preview / noFilter / scan 开关 / max-git-procs / 路径守卫", () => {
+  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  beforeEach(() => {
+    // Windows 上不桩平台：这里的 root 是真实盘符路径，assertAbsoluteRoot 必须走 win32 分支。
+    if (!runsOnWindows) {
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    }
+  });
+  afterEach(() => {
+    if (!runsOnWindows) {
+      Object.defineProperty(process, "platform", realPlatform ?? {});
+    }
+  });
+  const root = mkdtempSync(path.join(tmpdir(), "ocr-cli-flags-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "ocr-cli-outside-"));
+  const outsideFile = path.join(outside, "outside.json");
+
+  beforeAll(() => {
+    writeFileSync(path.join(root, "rule.json"), "{}");
+    writeFileSync(path.join(root, "bg.md"), "# context");
+    writeFileSync(path.join(root, "big.md"), Buffer.alloc(300 * 1024));
+    writeFileSync(outsideFile, "{}");
+  });
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("review preview：只带 --preview，不带 --effort；与 resume 互斥", () => {
+    const { command } = reviewCmd({ repo: root, preview: true }, "/o");
+    expect(command).toContain(" review --audience agent --format json --preview ");
+    expect(command).not.toContain("--effort");
+    expect(command).toContain("--output '/o'");
+    expect(() => reviewCmd({ repo: root, preview: true, resume: "s" }, "/o")).toThrow(
+      /preview 不读写会话/u,
+    );
+    // 预览也可以不落 --output（直连调用方读 stdout）。
+    expect(reviewCmd({ repo: root, preview: true }, undefined).command).not.toContain("--output");
+  });
+
+  it("review noFilter / maxGitProcs / rule / backgroundFile 透传", () => {
+    const { command } = reviewCmd(
+      {
+        repo: root,
+        noFilter: true,
+        maxGitProcs: "4",
+        rule: "rule.json",
+        backgroundFile: "bg.md",
+      },
+      "/o",
+    );
+    expect(command).toContain("--no-filter");
+    expect(command).toContain("--max-git-procs 4");
+    expect(command).toContain("--rule");
+    expect(command).toContain("rule.json");
+    expect(command).toContain("--background-file");
+    expect(command).toContain("bg.md");
+  });
+
+  it("scan preview 不带 LLM/provider 参数；scan 的 no-* / resume / maxGitProcs 透传", () => {
+    const preview = scanCmd({ repo: root, preview: true, provider: "p" }, "/o").command;
+    expect(preview).toContain(" scan --audience agent --format json --preview ");
+    expect(preview).not.toContain("--provider");
+    expect(() => scanCmd({ repo: root, preview: true, resume: "s" }, "/o")).toThrow(
+      /preview 不读写会话/u,
+    );
+    const normal = scanCmd(
+      {
+        repo: root,
+        noPlan: true,
+        noDedup: true,
+        noSummary: true,
+        resume: "s",
+        maxGitProcs: 3,
+        rule: "rule.json",
+      },
+      "/o",
+    ).command;
+    expect(normal).toContain("--no-plan");
+    expect(normal).toContain("--no-dedup");
+    expect(normal).toContain("--no-summary");
+    expect(normal).toContain("--resume 's'");
+    expect(normal).toContain("--max-git-procs 3");
+    expect(normal).toContain("--rule");
+  });
+
+  it("rule/background-file 只能指向 repo 根内普通文件；越界、目录与超大都拒绝", async () => {
+    expect(() => reviewCmd({ repo: root, rule: outsideFile }, "/o")).toThrow(/repo 根目录内/u);
+    expect(() => reviewCmd({ repo: root, rule: "big.md" }, "/o")).toThrow(/文件过大/u);
+    expect(() => reviewCmd({ repo: root, rule: "." }, "/o")).toThrow(/普通文件/u);
+    const link = path.join(root, "escape.json");
+    await symlink(outsideFile, link);
+    expect(() => reviewCmd({ repo: root, rule: "escape.json" }, "/o")).toThrow(/repo 根目录内/u);
+  });
+
+  it("session compare：两个位置参数走 --，缺一/夹带 id 都拒绝", () => {
+    const { command } = sessionCmd({
+      repo: root,
+      action: "compare",
+      before: "old",
+      after: "new",
+    });
+    expect(command).toBe(`${OCR} session compare --json --repo '${root}' -- 'old' 'new'`);
+    expect(() => sessionCmd({ repo: root, action: "compare", before: "old" })).toThrow(
+      /需要同时给出 before 与 after/u,
+    );
+    expect(() =>
+      sessionCmd({ repo: root, action: "compare", before: "old", after: "new", id: "x" }),
+    ).toThrow(/不接受 id/u);
+    expect(() =>
+      sessionCmd({
+        repo: root,
+        action: "compare",
+        before: "old",
+        after: "new",
+        severity: ["high"],
+      }),
+    ).toThrow(/不接受 id/u);
+    expect(() =>
+      sessionCmd({ repo: root, action: "compare", before: "old", after: "new", limit: 3 }),
+    ).toThrow(/不接受 id/u);
+  });
+
+  it("resolveRepoFile：类型/空串/NUL/根不可读/文件缺失都拒绝；空串在 flag 槽位视为未给", () => {
+    expect(() => resolveRepoFile(root, 3, "rule", 1024, zh)).toThrow(/必须是字符串/u);
+    expect(() => resolveRepoFile(root, "", "rule", 1024, zh)).toThrow(/文件不存在/u);
+    expect(() => resolveRepoFile(root, "a\u0000b", "rule", 1024, zh)).toThrow(/NUL/u);
+    expect(() => resolveRepoFile("/no/such/root", "a", "rule", 1024, zh)).toThrow(/根目录不可读/u);
+    expect(() => resolveRepoFile(root, "missing.json", "rule", 1024, zh)).toThrow(/文件不存在/u);
+    const emptyFlag = reviewCmd({ repo: root, rule: "  " }, "/o").command;
+    expect(emptyFlag).not.toContain("--rule");
+  });
+
+  it("布尔闸：preview/noFilter 错类型直接拒绝", () => {
+    expect(() => reviewCmd({ repo: root, preview: "yes" }, "/o")).toThrow(/preview 必须是布尔值/u);
+    expect(() => reviewCmd({ repo: root, noFilter: "true" }, "/o")).toThrow(
+      /noFilter 必须是布尔值/u,
+    );
+  });
+
+  it("session 的推断与互斥分支：compare 推断、list/show 冲突、非法 severity", () => {
+    const inferred = sessionCmd({ repo: root, before: "a", after: "b" }).command;
+    expect(inferred).toContain("session compare");
+    expect(() => sessionCmd({ repo: root, action: "list", before: "a" })).toThrow(
+      /before\/after 只适用于/u,
+    );
+    expect(() => sessionCmd({ repo: root, action: "list", severity: ["high"] })).toThrow(
+      /只适用于 action=comments/u,
+    );
+    expect(() => sessionCmd({ repo: root, action: "comments", id: "s", before: "a" })).toThrow(
+      /before\/after 只适用于/u,
+    );
+    expect(() => sessionCmd({ repo: root, action: "show", id: "s", before: "a" })).toThrow(
+      /before\/after 只适用于/u,
+    );
+    expect(() =>
+      sessionCmd({ repo: root, action: "comments", id: "s", severity: ["urgent"] }),
+    ).toThrow(/severity 过滤值/u);
+    expect(() =>
+      sessionCmd({ repo: root, action: "export", output: "/tmp/x", severity: ["high"] }),
+    ).toThrow(/只适用于 action=comments/u);
+  });
+
+  it("delegate preview/rule 也接受 backgroundFile/rule/maxGitProcs", () => {
+    const preview = previewCmd({
+      repo: root,
+      backgroundFile: "bg.md",
+      rule: "rule.json",
+      maxGitProcs: 2,
+    }).command;
+    expect(preview).toContain("--background-file");
+    expect(preview).toContain("--rule");
+    expect(preview).toContain("--max-git-procs 2");
+    const rule = ruleCmd({ repo: root, paths: ["a.ts"], rule: "rule.json" }).command;
+    expect(rule).toContain("--rule");
+    expect(rule.indexOf("--rule")).toBeLessThan(rule.indexOf(" -- "));
+  });
+
+  it("rules check：文件路径走 -- 之后；rule 同样受 repo 根路径闸", () => {
+    const { command } = rulesCheckCmd({ repo: root, path: "src/a.ts" });
+    expect(command).toBe(`${OCR} rules check --repo '${root}' -- 'src/a.ts'`);
+    const withRule = rulesCheckCmd({ repo: root, path: "src/a.ts", rule: "rule.json" }).command;
+    expect(withRule).toContain("--rule");
+    expect(withRule).toContain("-- 'src/a.ts'");
+    expect(() => rulesCheckCmd({ repo: root, path: "" })).toThrow(/path 必填/u);
+    expect(() => rulesCheckCmd({ repo: root, path: "src/a.ts", rule: outsideFile })).toThrow(
+      /repo 根目录内/u,
+    );
+    expect(() => rulesCheckCmd({ repo: root, path: 3 })).toThrow(/path 必须是字符串/u);
+  });
+
+  it("llm 只读命令：providers / models", () => {
+    expect(buildLlmCommand("providers")).toBe(`${OCR} llm providers --color never`);
+    expect(buildLlmCommand("models")).toBe(`${OCR} llm models --color never`);
+  });
+
+  it("session comments 过滤与 export 输出路径", () => {
+    const comments = sessionCmd({
+      repo: root,
+      action: "comments",
+      id: "s1",
+      severity: ["HIGH"],
+      category: ["bug", "security"],
+    }).command;
+    expect(comments).toContain("--severity 'high'");
+    expect(comments).toContain("--category 'bug,security'");
+    expect(comments).toContain("-- 's1'");
+    expect(() => sessionCmd({ repo: root, action: "comments", severity: ["high"] })).toThrow(
+      /需要同时给出会话 id/u,
+    );
+    expect(() => sessionCmd({ repo: root, action: "show", id: "s1", severity: ["high"] })).toThrow(
+      /只适用于 action=comments/u,
+    );
+    const exported = sessionCmd({
+      repo: root,
+      action: "export",
+      id: "s1",
+      output: "/tmp/review.html",
+    }).command;
+    expect(exported).toBe(`${OCR} session export --repo '${root}' -o '/tmp/review.html' -- 's1'`);
+    expect(() => sessionCmd({ repo: root, action: "export" })).toThrow(/输出路径/u);
+    expect(() =>
+      sessionCmd({ repo: root, action: "export", output: "/tmp/x", before: "a" }),
+    ).toThrow(/不接受 before/u);
+    expect(() => sessionCmd({ repo: root, action: "export", output: "/tmp/x", limit: 2 })).toThrow(
+      /不接受 before/u,
+    );
+    // 无 id = 导出最新一场，命令里不应出现位置参数。
+    const newest = sessionCmd({ repo: root, action: "export", output: "/tmp/x" }).command;
+    expect(newest).toBe(`${OCR} session export --repo '${root}' -o '/tmp/x'`);
   });
 });

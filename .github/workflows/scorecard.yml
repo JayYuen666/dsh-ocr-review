@@ -1,0 +1,72 @@
+# OpenSSF Scorecard：供应链体检。
+#
+# 它查的正是本仓这一层关心的东西——脚本注入、token 权限、依赖是否钉版、分支保护是否
+# 存在。结果同时进 code scanning 面板与 OpenSSF 公有 API（本仓是 public 仓）。
+#
+# publish_results 只在默认分支上有效：上传的身份由 OIDC 换得，所以要 id-token: write。
+name: scorecard
+on:
+  # 分支保护/ruleset 变更时重跑，否则 Branch-Protection 这项检查只会停在旧值上。
+  branch_protection_rule:
+  # 手动入口：同上。注意下面的 if 要求「在默认分支上跑」，所以在功能分支上手跑时该 job
+  # 会被跳过——这不是故障。
+  workflow_dispatch: {}
+  schedule:
+    - cron: "23 4 * * 1"
+  push:
+    branches: [main]
+# 四类触发完全可能在同一分钟内重叠：批量改 ruleset 会连着抛多次 branch_protection_rule，
+# 周度 cron 与一次 push 也会撞车。并行跑的结果是两份分析同时对同一个 ref、同一个 category
+# 上传 SARIF——后到的会覆盖先到的，中间还夹着一次可能失败的并发上传；OIDC 换 token 与
+# 公有 API 的发布额度也被无谓重复消耗。
+# 组键按 ref 聚合而不是全仓一把：不同分支的分析互不相干，串成一队只是让排在后面的等待。
+# 不用 cancel-in-progress：分析本身幂等，但中途取消会打断 SARIF 上传，留下半份结果。
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: false
+# 工作流级全只读；两个写权限只挂在 analysis job 上。
+# read-all 比这份文件实际需要的更宽，但 scorecard-action 自己按仓库 API 面读各种元数据，
+# 逐项列全等于把上游的读取面抄一遍；写权限仍是逐项的最小白名单，这一档不改。
+permissions: read-all
+jobs:
+  analysis:
+    name: scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # publish_results: true 只在默认分支生效，所以在非默认分支上不跑这条。
+    # 判据比的是完整 ref 而不是 github.ref_name：ref_name 是短名，名为 `main` 的 tag 与
+    # main 分支在它眼里一样，workflow_dispatch 手跑在那种 tag 上会过判、发布出错误来源的结果
+    # （OIDC 那条路也要求 ref 真是默认分支，届时表现为发布被拒）。
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      security-events: write
+      id-token: write
+      # job 级 permissions 一旦写了，没列出的项一律是 none，checkout 也就读不到仓库内容。
+      # 这里显式补回来：它要的是读，与上面两项写权限不冲突。
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 不让 checkout 把 token 留在 .git/config 里：后续步骤不该能借它推代码。
+          persist-credentials: false
+      - name: Run analysis
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      # 主链路先走：把结果送进 code scanning（job 的存在理由），再传那种「给人下载排查用」的副本。
+      # 反过来的顺序会把两种后果不同的失败绑死：artifact 服务一次 5xx / 配额抖动 / 同名冲突
+      # 就会让 job 直接失败，而下面的 upload-sarif 根本不会执行——本次分析既没进 code scanning
+      # 也没进 OpenSSF API，可失败原因却是一条与供应链体检无关的存储错误。
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: results.sarif
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
