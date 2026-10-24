@@ -1,5 +1,28 @@
-node_modules/
-client.js
-.toolchain/
-host.js
-coverage/
+# 构建产物落包根，锚定到仓库根：不锚定时 Git 会匹配任意层级的同名文件，于是
+# test/fixtures/client.js、scripts/host.js 之类一起被忽略，症状是本地全绿、他人克隆后
+# 构建失败（丢的是本该进版本库的夹具）。
+/node_modules/
+/client.js
+/host.js
+/.toolchain/
+/coverage/
+
+# 构建被中断时原子落盘留下的临时文件（同目录 + rename，见 build-utils.mjs 的
+# writeArtifact）：名字带 pid 与 uuid，越积越多且每次都不重样。
+*.tmp
+
+# 排障时在仓根临时放的本地凭据与配置。本包运行期的 key 由 api_key_cmd 动态读，
+# 从不落仓库；这几条防的是复现问题时顺手抄进来的那份。
+.env
+.env.*
+!.env.example
+*.credentials.yaml
+*.pem
+*.key
+
+# 打包与系统产物。
+*.tgz
+.DS_Store
+
+# 统一构建件的原子落盘草稿目录（shared/lib/build-artifacts 的 writeArtifact）。
+/.tmp/

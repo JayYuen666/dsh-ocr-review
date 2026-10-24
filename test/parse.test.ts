@@ -5,12 +5,14 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
   parseReviewOutput,
+  parsePreviewOutput,
+  parseSessionCompare,
   summarizeReview,
   renderComment,
   parseDelegatePreview,
   parseDelegateRules,
 } from "../lib/parse.ts";
-import { aggregateComments } from "../lib/severity.ts";
+import { aggregateComments, classifySeverity, severityRank } from "../lib/severity.ts";
 import type { OcrComment, ParsedReview, ReviewSummaryView, SummaryPlan } from "../lib/parse.ts";
 import { MESSAGES, format } from "../lib/messages.ts";
 
@@ -123,6 +125,57 @@ const mk = (category: string): OcrComment => ({
   severity: "medium",
 });
 
+/** severity 归一口径的四种输入（L11 四态 + classifySeverity 自身契约）。 */
+const severityCase = (severity: string): OcrComment => ({
+  ...mk("bug"),
+  severity,
+});
+
+describe("aggregateComments 的 unknownSeverityCount 与 category 归一口径", () => {
+  it("四种输入的 unknownSeverityCount 精确：自造/空白异形各按其判据计数", () => {
+    // "blocker"：白名单外 ⇒ unknown。"CRITICAL"：小写归一后命中 ⇒ known。
+    // "critical "：trim 后命中 ⇒ known（trim 在口径层做，空白异形不得降级）。
+    // ""：缺失字段的白值 ⇒ unknown。期望值独立写死，不从实现派生。
+    const agg = aggregateComments([
+      severityCase("blocker"),
+      severityCase("CRITICAL"),
+      severityCase("critical "),
+      severityCase(""),
+    ]);
+    expect(agg.unknownSeverityCount).toBe(2);
+    expect(agg.bySeverity).toStrictEqual({ critical: 2, high: 0, medium: 2, low: 0 });
+    expect(agg.total).toBe(4);
+  });
+
+  it("category trim 后入键，空/空白 category 不占键（键和允许小于 total）", () => {
+    // trim 合并空白异形；大小写刻意保留（category 是自由标签，没有可对表的枚举，
+    // 与 severity 的白名单归一不是同一条判据）。
+    const agg = aggregateComments([mk(" Security"), mk("security"), mk("   "), mk("")]);
+    expect(agg.byCategory).toStrictEqual({ Security: 1, security: 1 });
+    expect(Object.values(agg.byCategory).reduce((sum, count) => sum + count, 0)).toBeLessThan(
+      agg.total,
+    );
+  });
+});
+
+describe("classifySeverity：聚合与排序共用的唯一归一口径", () => {
+  it("known 标志与 level 按白名单精确给出；trim/大小写异形不降级", () => {
+    expect(classifySeverity("critical")).toStrictEqual({ level: "critical", known: true });
+    expect(classifySeverity("CRITICAL")).toStrictEqual({ level: "critical", known: true });
+    expect(classifySeverity(" critical ")).toStrictEqual({ level: "critical", known: true });
+    expect(classifySeverity("blocker")).toStrictEqual({ level: "medium", known: false });
+    expect(classifySeverity("严重")).toStrictEqual({ level: "medium", known: false });
+    expect(classifySeverity("")).toStrictEqual({ level: "medium", known: false });
+  });
+
+  it("severityRank：未知归 medium（排序位 2），永不为 -1", () => {
+    expect(severityRank("critical")).toBe(0);
+    expect(severityRank("HIGH")).toBe(1);
+    expect(severityRank("blocker")).toBe(2);
+    expect(severityRank("low")).toBe(3);
+  });
+});
+
 describe("aggregateComments 的 category 计数不被原型链污染", () => {
   it("constructor / toString 按普通键计数，不被写成函数字符串", () => {
     const agg = aggregateComments([mk(ctorKey), mk(toStringKey), mk(ctorKey)]);
@@ -170,7 +223,7 @@ describe("delegate 解析", () => {
   });
 
   it("preview：excluded 的理由读的是 CLI 的 exclude_reason（不是脑补的 reason）", () => {
-    // 真回执（ocr 1.13.0 delegate_cmd.go 的 delegatePreviewFileJSON）发的键是
+    // 真回执（ocr 1.13.3 delegate_cmd.go 的 delegatePreviewFileJSON）发的键是
     // `exclude_reason`；fixture 里那条按真实形态写。此前本包读 `reason`，真回执里
     // 那个键不存在 ⇒ 每条 excluded 的 reason 都是空串，而工具描述与 output schema
     // 都在承诺「被排除文件及原因」。
@@ -260,6 +313,12 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
     // 非白名单字符串同样拒绝（不再凭空造出 status:"unknown"）
     expect(parseOcr('{"status":"weird"}').ok).toBe(false);
     expect(parseOcr('{"status":42}').message).toContain("42");
+    // `failed` 要**认得出**（非零退出时那份 manifest 靠它取失败明细），但**不算成功**：
+    // 一旦它带 exit 0 回来，当 ok:true 就会把全场失败摘要成「0 条评论」。
+    const failedStatus = parseOcr('{"status":"failed","comments":[]}');
+    expect(failedStatus.ok).toBe(false);
+    expect(failedStatus.status).toBe("failed");
+    expect(failedStatus.message).toBe(zh.ocrStatusFailed);
     // 六个源码值全部接受（partial 是 manifest 终态 StatePartial，exit 0——
     // review_cmd.go 的退出注释 "complete/partial/skipped all succeed"）。
     for (const status of [
@@ -465,6 +524,8 @@ describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
       totalTokens: 0,
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       elapsed: "12",
     });
     expect(parsed.comments.map((comment) => [comment.startLine, comment.endLine])).toStrictEqual([
@@ -586,6 +647,17 @@ describe("诊断字段：tool_calls / manifest.coverage / summary.budget_exceede
   it('budget_exceeded 只认真布尔：字符串 "true" 不算被截断', () => {
     const parsed = parseOcr('{"status":"complete","summary":{"budget_exceeded":"true"}}');
     expect(parsed.budgetExceeded).toBe(false);
+  });
+
+  it("小数不等于整数：3.7 的行号不能被 Math.trunc 折成 3 再当合法值", () => {
+    // 先截断再判 isSafeInteger 的话，任何小数都通过，行号被静默改写一位——
+    // 而注释承诺的是「负数和小数一起挡掉」。
+    const parsed = parseOcr(
+      '{"status":"complete","comments":[{"path":"a","content":"c","start_line":3.7,' +
+        '"end_line":0}],"tool_calls":{"total":2.5,"failure":0}}',
+    );
+    expect(parsed.comments[0]?.startLine).toBe(0);
+    expect(parsed.toolCalls).toBeNull();
   });
 
   it("计数字段的坏形态（负数、小数、非数字串）都算读不出，不被 num 折成 0", () => {
@@ -766,5 +838,257 @@ describe("解析文案双语（消息表由调用方注入）", () => {
       '{"status":"completed_with_warnings","warnings":[{"file":"a.ts","message":"t"}]}';
     expect(parseReviewOutput(warned, MESSAGES.zh).warnings).toStrictEqual(["a.ts：t"]);
     expect(parseReviewOutput(warned, MESSAGES.en).warnings).toStrictEqual(["a.ts: t"]);
+  });
+});
+
+describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume / cache tokens", () => {
+  it("读得出 limitReached（review_limit_reached 与 token_budget_reached），并保留 llm/resume/cache", () => {
+    const parsed = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        llm: { provider: "p", model: "m" },
+        resume: {
+          resumed_from: "old-id",
+          reused_files: 2,
+          rerun_files: 1,
+          previous_model: "m0",
+          current_model: "m1",
+        },
+        summary: {
+          files_reviewed: 3,
+          comments: 1,
+          total_tokens: 10,
+          input_tokens: 7,
+          output_tokens: 3,
+          cache_read_tokens: 4,
+          cache_write_tokens: 5,
+          elapsed: "1s",
+        },
+        groups: [{ label: "api", files: ["a.ts"] }],
+        retry_report: { total_retries: 2, recovered_requests: 1, failed_requests: 0 },
+        trace_id: "trace-1",
+        warnings: [
+          { file: "a.ts", message: "limit", type: "review_limit_reached" },
+          { file: "b.ts", message: "budget", type: "token_budget_reached" },
+        ],
+        comments: [],
+      }),
+    );
+    expect(parsed.limitReached).toBe(true);
+    expect(parsed.llm).toStrictEqual({ provider: "p", model: "m" });
+    expect(parsed.resume).toStrictEqual({
+      resumedFrom: "old-id",
+      reusedFiles: 2,
+      rerunFiles: 1,
+      previousModel: "m0",
+      currentModel: "m1",
+    });
+    expect(parsed.summary?.cacheReadTokens).toBe(4);
+    expect(parsed.summary?.cacheWriteTokens).toBe(5);
+    expect(parsed.groupCount).toBe(1);
+    expect(parsed.retry).toStrictEqual({
+      totalRetries: 2,
+      recoveredRequests: 1,
+      failedRequests: 0,
+    });
+    expect(parsed.traceId).toBe("trace-1");
+    const view = summarizeView(parsed);
+    expect(view.limitReached).toBe(true);
+    expect(view.llm).toStrictEqual({ provider: "p", model: "m" });
+    expect(view.resume?.reusedFiles).toBe(2);
+    expect(view.groupCount).toBe(1);
+    expect(view.retry?.totalRetries).toBe(2);
+  });
+
+  it("project_summary 超过 4000 字符即截断并置 truncated", () => {
+    const long = "x".repeat(4001);
+    const parsed = parseOcr(
+      JSON.stringify({ status: "complete", project_summary: long, comments: [] }),
+    );
+    expect(parsed.projectSummary).toHaveLength(4000);
+    expect(parsed.projectSummaryTruncated).toBe(true);
+    expect(parsed.limitReached).toBe(false);
+    expect(parsed.llm).toBeNull();
+    expect(parsed.resume).toBeNull();
+  });
+
+  it("空 llm/resume 对象不伪造身份；无 warnings 时 limitReached=false", () => {
+    const parsed = parseOcr(
+      JSON.stringify({ status: "complete", llm: {}, resume: {}, comments: [] }),
+    );
+    expect(parsed.llm).toBeNull();
+    expect(parsed.resume).toBeNull();
+    expect(parsed.limitReached).toBe(false);
+    const providerless = parseOcr(
+      JSON.stringify({ status: "complete", llm: { model: "m" }, comments: [] }),
+    );
+    expect(providerless.llm).toStrictEqual({ provider: null, model: "m" });
+  });
+
+  it("retry_report 全零回 null；有一个非零计数就保留", () => {
+    const zero = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        retry_report: { total_retries: 0, recovered_requests: 0, failed_requests: 0 },
+        comments: [],
+      }),
+    );
+    expect(zero.retry).toBeNull();
+    const nonzero = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        retry_report: { total_retries: 1, recovered_requests: 0, failed_requests: 0 },
+        comments: [],
+      }),
+    );
+    expect(nonzero.retry).toStrictEqual({
+      totalRetries: 1,
+      recoveredRequests: 0,
+      failedRequests: 0,
+    });
+  });
+});
+
+describe("parsePreviewOutput — review/scan --preview", () => {
+  it("拆分 reviewable/excluded 并保留排除原因；计数与合计原样带出", () => {
+    const parsed = parsePreviewOutput(
+      JSON.stringify({
+        files: [
+          { path: "a.ts", status: "modified", insertions: 2, deletions: 1, will_review: true },
+          {
+            path: "b.ts",
+            status: "modified",
+            insertions: 1,
+            deletions: 0,
+            will_review: false,
+            exclude_reason: "default_path",
+          },
+        ],
+        total_insertions: 3,
+        total_deletions: 1,
+        total_files: 2,
+        reviewable_count: 1,
+        excluded_count: 1,
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.view?.reviewableFiles).toHaveLength(1);
+    expect(parsed.view?.excludedFiles[0]?.excludeReason).toBe("default_path");
+    expect(parsed.view).toMatchObject({
+      totalFiles: 2,
+      reviewableCount: 1,
+      excludedCount: 1,
+      totalInsertions: 3,
+      totalDeletions: 1,
+      truncated: false,
+    });
+  });
+
+  it("坏 JSON / files 非数组 / 条目全坏都判失败，不报「0 个文件可审」", () => {
+    expect(parsePreviewOutput("{").ok).toBe(false);
+    expect(parsePreviewOutput('{"files":"nope"}').ok).toBe(false);
+    expect(parsePreviewOutput('{"files":[{"status":"x"}]}').ok).toBe(false);
+    const empty = parsePreviewOutput('{"files":[],"total_files":0}');
+    expect(empty.ok).toBe(true);
+    expect(empty.view?.totalFiles).toBe(0);
+    // 非对象条目与缺 path 的条目各自丢弃；混在合法条目里不毁整份清单。
+    const mixed = parsePreviewOutput(
+      JSON.stringify({
+        files: ["nope", { status: "x" }, { path: "ok.ts", will_review: true }],
+        total_files: 3,
+      }),
+    );
+    expect(mixed.ok).toBe(true);
+    expect(mixed.view?.reviewableFiles.map((file) => file.path)).toStrictEqual(["ok.ts"]);
+  });
+
+  it("列表超过 200 条时截断并置 truncated（计数仍报全量）", () => {
+    const files = Array.from({ length: 201 }, (_value, index) => ({
+      path: `f${index}.ts`,
+      status: "scan",
+      insertions: 1,
+      deletions: 0,
+      will_review: true,
+    }));
+    const parsed = parsePreviewOutput(
+      JSON.stringify({ files, total_files: 201, reviewable_count: 201, excluded_count: 0 }),
+    );
+    expect(parsed.view?.reviewableFiles).toHaveLength(200);
+    expect(parsed.view?.truncated).toBe(true);
+    expect(parsed.view?.reviewableCount).toBe(201);
+  });
+});
+
+const compareComment = (filePath: string): Record<string, unknown> => ({
+  path: filePath,
+  content: `issue in ${filePath}`,
+  start_line: 3,
+  end_line: 4,
+  category: "bug",
+  severity: "high",
+});
+
+describe("parseSessionCompare — session compare --json", () => {
+  it("四桶、两侧标识与计数一起给出；桶内按位置渲染", () => {
+    const parsed = parseSessionCompare(
+      JSON.stringify({
+        before: { session_id: "b", review_mode: "range", range: "main..x" },
+        after: { session_id: "a", review_mode: "range", range: "main..x" },
+        new: [compareComment("new.ts")],
+        persisting: [compareComment("same.ts")],
+        resolved: [],
+        not_reviewed: [compareComment("old.ts")],
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.view?.before.sessionId).toBe("b");
+    expect(parsed.view?.after.sessionId).toBe("a");
+    expect(parsed.view?.counts).toStrictEqual({
+      new: 1,
+      persisting: 1,
+      resolved: 0,
+      notReviewed: 1,
+    });
+    expect(parsed.view?.persisting[0]?.location).toBe("same.ts:3-4");
+  });
+
+  it("缺桶/桶非数组判失败；超过 20 条的桶截断并计入 droppedCount", () => {
+    expect(parseSessionCompare("{").ok).toBe(false);
+    expect(parseSessionCompare("[]").ok).toBe(false);
+    expect(parseSessionCompare('{"new":[]}').ok).toBe(false);
+    expect(
+      parseSessionCompare('{"new":[],"persisting":[],"resolved":[],"not_reviewed":{}}').ok,
+    ).toBe(false);
+    const many = Array.from({ length: 21 }, (_value, index) => compareComment(`f${index}.ts`));
+    const parsed = parseSessionCompare(
+      JSON.stringify({
+        before: {},
+        after: {},
+        new: many,
+        persisting: [],
+        resolved: [],
+        not_reviewed: [],
+      }),
+    );
+    expect(parsed.view?.new).toHaveLength(20);
+    expect(parsed.view?.counts.new).toBe(21);
+    expect(parsed.view?.droppedCount).toBe(1);
+  });
+
+  it("坏评论条目只丢该条；before/after 非对象时两侧标识为空", () => {
+    const parsed = parseSessionCompare(
+      JSON.stringify({
+        before: "nope",
+        after: null,
+        new: ["bad", { path: "a.ts" }, compareComment("a.ts")],
+        persisting: [],
+        resolved: [],
+        not_reviewed: [],
+      }),
+    );
+    expect(parsed.view?.before).toStrictEqual({ sessionId: "", reviewMode: "", range: "" });
+    expect(parsed.view?.new).toHaveLength(1);
+    expect(parsed.view?.new[0]?.location).toBe("a.ts:3-4");
+    expect(parsed.view?.droppedCount).toBe(2);
   });
 });

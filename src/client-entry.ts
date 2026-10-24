@@ -50,6 +50,7 @@ import type { LocaleNs, Translate } from "./ui-messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { claimApply } from "@jayyuen66/dsh-plugin-shared/lib/card-apply";
 import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
+import { OCR_BUNDLE_PACKAGE } from "../lib/remote-shape.ts";
 import { createOcrReader } from "./remote.ts";
 import type { OcrReader } from "./remote.ts";
 import type { OcrSelectRequest } from "../lib/remote-shape.ts";
@@ -69,10 +70,12 @@ const NS: LocaleNs = "ocr-review";
  * （不是回落、不是报错）。值 = 本包 package.json 的 name，且必须出现在 profile 的
  * `dsh.profile.bundles` 里；test/build-client.test.ts 从
  * `~/.dsh/profiles/web/package.json` 解析校验，不在此处硬抄一份到测试。
- * 设置命名空间**不跟着改**：下面 `ctx.configForms.get(NS)` 仍吃裸条目 id（installed
- * dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当 settings 命名空间用）。
+ * 唯一定义在 lib/remote-shape.ts 的 OCR_BUNDLE_PACKAGE（descriptor id / $mount 位
+ * 与这里是同一份值），设置命名空间**不跟着改**：下面 `ctx.configForms.get(NS)` 仍吃
+ * 裸条目 id（installed dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当
+ * settings 命名空间用）。
  */
-const BUNDLE_PKG = "@jayyuen66/dsh-ocr-review";
+const BUNDLE_PKG = OCR_BUNDLE_PACKAGE;
 
 /** 未知值 → 安全字符串（非字符串给 ''）。 */
 function strOf(value: unknown): string {
@@ -500,8 +503,10 @@ function NumberRow(props: NumberRowProps): ReactNode {
   useEffect(() => {
     setDraft(String(value));
   }, [value]);
-  const stage = (): void => {
-    const parsed = Number(draft);
+  /** 用**本次输入的值**上报，不读 `draft`：state 更新是异步的，`onChange` 里
+   *  `setDraft(x)` 之后立刻读 `draft` 拿到的还是上一个字符，草稿会永远滞后一格。 */
+  const stage = (text: string): void => {
+    const parsed = Number(text);
     if (Number.isInteger(parsed) && parsed >= min && (max === undefined || parsed <= max)) {
       onCommit(parsed);
     }
@@ -525,12 +530,12 @@ function NumberRow(props: NumberRowProps): ReactNode {
       "aria-label": label,
       onChange: (ev: { target: { value: string } }) => {
         setDraft(ev.target.value);
-        stage();
+        stage(ev.target.value);
       },
       onKeyDown: (ev: { key: string; preventDefault: () => void }) => {
         if (ev.key === "Enter") {
           ev.preventDefault();
-          stage();
+          stage(draft);
         }
       },
       className: FORM_CONTROL_CLASS,
@@ -556,8 +561,9 @@ function TextRow(props: TextRowProps): ReactNode {
   useEffect(() => {
     setDraft(value);
   }, [value]);
-  const stage = (): void => {
-    onCommit(draft.trim());
+  /** 同 NumberRow：读参数而不是 `draft`，否则草稿永远滞后一格。 */
+  const stage = (text: string): void => {
+    onCommit(text.trim());
   };
   return createElement(
     "div",
@@ -579,12 +585,12 @@ function TextRow(props: TextRowProps): ReactNode {
       style: { width: "min(60%,320px)" },
       onChange: (ev: { target: { value: string } }) => {
         setDraft(ev.target.value);
-        stage();
+        stage(ev.target.value);
       },
       onKeyDown: (ev: { key: string; preventDefault: () => void }) => {
         if (ev.key === "Enter") {
           ev.preventDefault();
-          stage();
+          stage(draft);
         }
       },
     }),
@@ -1214,6 +1220,7 @@ export function buildSettingsSection(
     current: deps.effortValue,
     disabled: !writable,
     options: [
+      { value: "auto", label: t("effortAuto") },
       { value: "low", label: t("effortLow") },
       { value: "medium", label: t("effortMedium") },
       { value: "high", label: t("effortHigh") },
@@ -1310,6 +1317,129 @@ export function buildSettingsSection(
     configPathRow,
     saveRow,
   );
+}
+
+/** MCP/ChatGPT 管理区的状态与回调（与设置卡分开：它们写的是 OCR 自己的 config）。 */
+export interface AdminSectionProps {
+  t: Translate;
+  writable: boolean;
+  available: boolean;
+  mcpJson: string;
+  mcpBusy: boolean;
+  mcpMsg: string | null;
+  authOutput: string | null;
+  authBusy: boolean;
+  authMsg: string | null;
+  authModel: string;
+  loginCommand: string;
+  onMcpChange: (value: string) => void;
+  onMcpSave: () => void;
+  onAuthModelChange: (value: string) => void;
+  onCheckAuth: () => void;
+  onUseChatGpt: () => void;
+}
+
+const sectionStyle: Record<string, string> = { padding: "6px 0" };
+const titleStyle: Record<string, string> = { fontWeight: "600", fontSize: "13px" };
+const hintStyle: Record<string, string> = { fontSize: "12px", opacity: "0.8", margin: "2px 0 6px" };
+const textareaStyle: Record<string, string> = {
+  width: "100%",
+  minHeight: "120px",
+  fontFamily: "monospace",
+  fontSize: "12px",
+  boxSizing: "border-box",
+};
+
+function buildMcpAdmin(props: AdminSectionProps): ReactNode {
+  const { t } = props;
+  const textarea = createElement("textarea", {
+    "data-field": "mcpJson",
+    value: props.mcpJson,
+    disabled: !props.writable || props.mcpBusy || !props.available,
+    onChange: (event: { target: { value: string } }) => {
+      props.onMcpChange(event.target.value);
+    },
+    style: textareaStyle,
+  });
+  const button = createElement(
+    "button",
+    {
+      type: "button",
+      "data-field": "mcpSave",
+      disabled: !props.writable || props.mcpBusy || !props.available,
+      onClick: props.onMcpSave,
+    },
+    props.mcpBusy ? t("mcpSaving") : t("mcpSave"),
+  );
+  const message =
+    props.mcpMsg === null ? null : createElement("div", { className: "ocr-hint" }, props.mcpMsg);
+  return createElement(
+    "div",
+    { style: sectionStyle },
+    createElement("div", { style: titleStyle }, t("mcpTitle")),
+    createElement("div", { style: hintStyle }, t("mcpHint")),
+    props.available
+      ? textarea
+      : createElement("div", { className: "ocr-hint" }, t("adminUnavailable")),
+    button,
+    message,
+  );
+}
+
+function buildAuthAdmin(props: AdminSectionProps): ReactNode {
+  const { t } = props;
+  const check = createElement(
+    "button",
+    {
+      type: "button",
+      "data-field": "authCheck",
+      disabled: props.authBusy || !props.available,
+      onClick: props.onCheckAuth,
+    },
+    props.authBusy ? t("chatGptChecking") : t("chatGptCheck"),
+  );
+  const model = createElement("input", {
+    "data-field": "chatGptModel",
+    value: props.authModel,
+    disabled: !props.writable || props.authBusy || !props.available,
+    onChange: (event: { target: { value: string } }) => {
+      props.onAuthModelChange(event.target.value);
+    },
+  });
+  const use = createElement(
+    "button",
+    {
+      type: "button",
+      "data-field": "chatGptUse",
+      disabled: !props.writable || props.authBusy || !props.available,
+      onClick: props.onUseChatGpt,
+    },
+    props.authBusy ? t("chatGptUsing") : t("chatGptUse"),
+  );
+  const output =
+    props.authOutput === null
+      ? null
+      : createElement("pre", { style: textareaStyle }, props.authOutput);
+  const message =
+    props.authMsg === null ? null : createElement("div", { className: "ocr-hint" }, props.authMsg);
+  return createElement(
+    "div",
+    { style: sectionStyle },
+    createElement("div", { style: titleStyle }, t("chatGptTitle")),
+    createElement("div", { style: hintStyle }, t("chatGptHint")),
+    check,
+    createElement("div", { style: hintStyle }, `${t("chatGptLoginHint")} ${props.loginCommand}`),
+    output,
+    createElement("div", { style: hintStyle }, t("chatGptModelLabel")),
+    model,
+    use,
+    message,
+  );
+}
+
+/** MCP 配置 + ChatGPT 登录态/切换：都写 OCR 自己的配置，放在设置卡下方。 */
+export function buildAdminSection(props: AdminSectionProps): ReactNode {
+  return createElement("div", { style: sectionStyle }, buildMcpAdmin(props), buildAuthAdmin(props));
 }
 
 /** providers 读面的两个落态口（对象化以受 max-params 约束）。 */
@@ -1552,7 +1682,7 @@ export async function runProbe(deps: ProbeActionDeps): Promise<void> {
 }
 
 /** 保存草稿所需的写入通道与落态口（touched → set/unset 的差集在函数内自算）。 */
-interface SaveDraftDeps {
+export interface SaveDraftDeps {
   t: Translate;
   value: Record<string, unknown>;
   touched: Record<string, unknown>;
@@ -1566,7 +1696,7 @@ interface SaveDraftDeps {
  *  受理位必须回来：`set` 回 `false` 表示宿主拒收或跳过了这次写入（值没落盘），
  *  这时不能清 touched、也不能报成功——否则用户看到「已保存」而配置原封未动。
  *  传输失败仍以 rejection 表达。 */
-async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
+export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   const { t, value, touched } = deps;
   const keys = diffTouched(touched, value);
   if (keys.length === 0) {
@@ -1574,23 +1704,40 @@ async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   }
   deps.setSettingsBusy(true);
   deps.setSaveError(null);
-  const ops = keys.map(async (field: string) => {
+  const ops = keys.map(async (field: string): Promise<boolean> => {
     const draft = touched[field];
     return deps.set(field, draft === undefined ? null : draft);
   });
-  try {
-    const settled = await Promise.all(ops);
-    deps.setSettingsBusy(false);
-    const refused = keys.filter((_field, index) => settled[index] !== true);
-    if (refused.length > 0) {
-      deps.setSaveError(t("saveRefused", { fields: refused.join(", ") }));
-      return;
+  // allSettled 而不是 all：`set` 逐个字段写，任一拒绝时其余可能仍在飞行。用 all 会在
+  // 第一个拒绝处进 catch 并立刻释放 busy——用户此时能再点保存，对已完成那些字段重复
+  // 写入，而且没人知道「哪些已经落盘」。等全部 settle 再统一判，并按结果只留失败字段
+  // 在 touched 上，重试只会重写真正没写进去的那些。
+  const settled = await Promise.allSettled(ops);
+  deps.setSettingsBusy(false);
+  const refused: string[] = [];
+  const failures: unknown[] = [];
+  for (const [index, field] of keys.entries()) {
+    const outcome = settled[index];
+    if (outcome !== undefined) {
+      if (outcome.status === "rejected") {
+        failures.push(outcome.reason);
+        refused.push(field);
+      } else if (!outcome.value) {
+        refused.push(field);
+      }
     }
-    deps.setTouched({});
-  } catch (error: unknown) {
-    deps.setSettingsBusy(false);
-    deps.setSaveError(`${t("saveFailed")}${errorSummary(error)}`);
   }
+  if (refused.length > 0) {
+    const kept: Record<string, unknown> = {};
+    for (const field of refused) {
+      kept[field] = touched[field];
+    }
+    deps.setTouched(kept);
+    const reason = failures.length > 0 ? `（${errorSummary(failures[0])}）` : "";
+    deps.setSaveError(`${t("saveRefused", { fields: refused.join(", ") })}${reason}`);
+    return;
+  }
+  deps.setTouched({});
 }
 
 /** 设置行的渲染值（touched 优先、快照兜底，再按各行自己的类型收口）。 */
@@ -1610,7 +1757,7 @@ function draftFieldsOf(
   const eff = (field: string, def: unknown): unknown =>
     field in touched ? touched[field] : (value[field] ?? def);
   return {
-    effortValue: eff("effort", "medium"),
+    effortValue: eff("effort", "auto"),
     languageValue: eff("language", "中文"),
     autoVerifyValue: eff("autoVerify", true),
     maxCommentsValue: numOf(eff("maxComments", 12), 12),
@@ -1656,12 +1803,127 @@ function buildProviderPanel(deps: OcrCardDeps): ReactNode {
   return createElement("div", { style: { padding: "2px 0" } }, providerSection, actionMsgNode);
 }
 
+type AdminState = Omit<AdminSectionProps, "t" | "writable">;
+
+/** 管理区的状态与动作（MCP 配置 + ChatGPT 登录态/切换）；OcrCard 只负责摆位置。 */
+function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState {
+  // 管理区：MCP 配置与 ChatGPT 登录态/切换。两者都直接写 OCR 自己的 config。
+  const [mcpJson, setMcpJson] = useState("{}");
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [mcpMsg, setMcpMsg] = useState<string | null>(null);
+  const [authOutput, setAuthOutput] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMsg, setAuthMsg] = useState<string | null>(null);
+  const [authModel, setAuthModel] = useState("");
+  const [loginCommand, setLoginCommand] = useState("ocr auth login --provider chatgpt");
+
+  const loadMcp = useCallback(async (): Promise<void> => {
+    if (reader === undefined) {
+      setMcpMsg(t("adminUnavailable"));
+      return;
+    }
+    try {
+      const reply = await reader.mcp();
+      if ("status" in reply) {
+        setMcpMsg(reply.error);
+      } else {
+        setMcpJson(reply.json);
+      }
+    } catch (error) {
+      setMcpMsg(`${t("mcpLoadFailed")}${String(error)}`);
+    }
+  }, [reader, t]);
+  useEffect(() => {
+    void loadMcp();
+  }, [loadMcp]);
+
+  async function saveMcp(): Promise<void> {
+    if (reader === undefined) {
+      setMcpMsg(t("adminUnavailable"));
+      return;
+    }
+    setMcpBusy(true);
+    setMcpMsg(null);
+    try {
+      const reply = await reader.saveMcp(mcpJson);
+      setMcpMsg("status" in reply ? reply.error : t("mcpSaved"));
+    } catch (error) {
+      setMcpMsg(String(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function checkAuth(): Promise<void> {
+    if (reader === undefined) {
+      setAuthMsg(t("adminUnavailable"));
+      return;
+    }
+    setAuthBusy(true);
+    setAuthMsg(null);
+    try {
+      const reply = await reader.auth();
+      if ("status" in reply) {
+        setAuthMsg(reply.error);
+      } else {
+        setAuthOutput(reply.output);
+        setLoginCommand(reply.loginCommand);
+        setAuthMsg(reply.ok ? null : t("requestFailed"));
+      }
+    } catch (error) {
+      setAuthMsg(String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function applyChatGpt(): Promise<void> {
+    if (reader === undefined) {
+      setAuthMsg(t("adminUnavailable"));
+      return;
+    }
+    setAuthBusy(true);
+    setAuthMsg(null);
+    try {
+      const reply = await reader.chatGpt(authModel);
+      setAuthMsg("status" in reply ? reply.error : t("chatGptSaved"));
+    } catch (error) {
+      setAuthMsg(String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+  return {
+    available: reader !== undefined,
+    mcpJson,
+    mcpBusy,
+    mcpMsg,
+    authOutput,
+    authBusy,
+    authMsg,
+    authModel,
+    loginCommand,
+    onMcpChange: setMcpJson,
+    onMcpSave: () => {
+      void saveMcp();
+    },
+    onAuthModelChange: setAuthModel,
+    onCheckAuth: () => {
+      void checkAuth();
+    },
+    onUseChatGpt: () => {
+      void applyChatGpt();
+    },
+  };
+}
+
 function OcrCard(props: CardSlotProps): ReactNode {
   const { t } = props;
   const snap = props.useCard((state) => state);
   const { value } = snap;
   const ready = snap.status === "ready";
   const writable = snap.writable && ready;
+  const adminState = useAdminPanel(props.reader, t);
 
   // Provider 数据（官方 Remote 读面，无 key 明文）。
   const [data, setData] = useState<ProvidersPayload | null>(null);
@@ -1669,7 +1931,6 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const [busy, setBusy] = useState<CardActionKind | null>(null);
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [probeMsg, setProbeMsg] = useState<{ ok: boolean; text: string } | null>(null);
-
   const refresh = useCallback(
     async (): Promise<ProvidersPayload | null> =>
       refreshProviders(props.reader, t, { setData, setFetchError }),
@@ -1769,6 +2030,7 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const providerPanel = buildProviderPanel(deps);
   const cliStatus = buildCliStatusRow(deps);
   const settingsSection = buildSettingsSection(deps, writable, setField);
+  const adminSection = buildAdminSection({ ...adminState, t, writable });
   // 头部两行先取成变量：嵌进 createElement 里再调 t() 会顶到 max-nested-calls 上限。
   const headTitle = t("cardTitle");
   const headDesc = t("cardDescription");
@@ -1778,6 +2040,7 @@ function OcrCard(props: CardSlotProps): ReactNode {
     cliStatus,
     providerPanel,
     settingsSection,
+    adminSection,
   );
 }
 
@@ -1877,8 +2140,10 @@ function apply(ctx: ClientCtx): void {
   // 返回的是**一个**回收全部 pairs 的 disposer（旧写法是两个 disposer 手工串起来）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "ocr-review-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
-  // 远程读面在 apply 期造一次：`$mount` 幂等（随卡片卸载自动撤），反复拉取只挂一次；
-  // 没有远程面的部署交 undefined，卡片照常渲染、数据面显示读不到。
+  // 远程读面在 apply 期造一次；`remote` 在读取器内部**每次读取现取**——网关晚于本
+  // 插件 apply 才 provide("remote") 的部署，首次成功读取就能接上；缺席的部署在读取时
+  // 抛可读错误，卡片照常渲染、数据面显示原因。`$mount` 幂等（随卡片卸载自动撤），
+  // 反复拉取只挂一次。
   const reader = createOcrReader(ctx);
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
@@ -1896,8 +2161,8 @@ function apply(ctx: ClientCtx): void {
           hooks: { card: store },
           set: (field: string, value: unknown): boolean | Promise<boolean> =>
             scope.set(field, value),
-          // 宿主读面（remote 的消费侧）：缺省不交这一位 = 当前部署没有远程面。
-          ...(reader === undefined ? {} : { reader }),
+          // 宿主读面（remote 的消费侧）。
+          reader,
         }),
       },
       OcrCard,
@@ -1958,5 +2223,5 @@ function apply(ctx: ClientCtx): void {
 export { OcrCard, inject, apply };
 
 declare global {
-  var ocrReviewCardApplied: boolean | undefined;
+  var ocrReviewCardApplied: boolean | symbol | undefined;
 }

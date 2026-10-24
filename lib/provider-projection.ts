@@ -44,33 +44,52 @@ export interface DshProvider {
  * 端点按 OpenAI 线协议打出去——select 成功、OCR 调不通。表外值透传，让
  * renderSelectedConfig 的白名单给出可读错误。
  */
-// Map 而非对象字面量：查表键来自用户可写的 settings 值，对象会继承 Object.prototype，
-// 于是 api="constructor" 取到 Object 这个构造函数、"__proto__" 取到 Object.prototype，
-// `?? api` 的原样透传兜底失效——protocol 被写成函数/对象，直接违反 `DshProvider.protocol
-// 的 string 声明，还会让 apply 侧的白名单错误文案里出现 "function toString() { [native
-// code] }"。Map.get 不查原型链，这两类键安全 miss 并落回「原样透传」这条正路。
+/** Map 而非对象字面量：查表键来自用户可写的 settings 值，对象会继承 Object.prototype，
+ *  于是 api="constructor" 取到 Object 这个构造函数、"__proto__" 取到 Object.prototype，
+ *  `?? api` 的原样透传兜底失效——protocol 被写成函数/对象，直接违反 `DshProvider.protocol
+ *  的 string 声明，还会让 apply 侧的白名单错误文案里出现 "function toString() { [native
+ *  code] }"。Map.get 不查原型链，这两类键安全 miss 并落回「原样透传」这条正路。
+ *  provider 名那一侧的同款防护见文件下方的 UNUSABLE_PROVIDER_NAMES。 */
 const OCR_PROTOCOL_BY_API: ReadonlyMap<string, string> = new Map([
   ["openai-completions", "openai"],
   ["openai-responses", "openai-responses"],
   ["anthropic-messages", "anthropic"],
 ]);
 
+/** 不能落进 config.json `custom_providers.<name>` 的 provider 名：`__proto__` 在普通对象
+ *  上是 setter（赋值被静默忽略、写入凭空丢失），`constructor` / `prototype` 是继承属性
+ *  名，与写侧的普通对象赋值组合都不是普通自有键。空名/全空白名单独由 trim 判据拦。 */
+const UNUSABLE_PROVIDER_NAMES: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+/** 1.13.3 的 `validateProviderName` 口径：点号分段不能为空或全空白。 */
+function isUsableProviderName(name: string): boolean {
+  if (UNUSABLE_PROVIDER_NAMES.has(name)) {
+    return false;
+  }
+  return name.split(".").every((segment) => segment.trim() !== "");
+}
+
 /** 对象/数组形态的 `api` 的透传标记：可读，但绝不会被误认成任何合法协议名。 */
 const API_UNREADABLE = "[unreadable]";
 
 /**
- * settings 里的 `api` 字段 → 协议查表用的键。
+ * settings 里的 `api` 字段 → 协议查表用的键；「未声明」以 null 表达。
  *
- * 三种形态必须分开，否则畸形声明会被静默降级成「能用的」配置：
- *   - 未声明（undefined / null）⇒ ""，交给 llm-pi-ai 的 openai-completions 兜底语义；
- *   - 字符串 ⇒ trim 后原样（表外值原样透传，由写侧白名单拒绝）；
+ * 四种形态必须分开，否则畸形声明会被静默降级成「能用的」配置：
+ *   - 未声明（undefined / null）⇒ null，交给 llm-pi-ai 的 openai-completions 兜底语义；
+ *   - 字符串 ⇒ trim 后原样，**含空串**（表外值原样透传，由写侧白名单拒绝——显式
+ *     `api: ""` 在上游同样不走 `??` 默认，兜底它等于把畸形声明改写成可用配置）；
  *   - 数字 / 布尔 ⇒ String()，同样落进「表外值」这条正路；
  *   - 对象 / 数组 ⇒ 固定标记。用 String(raw) 会走 Object.prototype.toString 得到
  *     "[object Object]"，那既无信息量又看着像协议名；显式标记更能说明「这里读不出来」。
  */
-function apiKeyOf(raw: unknown): string {
+function apiKeyOf(raw: unknown): string | null {
   if (raw === undefined || raw === null) {
-    return "";
+    return null;
   }
   if (typeof raw === "string") {
     return raw.trim();
@@ -97,7 +116,7 @@ function modelFromRaw(modelRaw: unknown): DshModel | null {
   return { id, name: name === "" ? id : name };
 }
 
-/** 原始 provider 对象 → DshProvider（缺 baseURL 视为无效，返回 null）。 */
+/** 原始 provider 对象 → DshProvider（缺 baseURL 或形状不合视为无效，返回 null）。 */
 function providerFromRaw(name: string, raw: unknown): DshProvider | null {
   if (!isRecord(raw)) {
     return null;
@@ -107,27 +126,36 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
     typeof entry["apiKeyEnv"] === "string" && entry["apiKeyEnv"].trim()
       ? entry["apiKeyEnv"].trim()
       : null;
-  // `api` 的「未声明」与「类型就不对」必须分开：前者按 llm-pi-ai 的
-  // `request.api ?? 'openai-completions'`（discovery.ts:300）兜底成 openai，后者
-  // （数字/对象/数组）字符串化后**原样透传**，让写侧白名单给出可读错误。此前两者都塌成
-  // ""，于是 `api: 123` 被静默降级成 OpenAI 线协议并写进 config.json ——
-  // 正是本文件批评过的「select 成功、OCR 调不通」。
+  // `api` 的「未声明」与「类型就不对 / 显式空串」必须分开：前者按 llm-pi-ai 的
+  // `request.api ?? 'openai-completions'`（discovery.ts:300）兜底成 openai；后两者
+  // 字符串化后**原样透传**，让写侧白名单给出可读错误。此前空串也被兜成 ""→openai，
+  // 显式写坏 `api: ""` 的 provider 会静默降级成 OpenAI 线协议——正是本文件批评过的
+  // 「select 成功、OCR 调不通」。
   const api = apiKeyOf(entry["api"]);
-  const protocol = api === "" ? "openai" : (OCR_PROTOCOL_BY_API.get(api) ?? api);
-  // baseURL 同样 trim：全空白会被写入配置而 OCR 调不通，且 check !baseURL 挡不住。
+  const protocol = api === null ? "openai" : (OCR_PROTOCOL_BY_API.get(api) ?? api);
+  // baseURL 同样 trim，且必须是 http/https URL："not a url"、"ftp://…"、"javascript:…"
+  // 这类形态此前能一路写进 config.json，故障延到 OCR 调用期才暴露。读侧宽容的落法
+  // 是整条丢弃（卡片照常打开，用户去 settings 修），不是替用户猜一个修正值。
   const baseURL = typeof entry["baseURL"] === "string" ? entry["baseURL"].trim() : "";
-  if (!baseURL) {
+  if (!baseURL || !/^https?:\/\//iu.test(baseURL)) {
     return null;
   }
-  const models = Array.isArray(entry["models"])
-    ? entry["models"].map(modelFromRaw).filter((model): model is DshModel => model !== null)
-    : [];
+  // 「models 未声明」（缺省/非数组，含显式空数组）与「声明了但每条都无效」必须分开：
+  // 后者若也透传成 models=[]，写侧对空 models 是「任意 model 放行」，model 白名单
+  // 就被畸形声明绕开。读侧对后者整条丢弃。
+  const modelsRaw = Array.isArray(entry["models"]) ? entry["models"] : [];
+  const models = modelsRaw
+    .map((model) => modelFromRaw(model))
+    .filter((model): model is DshModel => model !== null);
+  if (modelsRaw.length > 0 && models.length === 0) {
+    return null;
+  }
+  // displayName 与 id/name/baseURL 同一条 trim 口径：全空白是真值，会顶掉本可回退的
+  // provider 名，设置卡上渲染成空白项。
+  const displayName = typeof entry["displayName"] === "string" ? entry["displayName"].trim() : "";
   return {
     name,
-    displayName:
-      typeof entry["displayName"] === "string" && entry["displayName"]
-        ? entry["displayName"]
-        : name,
+    displayName: displayName === "" ? name : displayName,
     apiKeyEnv,
     protocol,
     baseURL,
@@ -149,11 +177,18 @@ export function providersFromSettingsValue(value: unknown): DshProvider[] {
   }
   const out: DshProvider[] = [];
   for (const [name, raw] of Object.entries(providers)) {
-    const parsed = providerFromRaw(name, raw);
+    // provider 名是写侧落 `custom_providers.<name>` 的键：空名/全空白名、原型链危险键
+    // 与 1.13.3 拒绝的空点号分段在投影层整条丢弃（写侧对普通对象赋值，
+    // "__proto__" 是 setter、写进去会凭空丢失）。
+    const usable = isUsableProviderName(name);
+    const parsed = usable ? providerFromRaw(name, raw) : null;
     if (parsed !== null) {
       out.push(parsed);
     }
   }
-  // 保持命名空间里的声明顺序稳定（Object.entries 已是插入序，无需再排）。
+  // 保持命名空间里的声明顺序稳定——对常规键成立；整数样键（"2"、"1"）例外，JS 引擎
+  // 按数值升序枚举它们、排在字符串键之前，与 settings 里的书写顺序可能不一致。若某个
+  // 下游取「首个 provider 当默认」，整数样命名可能选到声明顺序之外的那条；这是
+  // Object.entries 的枚举契约，不在投影层重排。
   return out;
 }

@@ -23,8 +23,14 @@ import type {
 } from "@deepseek-ai/dsh-typert-protocol";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
-import { OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
+import { OCR_BUNDLE_PACKAGE, OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
 import type {
+  OcrAuthReply,
+  OcrChatGptReply,
+  OcrChatGptRequest,
+  OcrMcpReply,
+  OcrMcpSaveReply,
+  OcrMcpSaveRequest,
   OcrMigrateReply,
   OcrProbeReply,
   OcrSelectReply,
@@ -36,8 +42,9 @@ import type {
  *  所以只能在挂载后按这个键去读，而不是提前 inject。 */
 const OCR_SERVICE_KEY = `remote.${OCR_REMOTE_NAMESPACE}`;
 
-/** 卡片所在 bundle 的包名（`$mount` 的 `package` 位与槽位键同源，见 client-entry.ts 的 BUNDLE_PKG）。 */
-const PACKAGE_NAME = "@jayyuen66/dsh-ocr-review";
+/** 卡片所在 bundle 的包名（`$mount` 的 `package` 位与槽位键同源；唯一定义在
+ *  lib/remote-shape.ts，client-entry.ts 的槽位键引的是同一个常量）。 */
+const PACKAGE_NAME = OCR_BUNDLE_PACKAGE;
 
 /** 选择请求的客户端 parser：两位都是必填串。 */
 const SELECT_CODEC: TypertCodec<OcrSelectRequest> = {
@@ -57,7 +64,35 @@ const SELECT_CODEC: TypertCodec<OcrSelectRequest> = {
   }),
 };
 
-/** 把宿主那五个方法挂到客户端远程面上的描述符（`id` 的形状照生成器：`<包>#<命名空间>/<方法>`）。
+/** MCP 保存请求：`json` 是必填串（原始 JSON 文本，由宿主校验）。 */
+const MCP_SAVE_CODEC: TypertCodec<OcrMcpSaveRequest> = {
+  mode: "strict",
+  typeSymbol: `${PACKAGE_NAME}#mcp-save-request`,
+  create: () => ({
+    parse(value: unknown): OcrMcpSaveRequest {
+      if (!isRecord(value) || typeof value["json"] !== "string") {
+        throw new TypeError("mcp save request requires a string json");
+      }
+      return { json: value["json"] };
+    },
+  }),
+};
+
+/** ChatGPT 选择请求：`model` 是必填串。 */
+const CHAT_GPT_CODEC: TypertCodec<OcrChatGptRequest> = {
+  mode: "strict",
+  typeSymbol: `${PACKAGE_NAME}#chatgpt-request`,
+  create: () => ({
+    parse(value: unknown): OcrChatGptRequest {
+      if (!isRecord(value) || typeof value["model"] !== "string") {
+        throw new TypeError("chatgpt request requires a string model");
+      }
+      return { model: value["model"] };
+    },
+  }),
+};
+
+/** 把宿主那九个方法挂到客户端远程面上的描述符（`id` 的形状照生成器：`<包>#<命名空间>/<方法>`）。
  *  导出它只为一件事：`test/remote.test.ts` 拿它与宿主侧 `remoteMethods()` 的标记对质
  *  —— 两侧分叉时卡片不会报错，只会"读不到"，所以那条比较必须在门禁里。 */
 export const OCR_DESCRIPTORS: readonly InvocationDescriptor[] = [
@@ -106,6 +141,42 @@ export const OCR_DESCRIPTORS: readonly InvocationDescriptor[] = [
     parameters: [],
     result: { mode: "src-json" },
   },
+  {
+    id: `${PACKAGE_NAME}#${OCR_REMOTE_NAMESPACE}/mcp`,
+    service: OCR_REMOTE_NAMESPACE,
+    namespace: OCR_REMOTE_NAMESPACE,
+    method: "mcp",
+    invocation: { kind: "direct" },
+    parameters: [],
+    result: { mode: "src-json" },
+  },
+  {
+    id: `${PACKAGE_NAME}#${OCR_REMOTE_NAMESPACE}/saveMcp`,
+    service: OCR_REMOTE_NAMESPACE,
+    namespace: OCR_REMOTE_NAMESPACE,
+    method: "saveMcp",
+    invocation: { kind: "direct" },
+    parameters: [{ name: "request", wire: "request", source: "json", codec: MCP_SAVE_CODEC }],
+    result: { mode: "src-json" },
+  },
+  {
+    id: `${PACKAGE_NAME}#${OCR_REMOTE_NAMESPACE}/auth`,
+    service: OCR_REMOTE_NAMESPACE,
+    namespace: OCR_REMOTE_NAMESPACE,
+    method: "auth",
+    invocation: { kind: "direct" },
+    parameters: [],
+    result: { mode: "src-json" },
+  },
+  {
+    id: `${PACKAGE_NAME}#${OCR_REMOTE_NAMESPACE}/chatGpt`,
+    service: OCR_REMOTE_NAMESPACE,
+    namespace: OCR_REMOTE_NAMESPACE,
+    method: "chatGpt",
+    invocation: { kind: "direct" },
+    parameters: [{ name: "request", wire: "request", source: "json", codec: CHAT_GPT_CODEC }],
+    result: { mode: "src-json" },
+  },
 ];
 
 /** 客户端上下文里本模块用到的那一位：**显式读取**一个可选服务（见文件头为什么不用 inject）。 */
@@ -128,6 +199,10 @@ interface OcrNamespace {
   migrate: () => Promise<RemoteResult<OcrMigrateReply>>;
   test: () => Promise<RemoteResult<OcrTestReply>>;
   probe: () => Promise<RemoteResult<OcrProbeReply>>;
+  mcp: () => Promise<RemoteResult<OcrMcpReply>>;
+  saveMcp: (request: OcrMcpSaveRequest) => Promise<RemoteResult<OcrMcpSaveReply>>;
+  auth: () => Promise<RemoteResult<OcrAuthReply>>;
+  chatGpt: (request: OcrChatGptRequest) => Promise<RemoteResult<OcrChatGptReply>>;
 }
 
 /**
@@ -140,6 +215,10 @@ export interface OcrReader {
   migrate: () => Promise<OcrMigrateReply>;
   test: () => Promise<OcrTestReply>;
   probe: () => Promise<OcrProbeReply>;
+  mcp: () => Promise<OcrMcpReply>;
+  saveMcp: (json: string) => Promise<OcrMcpSaveReply>;
+  auth: () => Promise<OcrAuthReply>;
+  chatGpt: (model: string) => Promise<OcrChatGptReply>;
 }
 
 /** 这个值能当远程面用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
@@ -153,7 +232,11 @@ const isOcrNamespace = (value: unknown): value is OcrNamespace =>
   typeof value["select"] === "function" &&
   typeof value["migrate"] === "function" &&
   typeof value["test"] === "function" &&
-  typeof value["probe"] === "function";
+  typeof value["probe"] === "function" &&
+  typeof value["mcp"] === "function" &&
+  typeof value["saveMcp"] === "function" &&
+  typeof value["auth"] === "function" &&
+  typeof value["chatGpt"] === "function";
 
 /** 网关回执 → 值；载体/网关失败抛（卡片那层按「请求失败」显示）。 */
 function unwrap<Value>(result: RemoteResult<Value>): Value {
@@ -164,16 +247,36 @@ function unwrap<Value>(result: RemoteResult<Value>): Value {
 }
 
 /**
- * 造出真正的读取器（挂载一次 + 每次读命名空间服务）。
+ * 造出真正的读取器。`remote` 不再是构造期快照：本插件与官方网关之间没有加载顺序
+ * 保证（本文件刻意不把 `remote` 写进 `inject`），网关可能在卡片注册之后才
+ * `provide("remote")`，所以**每次读取都现取**——缺席报可读错误，晚到也能被下一次
+ * 读取接上。挂载 promise 仍缓存（`$mount` 幂等），但拒绝态不缓存：失败后清空，
+ * 下一次读取重新挂载，没有「错一次就永远错」的路径。
  * @param ctx - 客户端上下文
- * @param remote - 已核过形状的远程面
  * @returns 读取器
  */
-function buildOcrReader(ctx: RemoteHost, remote: RemoteMounter): OcrReader {
+function buildOcrReader(ctx: RemoteHost): OcrReader {
   let mounted: Promise<unknown> | undefined;
+  const remoteOf = (): RemoteMounter => {
+    // strict 显式给 false：可选读取的语义钉在调用点，不依赖 cordis get 的默认值
+    //（默认值变了，缺 remote 的部署就该在这里拿到 undefined 而不是抛错）。
+    const remote = ctx.get?.("remote", false);
+    if (!isRemoteMounter(remote)) {
+      throw new Error("remote 未提供：当前部署没有远程读面（每次读取都会重新解析）");
+    }
+    return remote;
+  };
   const namespaceOf = async (): Promise<OcrNamespace> => {
+    const remote = remoteOf();
     mounted ??= remote.$mount({ package: PACKAGE_NAME, descriptors: OCR_DESCRIPTORS });
-    await mounted;
+    try {
+      await mounted;
+    } catch (error) {
+      // `??=` 缓存的是那枚已 settled 的 promise：失败不清空的话，同一读取器此后每次
+      // 读取都立刻以同一条错误失败，永远不会重试。
+      mounted = undefined;
+      throw error;
+    }
     const namespace = ctx.get?.(OCR_SERVICE_KEY, false);
     if (!isOcrNamespace(namespace)) {
       throw new Error(`${OCR_SERVICE_KEY} 未提供：宿主网关没有挂上这枚命名空间`);
@@ -201,22 +304,37 @@ function buildOcrReader(ctx: RemoteHost, remote: RemoteMounter): OcrReader {
       const ns = await namespaceOf();
       return unwrap(await ns.probe());
     },
+    async mcp(): Promise<OcrMcpReply> {
+      const ns = await namespaceOf();
+      return unwrap(await ns.mcp());
+    },
+    async saveMcp(json: string): Promise<OcrMcpSaveReply> {
+      const ns = await namespaceOf();
+      return unwrap(await ns.saveMcp({ json }));
+    },
+    async auth(): Promise<OcrAuthReply> {
+      const ns = await namespaceOf();
+      return unwrap(await ns.auth());
+    },
+    async chatGpt(model: string): Promise<OcrChatGptReply> {
+      const ns = await namespaceOf();
+      return unwrap(await ns.chatGpt({ model }));
+    },
   };
 }
 
 /**
- * 造一个「读/写宿主侧 OCR 配置」的读取器；**当前部署没有远程面时返回 `undefined`**
- * （卡片照常渲染，只是数据面显示读不到 —— 与 host 侧可选读面同一条口径）。
+ * 造一个「读/写宿主侧 OCR 配置」的读取器。**当前部署没有远程面时读取会抛**可读错误
+ * （卡片那层按「请求失败」显示原因）——remote 不在构造期做快照，网关晚于卡片注册
+ * `provide("remote")` 的部署在首次成功读取时就能接上，不存在「apply 期没有就永远
+ * 读不到」的路径。
  *
- * `$mount` 是**幂等**的（挂进本 fiber，随卡片卸载自动撤），所以这里缓存那枚 promise：
- * 同一次会话里反复拉取只挂一次。
+ * `$mount` 是**幂等**的（挂进本 fiber，随卡片卸载自动撤），所以缓存那枚 promise：
+ * 同一次会话里反复拉取只挂一次；拒绝态例外（见 buildOcrReader）。
  *
  * @param ctx - 客户端上下文（只用 `get` 一位）
- * @returns 读取器；没有远程面时 `undefined`
+ * @returns 读取器
  */
-export function createOcrReader(ctx: RemoteHost): OcrReader | undefined {
-  const remote = ctx.get?.("remote");
-  // 单 return（三元的另一支是 `undefined`）：`consistent-return` 不接受"早退 undefined + 晚退函数"
-  // 这种混合形状，而这里两种结果本来就是同一件事的两面。
-  return isRemoteMounter(remote) ? buildOcrReader(ctx, remote) : undefined;
+export function createOcrReader(ctx: RemoteHost): OcrReader {
+  return buildOcrReader(ctx);
 }

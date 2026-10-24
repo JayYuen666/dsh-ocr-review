@@ -2,13 +2,13 @@
 // 必须是 profile bundles 清单里的那一串 bundle 包名，而**取表单**仍用 cordis.patch.yml
 // 的裸条目 id。
 //
-// 为什么要在 node 工程里另开一个文件（test/client-card.test.ts 已有装配用例）：
-// 本包的两个 tsconfig 分工是 `tsconfig.json`（node，types:["node"]）跑 host/lib/test，
-// `tsconfig.client.json`（浏览器，types:[]）跑 src/** 与 client-card.test.ts。
+// 为什么要在 node 工程里另开一个文件（test/client/ 已有装配用例）：
+// 本包的 tsconfig 分工是 `tsconfig.json`（node，types:["node"]）跑 host/lib/test 与三份根
+// 配置，`tsconfig.client.json`（浏览器，types:[]）跑 src/** 与 test/client/**。
 // 要**解析** `~/.dsh/profiles/web/package.json` 就得用 node:fs/node:os，在 types:[] 的
 // 工程里连 `node:fs` 都解析不了；而槽 key 恰恰只能在能读文件的这一侧验。
-// 于是分工：本文件（node）钉住 key 的**值**从哪来，client-card.test.ts（浏览器）钉住
-// src 侧的结构与「不得退回裸条目 id」。形状照抄已定案的
+// 于是分工：本文件（node）钉住 key 的**值**从哪来，test/client/client-card.test.ts
+// （浏览器程序）钉住 src 侧的结构与「不得退回裸条目 id」。形状照抄已定案的
 // plugins/zvec-grep/test/build-client.test.ts 的 `profileBundleName()`。
 //
 // 证据（installed dsh 0.1.7，逐条复核）：
@@ -97,6 +97,16 @@ function patchEntryIds(): string[] {
   return [...patch.matchAll(/^\s*(?:-\s+)?id:\s*(?<id>\S+)\s*$/gmu)].map(
     (row) => row.groups?.["id"] ?? "",
   );
+}
+
+/**
+ * 本包 cordis.patch.yml 声明的 bundle 包名（`name:` 行）。这一行是 client 半加载的
+ * 隐含开关：client-modules 只扫裸包名条目的 dsh.client 声明，槽位也按它 keyed；
+ * 包改名而漏改它时没有报错，只有「插件没反应」。
+ */
+function patchEntryName(): string | undefined {
+  const patch = readFileSync(path.join(PKG_DIR, "cordis.patch.yml"), "utf8");
+  return /^\s*name:\s*["']?(?<name>[^"'\s]+)["']?\s*$/mu.exec(patch)?.groups?.["name"];
 }
 
 interface LoadedModuleDef {
@@ -309,6 +319,9 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
 
     const bareIds = patchEntryIds();
     assert.deepEqual(bareIds, ["ocr-review"], "cordis.patch.yml 只声明一行裸条目 id");
+    // name 行与 package.json 的 name 同源：它是 client 半加载的隐含开关，漏改的症状
+    // 是设置卡静默不渲染，所以必须在这里对质，不能靠上面的槽 key 断言间接盖住。
+    assert.equal(patchEntryName(), PKG_NAME, "cordis.patch.yml 的 name 与 package.json.name 同源");
     // 表单侧**不跟着槽 key 改**：0.1.7 起 settings 命名空间即条目 id，
     // installed dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当命名空间用。
     assert.deepEqual(trace.entryIds, bareIds, "只取本条目那张共享表单，且只取一次");

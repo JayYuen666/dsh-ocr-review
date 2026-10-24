@@ -132,7 +132,26 @@ export function readProviders(
       },
     };
   }
-  const hit = descriptors.find((descriptor) => descriptor.ns === PI_AI_NAMESPACE);
+  // `descriptors()` 是宿主门面方法：降级装配下可能给出 undefined，proxy 上读一次就抛。
+  // 它在 try 里取回来了，但 `.find` 与后面几次属性读取同样会抛——一律折进 source，
+  // 否则本函数「不抛」的契约就有缺口（apply/migrate 都依赖它）。
+  let hit: ProviderDescriptor | undefined;
+  try {
+    // 非数组不是「命名空间没装」而是「这次 describe 的形状坏了」：两者都投影成 []，
+    // 但原因不同——报成 namespace-unavailable 会让排查方向跑到「装没装 base bundle」上去。
+    if (!Array.isArray(descriptors)) {
+      throw new TypeError(`ctx.settings.describe() 没有给出数组（收到 ${typeof descriptors}）`);
+    }
+    hit = descriptors.find((descriptor) => descriptor.ns === PI_AI_NAMESPACE);
+  } catch (error) {
+    return {
+      providers: [],
+      source: {
+        status: SOURCE_SETTINGS_FAILED,
+        message: format(messages.sourceSettingsFailed, { message: errorText(error) }),
+      },
+    };
+  }
   if (hit === undefined) {
     return {
       providers: [],
@@ -142,11 +161,12 @@ export function readProviders(
       },
     };
   }
-  // 命名空间在、但取不到 providers 表 ⇒ 那是「配置形状坏了」，不是「一个 provider 都没配」。
-  // 两者都投影成 [] 却在 source 上分不开：卡片会显示一个空的 provider 选择器且没有任何
-  // 原因，而 apply 侧闸门放行后报的是 providerNotInList（「你没配这个 provider」），
-  // 把配置形状问题说成用户操作问题，排查方向直接跑偏。
-  if (!isRecord(fieldOf(hit.value, "providers"))) {
+  // providers 表的读取走 shared 的 fieldOf：读取抛错（敌意 getter / Proxy 陷阱）在那一层
+  // 已塌成「取不到」，所以这里不再有 try/catch——敌意键与「没配 providers」在本读口不可
+  // 区分，一律按 namespace-unavailable。仍然分得开的故障形态（describe 形状、descriptor
+  // 属性读取、投影阶段的条目读取）由各自的 try 折进 settings-failed，见上方三个分支。
+  const providersValue = fieldOf(hit.value, "providers");
+  if (!isRecord(providersValue)) {
     return {
       providers: [],
       source: {
@@ -199,7 +219,15 @@ export async function markKeyFlags(
       // GET /providers 的兜底（整张卡退化成 500 JSON），把其他 provider 已经探到的
       // configured 结果一起丢掉。降级成 false = 「此刻读不到」，与 host 侧
       // credentialConfigured 的 catch 口径一致。
-      const hasKey = await gateway.credentialConfigured(ref).catch(() => false);
+      // 用 try/catch 而不是 `.catch(...)`：`.catch` 只能接住 Promise 拒绝，`credentialConfigured`
+      // 若是同步抛（门面方法做参数校验/属性探测时很常见），异常在 `.catch` 挂上之前就冒出去了，
+      // 整个 Promise.all 拒绝——恰好与上面「单个 ref 探测失败不许连坐整张卡」相反。
+      let hasKey: boolean;
+      try {
+        hasKey = await gateway.credentialConfigured(ref);
+      } catch {
+        hasKey = false;
+      }
       return { ...providerCfg, hasKey };
     }),
   );

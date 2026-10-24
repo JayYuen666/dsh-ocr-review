@@ -7,10 +7,11 @@
 //      cordis.patch.yml），没有 `settings.register(ns, schema, { base })` 这一层；
 //      内置底座逐字段落成 schema 的 `.default()`，读本包设置一律 `config.<field>.get()`。
 //      本包自带卡片，故只登记一次页面策略 `{ auto: false }`，不让宿主再生成一份自动页。
-//   2. 注册 5 个模型工具：ocr_review（自驱 diff 审查）、ocr_scan（全文件扫描）、
-//      ocr_delegate_preview / ocr_delegate_rule（委托模式脚手架）、ocr_session（会话内复查）。
+//   2. 注册 7 个模型工具：ocr_review（自驱 diff 审查）、ocr_scan（全文件扫描）、
+//      ocr_delegate_preview / ocr_delegate_rule（委托模式脚手架）、ocr_session（会话内复查）、
+//      ocr_rules_check（规则解析诊断）、ocr_llm（LLM 配置只读诊断）。
 //   3. 设置卡的官方读面（Typert Remote，namespace `ocrReview`）：providers / select /
-//      migrate / test / probe 五个方法经宿主网关暴露给本 profile 的客户端。
+//      migrate / test / probe / mcp / saveMcp / auth / chatGpt 九个方法经宿主网关暴露给本 profile 的客户端。
 //   4. 注册 systemPrompt 路由段（order 1555，紧邻 zg 1550 之后；不与 lesson-loop 1560 撞车）。
 //
 // provider 与 key 的来源（全部走宿主官方通道，见 createGateway）：
@@ -139,7 +140,11 @@ import {
   buildDelegatePreviewCommand,
   buildDelegateRuleCommand,
   buildSessionCommand,
+  buildRulesCheckCommand,
+  buildLlmCommand,
   buildLlmTestCommand,
+  buildAuthStatusCommand,
+  CHATGPT_LOGIN_COMMAND,
   buildVersionCommand,
   parseOcrVersion,
   resolveOcrAvailability,
@@ -153,11 +158,20 @@ import type { OcrBinaryStatus, OcrInstallChannel, OcrInstallPreference } from ".
 import { clampEffort } from "./lib/argv-guard.ts";
 import {
   parseReviewOutput,
+  parsePreviewOutput,
+  parseSessionCompare,
   parseDelegatePreview,
   parseDelegateRules,
   summarizeReview,
 } from "./lib/parse.ts";
 import type { ReviewSummaryView } from "./lib/parse.ts";
+import {
+  REVIEW_OUTPUT_SCHEMA,
+  PREVIEW_OUTPUT_SCHEMA,
+  RULES_OUTPUT_SCHEMA,
+  SESSION_OUTPUT_SCHEMA,
+  TEXT_OUTPUT_SCHEMA,
+} from "./lib/tool-schemas.ts";
 import { ROUTING_NAME, ROUTING_ORDER } from "./lib/routing.ts";
 import {
   providersForCard,
@@ -170,12 +184,19 @@ import {
 import type { EndpointVerify } from "./lib/ocr-config.ts";
 import { OCR_REMOTE_NAMESPACE } from "./lib/remote-shape.ts";
 import type {
+  OcrAuthReply,
+  OcrChatGptReply,
+  OcrChatGptRequest,
+  OcrMcpReply,
+  OcrMcpSaveReply,
+  OcrMcpSaveRequest,
   OcrMigrateReply,
   OcrProbeReply,
   OcrSelectReply,
   OcrSelectRequest,
   OcrTestReply,
 } from "./lib/remote-shape.ts";
+import { applyChatGptModel, readMcpServers, saveMcpServers } from "./lib/mcp-config.ts";
 // provider 清单的来源层与外部 config.json 的落点层各自成模块（判据分家，见那两个文件的头
 // 注释）：命名空间常量在 lib/provider-source.ts，脚本落点在 lib/config-store.ts。
 import { PI_AI_NAMESPACE } from "./lib/provider-source.ts";
@@ -599,297 +620,6 @@ function textBlock(value: unknown): RenderedContent {
 // 不再把结构化对象 stringify 进 `{ text }`（双重编码会让 PTC 的
 // `await tools.<name>(args)` 拿到字符串化的 JSON 而非对象），human explanation 留在
 // render。schema 与 execute 返回逐分支对齐；解析失败分支的诚实值是一段说明字符串，
-// 故 review/scan/preview/rule 的根是 oneOf（官方子集表达「多选一」的唯一关键字，
-// exact-one 语义），session 的诚实值本来就是对象。
-// 可空字段注意：子集是单类型，`string | null` 用 oneOf 表达；直接写 `type:"string"`
-// 会在宿主校验里把 null 判成违规。
-
-/** 可空 string 字段的 schema 片段（官方子集单类型，null 分支用 oneOf 表达）。 */
-const NULLABLE_STRING = {
-  oneOf: [{ type: "string" }, { type: "null" }],
-} satisfies JsonSchemaNode;
-
-/** ocr_review / ocr_scan 的 wait=false 回执（startBackground 的返回对象）。 */
-const BACKGROUND_RECEIPT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["started", "mode", "tool", "repo", "processStatus", "jobId", "polling"],
-  properties: {
-    started: { type: "boolean", const: true },
-    mode: { type: "string", const: "background" },
-    tool: { type: "string" },
-    repo: { type: "string" },
-    // ShellProcessStatus（dsh-shell）：注册表收尾后进程的落定态只有这三种。
-    processStatus: { type: "string", enum: ["running", "completed", "killed"] },
-    // 官方作业 id（ctx.jobs 发号，形如 `ocr-review-<16 位 hex>`）。这是后台评审**一定有结果**
-    // 的句柄：`job_output` 按 id 读得到增量 stdout/stderr 与最终结局；而 polling 里
-    // 那条 `ocr_session(action=list)` 路线依赖会话已落盘且 --repo 能对上，启动早期
-    // 这两件事都可能还不成立，于是模型手里就只剩一个查不出东西的 running 回执。
-    jobId: { type: "string" },
-    polling: { type: "string" },
-  },
-} satisfies JsonSchemaNode;
-
-/** summarizeReview(...) 的对象形状（lib/parse.ts 的 ReviewSummaryView，逐字段对齐）。 */
-const REVIEW_SUMMARY_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "status",
-    "skipped",
-    "message",
-    "summary",
-    "budgetExceeded",
-    "sessionId",
-    "aggregation",
-    "totalCommentCount",
-    "droppedCount",
-    "invalidCommentCount",
-    "topComments",
-    "warnings",
-    "toolCalls",
-    "coverage",
-    "hint",
-  ],
-  properties: {
-    // summarizeReview 只在 parseReviewOutput ok=true 时被调用 ⇒ status 落在白名单内。
-    // partial 是 manifest 终态之一（manifest.go:167，exit 0），部分文件失败但整体有覆盖。
-    status: {
-      type: "string",
-      enum: [
-        "success",
-        "complete",
-        "partial",
-        "completed_with_warnings",
-        "completed_with_errors",
-        "skipped",
-      ],
-    },
-    skipped: { type: "boolean" },
-    message: NULLABLE_STRING,
-    summary: {
-      oneOf: [
-        { type: "null" },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "filesReviewed",
-            "comments",
-            "totalTokens",
-            "inputTokens",
-            "outputTokens",
-            "elapsed",
-          ],
-          properties: {
-            // num() 收「数字字符串」，可能落成小数 ⇒ 用 number 不用 integer。
-            filesReviewed: { type: "number" },
-            comments: { type: "number" },
-            totalTokens: { type: "number" },
-            inputTokens: { type: "number" },
-            outputTokens: { type: "number" },
-            elapsed: { type: "string" },
-          },
-        },
-      ],
-    },
-    // 被 token 预算截断过：status 只写 partial，说不出「是预算花完才收的工」。
-    budgetExceeded: { type: "boolean" },
-    sessionId: NULLABLE_STRING,
-    aggregation: {
-      type: "object",
-      additionalProperties: false,
-      required: ["total", "bySeverity", "byCategory", "unknownSeverityCount"],
-      properties: {
-        total: { type: "integer" },
-        // 未知等级（OCR 自造 blocker / 严重 / 带空白的 "critical "）一律按 medium 归一，
-        // 降级必须发生但不该无痕：这个数让契约异常在聚合里看得见，而不是悄悄混进 medium。
-        unknownSeverityCount: { type: "integer" },
-        bySeverity: {
-          type: "object",
-          additionalProperties: false,
-          required: ["critical", "high", "medium", "low"],
-          properties: {
-            critical: { type: "integer" },
-            high: { type: "integer" },
-            medium: { type: "integer" },
-            low: { type: "integer" },
-          },
-        },
-        // Record<string, number>：键开放，而官方子集的 additionalProperties 只收布尔
-        // ⇒ 开放映射只能声明成无约束对象。
-        byCategory: { type: "object" },
-      },
-    },
-    totalCommentCount: { type: "integer" },
-    droppedCount: { type: "integer" },
-    invalidCommentCount: { type: "integer" },
-    topComments: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["location", "severity", "category", "content", "suggestion"],
-        properties: {
-          location: { type: "string" },
-          severity: { type: "string" },
-          category: { type: "string" },
-          content: { type: "string" },
-          suggestion: NULLABLE_STRING,
-        },
-      },
-    },
-    warnings: { type: "array", items: { type: "string" } },
-    // LLM 工具调用统计。`--audience agent` 下 OCR 把进度行写进 io.Discard，
-    // "No tool calls parsed" 一类文本永远不会出现在输出里，这个字段是模型侧
-    // 「是模型不会调工具，而不是代码没问题」的唯一可见口径。
-    toolCalls: {
-      oneOf: [
-        { type: "null" },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["total", "failure", "failures"],
-          properties: {
-            total: { type: "integer" },
-            failure: { type: "integer" },
-            failures: { type: "array", items: { type: "string" } },
-          },
-        },
-      ],
-    },
-    // 运行覆盖度（manifest 的五个互斥集合大小 + 失败条目明细）。带 manifest 时 CLI
-    // 把子任务失败从 warnings 里摘掉、只由 coverage.failed 承载，两处缺一处就有一半
-    // 失败看不见，所以这枚字段与 warnings 必须同时在。
-    coverage: {
-      oneOf: [
-        { type: "null" },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["selected", "completed", "reused", "failed", "waived", "failedItems"],
-          properties: {
-            selected: { type: "integer" },
-            completed: { type: "integer" },
-            reused: { type: "integer" },
-            failed: { type: "integer" },
-            waived: { type: "integer" },
-            failedItems: { type: "array", items: { type: "string" } },
-          },
-        },
-      ],
-    },
-    hint: { type: "string" },
-  },
-} satisfies JsonSchemaNode;
-
-/** ocr_review / ocr_scan 的输出：wait=false = 后台回执对象；前台成功 = 摘要对象；
- *  前台解析失败 = 一段诚实的说明字符串。三者恰一（required 逐字段声明保证两个
- *  对象分支互斥）。 */
-const REVIEW_OUTPUT_SCHEMA = {
-  oneOf: [BACKGROUND_RECEIPT_SCHEMA, REVIEW_SUMMARY_SCHEMA, { type: "string" }],
-} satisfies JsonSchemaNode;
-
-/** ocr_delegate_preview：成功 = 清单对象；解析失败 = 说明字符串。 */
-const PREVIEW_OUTPUT_SCHEMA = {
-  oneOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "mode",
-        "repository",
-        "mergeBase",
-        "reviewableCount",
-        "insertions",
-        "deletions",
-        "reviewableFiles",
-        "excludedFiles",
-        "hint",
-      ],
-      properties: {
-        mode: { type: "string" },
-        repository: { type: "string" },
-        // OCR 端 merge_base 带 omitempty（delegate_cmd.go:263）：缺席落 null。
-        mergeBase: NULLABLE_STRING,
-        reviewableCount: { type: "integer" },
-        // 计数来自 num()（收「数字字符串」）⇒ 用 number 不用 integer。
-        insertions: { type: "number" },
-        deletions: { type: "number" },
-        reviewableFiles: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["path", "status", "insertions", "deletions"],
-            properties: {
-              path: { type: "string" },
-              status: { type: "string" },
-              insertions: { type: "number" },
-              deletions: { type: "number" },
-            },
-          },
-        },
-        excludedFiles: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["path", "reason"],
-            properties: {
-              path: { type: "string" },
-              reason: { type: "string" },
-            },
-          },
-        },
-        hint: { type: "string" },
-      },
-    },
-    { type: "string" },
-  ],
-} satisfies JsonSchemaNode;
-
-/** ocr_delegate_rule：成功 = 分组对象；解析失败 = 说明字符串。 */
-const RULES_OUTPUT_SCHEMA = {
-  oneOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["groupCount", "groups", "hint"],
-      properties: {
-        groupCount: { type: "integer" },
-        groups: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["source", "pattern", "files", "rule"],
-            properties: {
-              source: { type: "string" },
-              pattern: { type: "string" },
-              files: { type: "array", items: { type: "string" } },
-              rule: { type: "string" },
-            },
-          },
-        },
-        hint: { type: "string" },
-      },
-    },
-    { type: "string" },
-  ],
-} satisfies JsonSchemaNode;
-
-/** ocr_session：sessionOutput 本身就是一手透传的字符串（诚实的值），外层仍是对象
- *  好让 hint 有处安放。 */
-const SESSION_OUTPUT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["sessionOutput", "hint"],
-  properties: {
-    sessionOutput: { type: "string" },
-    hint: { type: "string" },
-  },
-} satisfies JsonSchemaNode;
 
 // ── shell 执行与错误映射 ────────────────────────────────────────────────────
 
@@ -911,7 +641,7 @@ const SESSION_OUTPUT_SCHEMA = {
  * 路径、没有自定义 HOME、没有目录级豁免；而 `SandboxMode` 的取值只有
  * `read-only | workspace-write | danger-full-access` 三档，中间那一档的可写根就是
  * `workspaceRoot` 一枚。两处声明都取自本包实际解析到的那版（dsh-sandbox-policy 与
- * dsh-sandbox 的 0.2.1-rc.2，`lib/types/index.d.ts`）。
+ * dsh-sandbox 的 0.2.1-rc.3，`lib/types/index.d.ts`）。
  * 可选的收紧路径只有「改 ocr 自己的状态落点」或「等上游加字段」，两者都不是本包能在
  * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
  * 文件系统写权限，不是宿主其它能力；且 ocr 读什么、写什么仍由上面那条 argv 闸与
@@ -1227,9 +957,9 @@ async function runCollect(
 // 引用背后的类型由 schema 保证，但**不保证它是唯一写入者**（profile 补丁里的裸 YAML
 // 手改同样进得来），故下面每个读数仍按 unknown 复核形态再落回安全默认。
 
-function readEffort(config: Config): "low" | "medium" | "high" {
+function readEffort(config: Config): "auto" | "low" | "medium" | "high" {
   const raw: unknown = config.effort.get();
-  return raw === "low" || raw === "high" ? raw : "medium";
+  return raw === "auto" || raw === "low" || raw === "high" ? raw : "medium";
 }
 
 export function readLanguage(config: Config): string | undefined {
@@ -1480,8 +1210,8 @@ function tuningParams(
  *  生效，以普通值形态交进来（官方 config.md:78-92 的判据是「行 config 能否不改代码改值」，
  *  不是「能不能在页面上改」）。 */
 export interface Config {
-  /** 评审强度（透传 OCR `--effort`）；工具入参可逐次覆盖。 */
-  effort: Volatile<"low" | "medium" | "high">;
+  /** 评审强度（透传 OCR `--effort`）；auto = 跟随 OCR 自己的配置。工具入参可逐次覆盖。 */
+  effort: Volatile<"auto" | "low" | "medium" | "high">;
   /** OCR 输出语言（透传外部 CLI 的 `language`）。 */
   language: Volatile<"中文" | "English">;
   /** select 应用后是否顺手跑一次 `ocr llm test`。 */
@@ -1526,7 +1256,7 @@ export interface Config {
  *  值名退避为 configSchema：避免与同名 interface Config 触发 no-redeclare；
  *  外部仍以 `Config` 名导入（export as），公开 API 不变。 */
 const configSchema = Schema.object({
-  effort: Schema.union(["low", "medium", "high"]).default("medium").volatile(),
+  effort: Schema.union(["auto", "low", "medium", "high"]).default("auto").volatile(),
   language: Schema.union(["中文", "English"]).default("中文").volatile(),
   autoVerify: Schema.boolean().default(true).volatile(),
   maxComments: Schema.natural().default(MAX_COMMENTS_DEFAULT).volatile(),
@@ -1574,7 +1304,7 @@ function pluginPaths(config: Config, messages: OcrReviewMessages): OcrPaths {
 /**
  * ocr 子进程的 HOME 重定向值（工具执行侧专用，**不抛错**）：设置项命中
  * `<X>/.opencodereview/config.json` 布局 → X；未设置/坏设置 → undefined。工具不
- * 走 pluginPaths（那会在坏设置下把五个工具一并拖死），坏设置的错误由端点侧的
+ * 走 pluginPaths（那会在坏设置下把七个工具一并拖死），坏设置的错误由端点侧的
  * resolveOcrConfigPath 报给卡片——「工具与设置照常可用」的口径不变。
  */
 function ocrHome(config: Config): string | undefined {
@@ -1588,7 +1318,7 @@ function ocrHome(config: Config): string | undefined {
  * 为什么必须在这一层而不是启动时：config.json 里的脚本路径是**写那一刻**的插件安装
  * 目录，而插件会被重装、换 profile（desktop / browser / 任意自定义名）、换发布形态。
  * 目录一变那条命令就悬空，ocr 侧报的是「resolve LLM endpoint 失败」，与真因毫无
- * 关系——五个工具一次性全挂，而配置文件里没有任何线索指向「本包被挪了地方」。
+ * 关系——七个工具一次性全挂，而配置文件里没有任何线索指向「本包被挪了地方」。
  * 当前路径一律取自 PLUGIN_DIR（import.meta.dirname），与 profile 命名
  * 无关，故 desktop / browser / 自定义名走的是同一条路径。
  *
@@ -1641,7 +1371,7 @@ function probeFailureReason(
  *    **全局安装**（`scripts/update.js` 见到更新版本就 spawnSync `npm i -g <pkg>@<latest>`，
  *    默认 18 分钟冷却一次）。状态读侧不该有写侧副作用，所以这条不受 `ocrNoAutoUpdate`
  *    那个部署开关影响，恒定带上。
- *  - HOME 与五个工具走同一个重定向口。launcher 那句「自动更新没成功，请手工执行」的
+ *  - HOME 与七个工具走同一个重定向口。launcher 那句「自动更新没成功，请手工执行」的
  *    提示写在 `$HOME/.opencodereview/` 下，不带重定向就会去读另一个世界的状态，
  *    卡片报的与评审实际吃到的就不是同一份。
  * @param host 宿主服务面
@@ -1777,7 +1507,7 @@ function withCliVersionNote(
 }
 
 /** 运行 ocr llm test 校验当前配置（select 后自动验证 / 手动测试共用）。
- *  命令词与五个工具同一解析源（buildLlmTestCommand 走 ocrCommand()：卡片验的那一份与评审
+ *  命令词与七个工具同一解析源（buildLlmTestCommand 走 ocrCommand()：卡片验的那一份与评审
  *  吃的那一份必须同一个二进制），HOME 随 ocrConfigPath 重定向。墙钟与输出上限都是 entry
  *  config 字段（非 volatile，改值随重启生效）。 */
 async function runLlmTest(host: HostCtx, config: Config): Promise<{ ok: boolean; output: string }> {
@@ -1794,9 +1524,13 @@ async function runLlmTest(host: HostCtx, config: Config): Promise<{ ok: boolean;
   return { ok: exitCode === 0, output };
 }
 
-/** effort 入参闸：undefined/null → 设置卡默认；字符串 → 白名单钳制（未知值回落
- *  medium，与 --format 同一纪律）；其余类型抛错——静默回落会改变审查深度。 */
-function effortOf(value: unknown, config: Config, messages: OcrReviewMessages): string {
+/** effort 入参闸：undefined/null → 设置卡默认（auto 表示跟随 OCR 配置）；字符串 →
+ *  白名单钳制（未知值回落 auto，与 --format 同一纪律）；其余类型抛错——静默回落会改变审查深度。 */
+function effortOf(
+  value: unknown,
+  config: Config,
+  messages: OcrReviewMessages,
+): "auto" | "low" | "medium" | "high" {
   if (value === undefined || value === null) {
     return readEffort(config);
   }
@@ -1823,6 +1557,24 @@ function waitOf(value: unknown, messages: OcrReviewMessages): boolean {
   }
   if (typeof value !== "boolean") {
     throw new TypeError(format(messages.waitMustBeBoolean, { received: describeValue(value) }));
+  }
+  return value;
+}
+
+/** session action 的只读归一：错类型交给 builder 的消息表闸。 */
+function actionOf(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+/** preview 入参闸：缺省 false；非布尔抛错。 */
+function previewOf(value: unknown, messages: OcrReviewMessages): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value !== "boolean") {
+    throw new TypeError(
+      format(messages.boolMustBeBoolean, { name: "preview", received: describeValue(value) }),
+    );
   }
   return value;
 }
@@ -2004,7 +1756,7 @@ interface ProbeEndpointDeps {
   config: Config;
   host: HostCtx;
   messages: () => OcrReviewMessages;
-  /** 外部 CLI 可用性的现读口（与五个工具同一个）：换版命令要按那份候选的真实来源说。 */
+  /** 外部 CLI 可用性的现读口（与七个工具同一个）：换版命令要按那份候选的真实来源说。 */
   availability: OcrAvailabilityProbe;
   /** 实测版本的落态口：检测一次就覆盖装载期那一次，卡片与工具回执从此读同一份。 */
   versionSink: { value: string | null };
@@ -2050,7 +1802,7 @@ async function probeReply(deps: ProbeEndpointDeps): Promise<OcrProbeReply> {
 interface EndpointExtras {
   /** 装载期端点自检结果的现读口（apply 的闭包变量，见 probeEndpointAtApply）。 */
   readonly verifyOf: () => EndpointVerify | null;
-  /** 外部 CLI 可用性的现读口（与五个工具同一个），设置页据此显示装没装。 */
+  /** 外部 CLI 可用性的现读口（与七个工具同一个），设置页据此显示装没装。 */
   readonly availability: OcrAvailabilityProbe;
   /** 实测版本的落态口（本包只有跑过 `ocr version` 才有值：装载期自检或人按下「检测」）。
    *  给对象而不是给读口，是因为 POST probe 这一侧要往里写。 */
@@ -2120,6 +1872,66 @@ async function testReply(deps: SelectEndpointDeps): Promise<OcrTestReply> {
   }
 }
 
+async function mcpReply(deps: SelectEndpointDeps): Promise<OcrMcpReply> {
+  const msgs = deps.messages();
+  try {
+    const result = await readMcpServers(pluginPaths(deps.config, msgs).ocrConfigJson, msgs);
+    return result.ok
+      ? { ok: true, json: result.json }
+      : { ok: false, error: result.error, status: 400 };
+  } catch (error) {
+    return { ok: false, error: errorText(error), status: 500 };
+  }
+}
+
+async function saveMcpReply(json: unknown, deps: SelectEndpointDeps): Promise<OcrMcpSaveReply> {
+  const msgs = deps.messages();
+  if (typeof json !== "string") {
+    return {
+      ok: false,
+      error: format(msgs.mustBeString, { name: "json", received: describeValue(json) }),
+      status: 400,
+    };
+  }
+  const result = await saveMcpServers(pluginPaths(deps.config, msgs).ocrConfigJson, json, msgs);
+  return result.ok
+    ? { ok: true, count: result.count }
+    : { ok: false, error: result.error, status: 400 };
+}
+
+async function authReply(deps: SelectEndpointDeps): Promise<OcrAuthReply> {
+  try {
+    const { exitCode, output } = await runCollect(
+      deps.host,
+      withHomeEnv(buildAuthStatusCommand(), ocrHome(deps.config)),
+      process.env["HOME"] ?? "/",
+      {
+        timeoutMs: deps.config.llmTestTimeoutMs,
+        stdoutMaxBytes: deps.config.stdoutMaxBytes,
+        env: ocrEnv(deps.config),
+      },
+    );
+    return { ok: exitCode === 0, output, loginCommand: CHATGPT_LOGIN_COMMAND };
+  } catch (error) {
+    return { ok: false, error: errorText(error), status: 400 };
+  }
+}
+
+async function chatGptReply(model: unknown, deps: SelectEndpointDeps): Promise<OcrChatGptReply> {
+  const msgs = deps.messages();
+  if (typeof model !== "string") {
+    return {
+      ok: false,
+      error: format(msgs.mustBeString, { name: "model", received: describeValue(model) }),
+      status: 400,
+    };
+  }
+  const result = await applyChatGptModel(pluginPaths(deps.config, msgs).ocrConfigJson, model, msgs);
+  return result.ok
+    ? { ok: true, model: model.trim() }
+    : { ok: false, error: result.error, status: 400 };
+}
+
 /** 卡片读面（官方 Typert Remote）的全部依赖。 */
 export interface OcrReviewRemoteDeps {
   host: HostCtx;
@@ -2131,12 +1943,12 @@ export interface OcrReviewRemoteDeps {
 }
 
 /**
- * 设置卡的五条读/写方法（providers / select / migrate / test / probe）。
+ * 设置卡的九条读/写方法（providers / select / migrate / test / probe / mcp / saveMcp / auth / chatGpt）。
  *
  * ⚠ 服务在**构造时**注册（cordis `Service` 的契约：`ctx.reflect.provide`，随所属 fiber
  * 卸载自动撤），所以调用方拿实例没有任何用处——装入口 `installOcrRemote` 说明了这一点。
- * 五个方法都不依赖可选宿主服务（gateway 与取用口都由 apply 交进来），故它跟着 apply
- * 无条件上线：宿主没有 web 层（TUI）时这五条照样在。
+ * 九个方法都不依赖可选宿主服务（gateway 与取用口都由 apply 交进来），故它跟着 apply
+ * 无条件上线：宿主没有 web 层（TUI）时这九条照样在。
  */
 export class OcrReviewRemoteService extends TypertRemoteService {
   private readonly deps: OcrReviewRemoteDeps;
@@ -2180,6 +1992,27 @@ export class OcrReviewRemoteService extends TypertRemoteService {
       versionSink: this.deps.extras.versionSink,
     });
   }
+
+  /** 读当前 `mcp_servers`（只回这一支，不带其他配置/keys）。 */
+  public async mcp(): Promise<OcrMcpReply> {
+    return mcpReply(this.deps);
+  }
+
+  /** 校验并写入 `mcp_servers`；其他配置原样保留。 */
+  public async saveMcp(request: OcrMcpSaveRequest): Promise<OcrMcpSaveReply> {
+    const json = isRecord(request) ? request.json : undefined;
+    return saveMcpReply(json, this.deps);
+  }
+
+  /** 只读查询 ChatGPT 登录态；登录命令原样带回给卡片显示。 */
+  public async auth(): Promise<OcrAuthReply> {
+    return authReply(this.deps);
+  }
+
+  /** 切到 ChatGPT provider 并写模型；key 由 OCR 的 auth 凭据库管，不写明文。 */
+  public async chatGpt(request: OcrChatGptRequest): Promise<OcrChatGptReply> {
+    return chatGptReply(isRecord(request) ? request.model : undefined, this.deps);
+  }
 }
 
 /**
@@ -2210,6 +2043,10 @@ markRemote(OcrReviewRemoteService.prototype, "select");
 markRemote(OcrReviewRemoteService.prototype, "migrate");
 markRemote(OcrReviewRemoteService.prototype, "test");
 markRemote(OcrReviewRemoteService.prototype, "probe");
+markRemote(OcrReviewRemoteService.prototype, "mcp");
+markRemote(OcrReviewRemoteService.prototype, "saveMcp");
+markRemote(OcrReviewRemoteService.prototype, "auth");
+markRemote(OcrReviewRemoteService.prototype, "chatGpt");
 
 /**
  * 把读面装到这个上下文上（构造即注册，见类文档；host 侧唯一该调的口）。
@@ -2271,8 +2108,91 @@ export function assertOcrPresent(
   }
 }
 
-// ── 5 个工具各自的注册函数（apply 只做编排，否则单个函数会长过
+// ── 7 个工具各自的注册函数（apply 只做编排，否则单个函数会长过
 //    max-lines-per-function 上限）────────────────────────────────────────────
+
+interface PreviewRun {
+  host: HostCtx;
+  config: Config;
+  args: Record<string, unknown>;
+  repo: string;
+  signal: AbortSignal;
+  messages: OcrReviewMessages;
+}
+
+/** review 的预览支路：零 LLM、前台、临时 --output；抽出来只为把注册函数压回行数上限。 */
+async function runReviewPreview(run: PreviewRun): Promise<unknown> {
+  const { host, config, args, repo, signal, messages } = run;
+  if (args["wait"] !== undefined && args["wait"] !== null && !waitOf(args["wait"], messages)) {
+    throw new Error(messages.previewNeedsForeground);
+  }
+  const tmp = mkdtempSync(path.join(tmpdir(), "ocr-review-preview-"));
+  const outPath = path.join(tmp, "preview.json");
+  try {
+    const { command, workdir } = buildReviewCommand(
+      { ...args, repo, preview: true },
+      outPath,
+      messages,
+    );
+    await runForeground(
+      host,
+      withHomeEnv(command, ocrHome(config)),
+      workdir,
+      tuningOf(config),
+      signal,
+    );
+    const text = readOutFile(outPath, messages);
+    const parsed = parsePreviewOutput(text);
+    if (!parsed.ok) {
+      return format(messages.parseFailedWithReason, {
+        tool: "ocr review --preview",
+        message: messages.previewParseFailed,
+        limit: String(RAW_ECHO_LIMIT),
+        raw: echoRaw(text, RAW_ECHO_LIMIT),
+      });
+    }
+    return { ...parsed.view, hint: messages.filePreviewHint };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** scan 的预览支路（与 review 同形，只是不归一化 git 顶层）。 */
+async function runScanPreview(run: PreviewRun): Promise<unknown> {
+  const { host, config, args, repo, signal, messages } = run;
+  if (args["wait"] !== undefined && args["wait"] !== null && !waitOf(args["wait"], messages)) {
+    throw new Error(messages.previewNeedsForeground);
+  }
+  const tmp = mkdtempSync(path.join(tmpdir(), "ocr-scan-preview-"));
+  const outPath = path.join(tmp, "preview.json");
+  try {
+    const { command, workdir } = buildScanCommand(
+      { ...args, repo, preview: true },
+      outPath,
+      messages,
+    );
+    await runForeground(
+      host,
+      withHomeEnv(command, ocrHome(config)),
+      workdir,
+      tuningOf(config),
+      signal,
+    );
+    const text = readOutFile(outPath, messages);
+    const parsed = parsePreviewOutput(text);
+    if (!parsed.ok) {
+      return format(messages.parseFailedWithReason, {
+        tool: "ocr scan --preview",
+        message: messages.previewParseFailed,
+        limit: String(RAW_ECHO_LIMIT),
+        raw: echoRaw(text, RAW_ECHO_LIMIT),
+      });
+    }
+    return { ...parsed.view, hint: messages.filePreviewHint };
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 function registerReviewTool(
   host: HostCtx,
@@ -2316,6 +2236,11 @@ function registerReviewTool(
         provider: { type: "string", description: msgs.paramProvider },
         model: { type: "string", description: msgs.paramModel },
         resume: { type: "string", description: msgs.paramResume },
+        preview: { type: "boolean", description: msgs.paramPreview },
+        noFilter: { type: "boolean", description: msgs.paramNoFilter },
+        maxGitProcs: { type: "integer", description: msgs.paramMaxGitProcs },
+        rule: { type: "string", description: msgs.paramRule },
+        backgroundFile: { type: "string", description: msgs.paramBackgroundFile },
       },
     },
     schema: REVIEW_OUTPUT_SCHEMA,
@@ -2328,6 +2253,17 @@ function registerReviewTool(
       // 归一化到 git 顶层：OCR 内部本就如此锚定（审查范围不变），但会话目录由
       // RepoDir 编码而来——不归一化，ocr_session 就查不到（见 canonicalReviewRoot）。
       const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
+      const preview = previewOf(args["preview"], runMsgs);
+      if (preview) {
+        return runReviewPreview({
+          host,
+          config,
+          args,
+          repo,
+          signal: exec.signal,
+          messages: runMsgs,
+        });
+      }
       // effort 未显式传入时取设置卡默认（effortOf 内做类型闸与白名单钳制）。
       const eff = effortOf(args["effort"], config, runMsgs);
       // wait=false = 后台：无 tmp、无 --output，结果以会话记录为准（ocr_session 轮询）。
@@ -2338,7 +2274,7 @@ function registerReviewTool(
       // ocrConfigPath 自定义时的 HOME 重定向（withHomeEnv 内部对 undefined/win32
       // 原样放行）。先注环境再套回收守护：守护把整条命令 shq 进 bash -c，前缀必须在最内层。
       // 指针自愈先行：api_key_cmd 指向已不存在的安装目录时，ocr 会在解析 LLM 端点
-      // 那一步就失败，五个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
+      // 那一步就失败，七个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
       await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       try {
@@ -2430,6 +2366,13 @@ function registerScanTool(
         model: { type: "string", description: msgs.paramModel },
         ...tuningParams(msgs, msgs.unitFile, msgs.tuningMaxToolsScan),
         wait: { type: "boolean", description: msgs.paramWait },
+        preview: { type: "boolean", description: msgs.paramPreview },
+        noPlan: { type: "boolean", description: msgs.paramNoPlan },
+        noDedup: { type: "boolean", description: msgs.paramNoDedup },
+        noSummary: { type: "boolean", description: msgs.paramNoSummary },
+        resume: { type: "string", description: msgs.paramScanResume },
+        maxGitProcs: { type: "integer", description: msgs.paramMaxGitProcs },
+        rule: { type: "string", description: msgs.paramRule },
       },
     },
     schema: REVIEW_OUTPUT_SCHEMA,
@@ -2440,13 +2383,24 @@ function registerScanTool(
       const cliStatus = probe();
       assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       const repo = ocrRepo(args, exec, runMsgs);
+      const preview = previewOf(args["preview"], runMsgs);
+      if (preview) {
+        return runScanPreview({
+          host,
+          config,
+          args,
+          repo,
+          signal: exec.signal,
+          messages: runMsgs,
+        });
+      }
       // wait=false = 后台：无 tmp、无 --output，结果以会话记录为准（ocr_session 轮询）。
       const wait = waitOf(args["wait"], runMsgs);
       const tmp = wait ? mkdtempSync(path.join(tmpdir(), "ocr-scan-")) : undefined;
       const outPath = tmp === undefined ? undefined : path.join(tmp, "out.json");
       // 同 ocr_review：先注 HOME 重定向再套守护（前缀必须在最内层）。
       // 指针自愈先行：api_key_cmd 指向已不存在的安装目录时，ocr 会在解析 LLM 端点
-      // 那一步就失败，五个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
+      // 那一步就失败，七个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
       await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       try {
@@ -2529,7 +2483,7 @@ function registerDelegatePreviewTool(
       assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       const repo = ocrRepo(args, exec, runMsgs);
       // 指针自愈先行：api_key_cmd 指向已不存在的安装目录时，ocr 会在解析 LLM 端点
-      // 那一步就失败，五个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
+      // 那一步就失败，七个工具一起挂，而报错与真因毫无关系（详见 healKeyScriptPointer）。
       await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       const { command, workdir } = buildDelegatePreviewCommand({ ...args, repo }, runMsgs);
@@ -2652,10 +2606,22 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
         repo: { type: "string", description: msgs.paramRepo },
         action: {
           type: "string",
-          enum: ["list", "show", "comments"],
+          enum: ["list", "show", "comments", "compare", "export"],
           description: msgs.paramSessionAction,
         },
         id: { type: "string", description: msgs.paramSessionId },
+        before: { type: "string", description: msgs.paramSessionBefore },
+        after: { type: "string", description: msgs.paramSessionAfter },
+        severity: {
+          type: "array",
+          items: { type: "string" },
+          description: msgs.paramSessionSeverity,
+        },
+        category: {
+          type: "array",
+          items: { type: "string" },
+          description: msgs.paramSessionCategory,
+        },
         limit: { type: "integer", description: msgs.paramSessionLimit },
       },
     },
@@ -2669,6 +2635,48 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
       // 与 ocr_review 同一个归一化：两侧必须落在同一个会话目录，否则 review 写进去、
       // 这里查的是另一个目录（缺陷 1）。
       const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
+      const action = actionOf(args["action"]);
+      const before = typeof args["before"] === "string" ? args["before"].trim() : "";
+      const after = typeof args["after"] === "string" ? args["after"].trim() : "";
+      // 未声明 action 但给了 before/after 时，builder 会推断为 compare；这里同步分支。
+      if (action === "compare" || (action === "" && (before !== "" || after !== ""))) {
+        const { command, workdir } = buildSessionCommand({ ...args, repo }, runMsgs);
+        const stdout = await runForeground(
+          host,
+          withHomeEnv(command, ocrHome(config)),
+          workdir,
+          tuningOf(config),
+          exec.signal,
+        );
+        const parsed = parseSessionCompare(stdout.text);
+        if (parsed.ok) {
+          return { ...parsed.view, hint: runMsgs.sessionCompareHint };
+        }
+        return {
+          sessionOutput:
+            echoRaw(stdout.text, RAW_ECHO_LIMIT) +
+            stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs),
+          hint: runMsgs.sessionCompareHint,
+        };
+      }
+      if (action === "export") {
+        const exportDir = mkdtempSync(path.join(tmpdir(), "ocr-session-export-"));
+        const output = path.join(exportDir, "review.html");
+        try {
+          const { command, workdir } = buildSessionCommand({ ...args, repo, output }, runMsgs);
+          await runForeground(
+            host,
+            withHomeEnv(command, ocrHome(config)),
+            workdir,
+            tuningOf(config),
+            exec.signal,
+          );
+          return { sessionOutput: output, hint: runMsgs.sessionExportHint };
+        } catch (error) {
+          rmSync(exportDir, { recursive: true, force: true });
+          throw error;
+        }
+      }
       const { command, workdir } = buildSessionCommand({ ...args, repo }, runMsgs);
       // session 也读 OCR 家目录（sessions 清单），随 ocrConfigPath 一并重定向。
       const stdout = await runForeground(
@@ -2694,6 +2702,100 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
           (empty ? runMsgs.sessionEmpty : capped) +
           stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs),
         hint: runMsgs.sessionResumeHint,
+      };
+    },
+  });
+}
+
+function registerRulesCheckTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
+  const msgs = localeMessages(host);
+  define(host, {
+    name: "ocr_rules_check",
+    description: msgs.rulesCheckToolDescription,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        repo: { type: "string", description: msgs.paramRepo },
+        path: { type: "string", description: msgs.paramRulesPath },
+        rule: { type: "string", description: msgs.paramRule },
+      },
+      required: ["path"],
+    },
+    schema: TEXT_OUTPUT_SCHEMA,
+    run: async (args, exec) => {
+      const runMsgs = localeMessages(host);
+      const cliStatus = probe();
+      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
+      const repo = ocrRepo(args, exec, runMsgs);
+      const { command, workdir } = buildRulesCheckCommand({ ...args, repo }, runMsgs);
+      const stdout = await runForeground(
+        host,
+        withHomeEnv(command, ocrHome(config)),
+        workdir,
+        tuningOf(config),
+        exec.signal,
+      );
+      const { text } = stdout;
+      const output =
+        text.length > 12_000
+          ? `${echoRaw(text, 11_900)}\n${format(runMsgs.textTruncated, { limit: "12000" })}`
+          : redactKeyMaterial(text);
+      return {
+        output: output + stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs),
+        hint: runMsgs.rulesCheckHint,
+      };
+    },
+  });
+}
+
+function registerLlmTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
+  const msgs = localeMessages(host);
+  define(host, {
+    name: "ocr_llm",
+    description: msgs.llmToolDescription,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: {
+          type: "string",
+          enum: ["providers", "models"],
+          description: msgs.paramLlmAction,
+        },
+      },
+      required: ["action"],
+    },
+    schema: TEXT_OUTPUT_SCHEMA,
+    run: async (args, exec) => {
+      const runMsgs = localeMessages(host);
+      const cliStatus = probe();
+      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
+      const rawAction = args["action"];
+      if (rawAction !== "providers" && rawAction !== "models") {
+        throw new Error(
+          format(runMsgs.invalidAction, {
+            action: typeof rawAction === "string" ? rawAction : describeValue(rawAction),
+            expected: "providers/models",
+          }),
+        );
+      }
+      const command = buildLlmCommand(rawAction);
+      const stdout = await runForeground(
+        host,
+        withHomeEnv(command, ocrHome(config)),
+        process.cwd(),
+        tuningOf(config),
+        exec.signal,
+      );
+      const { text } = stdout;
+      const output =
+        text.length > 12_000
+          ? `${echoRaw(text, 11_900)}\n${format(runMsgs.textTruncated, { limit: "12000" })}`
+          : redactKeyMaterial(text);
+      return {
+        output: output + stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs),
+        hint: runMsgs.llmHint,
       };
     },
   });
@@ -2809,6 +2911,8 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
   registerDelegatePreviewTool(host, config, probe);
   registerDelegateRuleTool(host, config, probe);
   registerSessionTool(host, config, probe);
+  registerRulesCheckTool(host, config, probe);
+  registerLlmTool(host, config, probe);
 
   // systemPrompt 路由段（正文是文案，随官方 locale 偏好走）。
   host.systemPrompt.section({
@@ -2817,7 +2921,7 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     text: localeMessages(host).routingText,
   });
 
-  // 设置卡的官方读面（Typert Remote）：五条方法经宿主网关暴露给**本 profile 的客户端**。
+  // 设置卡的官方读面（Typert Remote）：九条方法经宿主网关暴露给**本 profile 的客户端**。
   // 无条件上线——依赖都由这里交进去；来源校验与鉴权由宿主网关承担。
   installOcrRemote(ctx, {
     host,

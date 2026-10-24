@@ -1,4 +1,4 @@
-// host.ts 集成测试：注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote 方法。
+// host.ts 集成测试：注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote 方法。
 //
 // 关键约束：**绝不触碰外部 ocr 二进制与网络**。shell.execute 全是替身，
 // 断言的是「下发给宿主的命令串形态」与「结果映射」；--output 落盘文件由替身按
@@ -20,8 +20,6 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  openSync,
-  closeSync,
   truncateSync,
 } from "node:fs";
 import { symlink } from "node:fs/promises";
@@ -56,6 +54,9 @@ function makeSandboxHome(): string {
 
 const HOME = makeSandboxHome();
 process.env["HOME"] = HOME;
+// Windows 的 os.homedir() 读 USERPROFILE；host.ts 在导入期按它派生配置位置，两枚都要在
+// import 之前指向同一个沙箱，否则那一格会去读 runner 的真实家目录。
+process.env["USERPROFILE"] = HOME;
 
 const HOST_MODULE = await import("../host.ts");
 const {
@@ -462,8 +463,9 @@ function makeShell(): FakeShell {
           writeFileSync(outPath, script.output);
         }
         if (outPath !== undefined && script.sparseBytes !== undefined) {
-          // 稀疏：只落一页元数据，不真占这么多盘。
-          closeSync(openSync(outPath, "w"));
+          // 稀疏：只落一页元数据，不真占这么多盘。truncateSync 直接吃路径，
+          // 不必为建空文件再开一枚同步 fd。
+          writeFileSync(outPath, "");
           truncateSync(outPath, script.sparseBytes);
         }
         return {
@@ -1029,6 +1031,54 @@ const REVIEW_JSON = JSON.stringify({
   ],
 });
 
+/** review/scan `--preview` 的裸 model.Preview 回执（键 files，不是摘要对象）。 */
+const PREVIEW_JSON = JSON.stringify({
+  files: [
+    { path: "src/a.ts", status: "modified", insertions: 2, deletions: 1, will_review: true },
+    {
+      path: "src/a.test.ts",
+      status: "modified",
+      insertions: 1,
+      deletions: 0,
+      will_review: false,
+      exclude_reason: "default_path",
+    },
+  ],
+  total_insertions: 3,
+  total_deletions: 1,
+  total_files: 2,
+  reviewable_count: 1,
+  excluded_count: 1,
+});
+
+/** session compare 的四桶回执（键名按 CLI 的 CompareResult）。 */
+const COMPARE_JSON = JSON.stringify({
+  before: { session_id: "b", review_mode: "range", range: "main..x" },
+  after: { session_id: "a", review_mode: "range", range: "main..x" },
+  new: [
+    {
+      path: "src/new.ts",
+      content: "new issue",
+      start_line: 1,
+      end_line: 1,
+      category: "bug",
+      severity: "high",
+    },
+  ],
+  persisting: [],
+  resolved: [
+    {
+      path: "src/old.ts",
+      content: "fixed",
+      start_line: 2,
+      end_line: 2,
+      category: "bug",
+      severity: "medium",
+    },
+  ],
+  not_reviewed: [],
+});
+
 /** 失败覆盖度样本：`failed` 里一条真实的预算失败条目（多处用例共用同一形状）。 */
 const FAILED_ITEM_BUDGET = {
   path: "src/b.ts",
@@ -1036,7 +1086,7 @@ const FAILED_ITEM_BUDGET = {
   reason: "token budget",
 };
 
-describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote 方法）", () => {
+describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote 方法）", () => {
   // ── 沙箱复位（每个用例只清外部 ocr CLI 的配置；宿主侧已无文件）────────────────
 
   beforeEach(() => {
@@ -1083,7 +1133,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
   // ── 注册面 ──────────────────────────────────────────────────────────────────
 
   describe("apply 注册面", () => {
-    it("登记页面策略、5 个工具、路由段与 5 个端点", () => {
+    it("登记页面策略、7 个工具、路由段与 5 个端点", () => {
       const host = makeHost();
       applyPlugin(host);
       // 0.1.7 隐式注册：本包不再向 settings 登记命名空间，只登记一次页面策略
@@ -1094,7 +1144,9 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       expect(host.registeredTools.map((tool) => tool.name).toSorted()).toStrictEqual([
         "ocr_delegate_preview",
         "ocr_delegate_rule",
+        "ocr_llm",
         "ocr_review",
+        "ocr_rules_check",
         "ocr_scan",
         "ocr_session",
       ]);
@@ -1119,7 +1171,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     it("无 webServer 服务时端点注册整体跳过（工具与设置照常）", () => {
       const host = makeHost({ webServer: false });
       applyPlugin(host);
-      expect(host.registeredTools).toHaveLength(5);
+      expect(host.registeredTools).toHaveLength(7);
       expect(host.registeredRoutes).toHaveLength(0);
     });
 
@@ -1202,7 +1254,7 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       // （cordis 装载期用同一份 schema 填默认，fiber.ts resolveConfig）。少一个默认就会
       // 在真实宿主上变样，故逐字段对齐旧 BUILTIN_BASE。
       expect(schemaDefaults()).toStrictEqual({
-        effort: "medium",
+        effort: "auto",
         language: "中文",
         autoVerify: true,
         maxComments: 12,
@@ -1270,8 +1322,8 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
 
     it("output schema 与 render 一致（pretty-print 正常臂与三条降级兜底都覆盖）", () => {
       const { render } = toolOf(host, "ocr_review").output;
-      // canonical 值直返后 ocr_review 的根是三分支 oneOf：后台回执 / 摘要对象 / 解析失败字符串。
-      expect(toolOf(host, "ocr_review").output.schema["oneOf"]).toHaveLength(3);
+      // canonical 值直返后 ocr_review 的根是四分支 oneOf：后台回执 / 摘要对象 / 文件预览 / 解析失败字符串。
+      expect(toolOf(host, "ocr_review").output.schema["oneOf"]).toHaveLength(4);
       // 正常臂：能 JSON 化的结构化值按两层缩进 pretty-print 成 model-facing 文本（不是 String(value)）。
       expect(render({}, { jobId: "j-1", files: ["a.ts"] })[0]?.text).toBe(
         '{\n  "jobId": "j-1",\n  "files": [\n    "a.ts"\n  ]\n}',
@@ -1294,14 +1346,15 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       expect(render({}, unrenderable)[0]?.text).toBe("[unrenderable value]");
     });
 
-    it("五个工具各自声明真实的 output schema（canonical 直返，不再是统一 {text}）", () => {
-      // review / scan：oneOf[后台回执对象, 摘要对象, 解析失败字符串]；两个工具共用同一份。
+    it("七个工具各自声明真实的 output schema（canonical 直返，不再是统一 {text}）", () => {
+      // review / scan：oneOf[后台回执对象, 摘要对象, 文件预览对象, 解析失败字符串]；两个工具共用同一份。
       const reviewBranches = outputSchemaOf(host, "ocr_review")["oneOf"] as Record<
         string,
         unknown
       >[];
-      expect(reviewBranches).toHaveLength(3);
-      expect(reviewBranches[2]).toStrictEqual({ type: "string" });
+      expect(reviewBranches).toHaveLength(4);
+      expect(reviewBranches[2]).toMatchObject({ type: "object" });
+      expect(reviewBranches[3]).toStrictEqual({ type: "string" });
       const receiptProps = (reviewBranches[0] as { properties: Record<string, unknown> })
         .properties;
       expect(Object.keys(receiptProps).toSorted()).toStrictEqual([
@@ -1319,13 +1372,13 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       // preview / rule 是两分支 oneOf（对象 / 解析失败字符串）。
       expect(outputSchemaOf(host, "ocr_delegate_preview")["oneOf"]).toHaveLength(2);
       expect(outputSchemaOf(host, "ocr_delegate_rule")["oneOf"]).toHaveLength(2);
-      // session 的诚实值本来就是对象：sessionOutput（一手透传字符串）+ hint。
-      const session = outputSchemaOf(host, "ocr_session");
-      expect(session["type"]).toBe("object");
-      expect(Object.keys(session["properties"] as object).toSorted()).toStrictEqual([
-        "hint",
-        "sessionOutput",
-      ]);
+      // session：raw 对象（sessionOutput+hint）或 compare 结构化对象。
+      const session = outputSchemaOf(host, "ocr_session")["oneOf"] as Record<string, unknown>[];
+      expect(session).toHaveLength(2);
+      expect(
+        Object.keys((session[0] as { properties: object }).properties).toSorted(),
+      ).toStrictEqual(["hint", "sessionOutput"]);
+      expect((session[1] as { required: string[] }).required).toContain("persisting");
     });
   });
 
@@ -1724,19 +1777,23 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
       expect(result.status).toBe("success");
     });
 
-    it("effort 缺省取设置卡值（low/high 直通，其它归 medium）", async () => {
+    it("effort 缺省取设置卡值（auto 不传，low/high 直通，其它归 medium）", async () => {
+      host.settingsValue["effort"] = "auto";
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
+      expect(String(host.shell.resolveCalls[0]?.command)).not.toContain("--effort");
       host.settingsValue["effort"] = "low";
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
-      expect(String(host.shell.resolveCalls[0]?.command)).toContain("--effort low");
+      expect(String(host.shell.resolveCalls[1]?.command)).toContain("--effort low");
       host.settingsValue["effort"] = "high";
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
-      expect(String(host.shell.resolveCalls[1]?.command)).toContain("--effort high");
+      expect(String(host.shell.resolveCalls[2]?.command)).toContain("--effort high");
       host.settingsValue["effort"] = "ultra";
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
-      expect(String(host.shell.resolveCalls[2]?.command)).toContain("--effort medium");
+      expect(String(host.shell.resolveCalls[3]?.command)).toContain("--effort medium");
     });
 
     it("effort/wait 错类型一律抛错（静默回落会改变审查深度或等待语义），null 仍按缺省", async () => {
@@ -2224,6 +2281,76 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
     });
   });
 
+  // ── review / scan 的文件预览 ────────────────────────────────────────────────
+
+  describe("文件和扫描预览", () => {
+    let host: FakeHost;
+    beforeEach(() => {
+      host = makeHost();
+      applyPlugin(host);
+    });
+
+    it("review preview：走 --preview、返回拆分后的清单，不生成摘要", async () => {
+      host.shell.scripts.push({ output: PREVIEW_JSON });
+      const result = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", preview: true },
+        makeExec(),
+      )) as { totalFiles: number; reviewableFiles: unknown[]; excludedFiles: unknown[] };
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain(
+        "review --audience agent --format json --preview",
+      );
+      expect(result.totalFiles).toBe(2);
+      expect(result.reviewableFiles).toHaveLength(1);
+      expect(result.excludedFiles).toHaveLength(1);
+    });
+
+    it("review preview + wait=false 直接拒绝；preview 错类型也拒绝；预览回执坏掉时回显说明", async () => {
+      await expect(
+        toolOf(host, "ocr_review").execute(
+          { repo: "/repo", preview: true, wait: false },
+          makeExec(),
+        ),
+      ).rejects.toThrow(/preview 是秒级前台操作/u);
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", preview: "yes" }, makeExec()),
+      ).rejects.toThrow(/preview 必须是布尔值/u);
+      host.shell.scripts.push({ output: "not json" });
+      const result = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", preview: true },
+        makeExec(),
+      )) as string;
+      expect(result).toContain("preview 回执");
+    });
+
+    it("scan preview：同一份解析器；正常扫描的 no-* 开关进命令", async () => {
+      host.shell.scripts.push({ output: PREVIEW_JSON });
+      const result = (await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", preview: true, path: ["src"] },
+        makeExec(),
+      )) as { totalFiles: number };
+      expect(result.totalFiles).toBe(2);
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain("--preview");
+      await expect(
+        toolOf(host, "ocr_scan").execute({ repo: "/repo", preview: true, wait: false }, makeExec()),
+      ).rejects.toThrow(/preview 是秒级前台操作/u);
+      host.shell.scripts.push({ output: "not json" });
+      const bad = (await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", preview: true },
+        makeExec(),
+      )) as string;
+      expect(bad).toContain("preview 回执");
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", wait: true, noPlan: true, noDedup: true, noSummary: true },
+        makeExec(),
+      );
+      const command = String(host.shell.resolveCalls.at(-1)?.command);
+      expect(command).toContain("--no-plan");
+      expect(command).toContain("--no-dedup");
+      expect(command).toContain("--no-summary");
+    });
+  });
+
   // ── scan 工具 ───────────────────────────────────────────────────────────────
 
   describe("ocr_scan", () => {
@@ -2532,6 +2659,114 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
         session.execute({ repo: "/repo", action: "rm -rf /" }, makeExec()),
       ).rejects.toThrow(/action 非法/u);
     });
+
+    it("session compare：结构化四桶，compare 子命令带两个 -- 后的位置参数", async () => {
+      const session = toolOf(host, "ocr_session");
+      host.shell.scripts.push({ stdoutText: COMPARE_JSON });
+      const result = (await session.execute(
+        { repo: "/repo", action: "compare", before: "b", after: "a" },
+        makeExec(),
+      )) as { before: { sessionId: string }; counts: { new: number; resolved: number } };
+      expect(result.before.sessionId).toBe("b");
+      expect(result.counts).toStrictEqual({ new: 1, persisting: 0, resolved: 1, notReviewed: 0 });
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain(
+        "session compare --json --repo '/repo' -- 'b' 'a'",
+      );
+      await expect(
+        session.execute({ repo: "/repo", action: "compare", before: "b" }, makeExec()),
+      ).rejects.toThrow(/需要同时给出 before 与 after/u);
+      // 退出 0 但回执不是四桶 JSON：原样回显，不把坏回执说成「没有变化」。
+      host.shell.scripts.push({ stdoutText: "not json" });
+      const bad = (await session.execute(
+        { repo: "/repo", action: "compare", before: "b", after: "a" },
+        makeExec(),
+      )) as { sessionOutput: string; hint: string };
+      expect(bad.sessionOutput).toContain("not json");
+      expect(bad.hint).toContain("new");
+    });
+
+    it("session export：返回 HTML 路径；comments 的 severity/category 进命令", async () => {
+      const session = toolOf(host, "ocr_session");
+      host.shell.scripts.push({});
+      const exported = (await session.execute(
+        { repo: "/repo", action: "export", id: "s1" },
+        makeExec(),
+      )) as { sessionOutput: string };
+      expect(exported.sessionOutput.endsWith(path.join("review.html"))).toBe(true);
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain("session export");
+      rmSync(path.dirname(exported.sessionOutput), { recursive: true, force: true });
+      host.shell.scripts.push({ stdoutText: "[]" });
+      await session.execute(
+        {
+          repo: "/repo",
+          action: "comments",
+          id: "s1",
+          severity: ["high"],
+          category: ["bug"],
+        },
+        makeExec(),
+      );
+      const command = String(host.shell.resolveCalls.at(-1)?.command);
+      expect(command).toContain("--severity 'high'");
+      expect(command).toContain("--category 'bug'");
+      expect(command).toContain("-- 's1'");
+      // export 子进程失败：拒绝并且不把半成品路径交出去。
+      host.shell.scripts.push({ exitCode: 1, stderrText: "export failed" });
+      await expect(
+        session.execute({ repo: "/repo", action: "export", id: "s1" }, makeExec()),
+      ).rejects.toThrow(/export failed/u);
+    });
+  });
+
+  describe("规则诊断与 LLM 诊断", () => {
+    let host: FakeHost;
+    beforeEach(() => {
+      host = makeHost();
+      applyPlugin(host);
+    });
+
+    it("rules check：走 --repo 与 -- 后的文件路径，原样回显", async () => {
+      host.shell.scripts.push({ stdoutText: "File: src/a.ts\nSource: System built-in\n" });
+      const result = (await toolOf(host, "ocr_rules_check").execute(
+        { repo: "/repo", path: "src/a.ts" },
+        makeExec(),
+      )) as { output: string; hint: string };
+      expect(result.output).toContain("Source: System built-in");
+      expect(result.hint).toContain("Source");
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain(
+        "rules check --repo '/repo' -- 'src/a.ts'",
+      );
+      host.shell.scripts.push({ stdoutText: "x".repeat(12_001) });
+      const long = (await toolOf(host, "ocr_rules_check").execute(
+        { repo: "/repo", path: "src/a.ts" },
+        makeExec(),
+      )) as { output: string };
+      expect(long.output).toContain("[截断]");
+    });
+
+    it("llm：providers/models 走只读命令；非法 action 拒绝", async () => {
+      host.shell.scripts.push({ stdoutText: "Built-in providers:\n" });
+      const providers = (await toolOf(host, "ocr_llm").execute(
+        { action: "providers" },
+        makeExec(),
+      )) as { output: string };
+      expect(providers.output).toContain("Built-in providers");
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain("llm providers --color never");
+      host.shell.scripts.push({ stdoutText: "gpt-6\n" });
+      await toolOf(host, "ocr_llm").execute({ action: "models" }, makeExec());
+      expect(String(host.shell.resolveCalls.at(-1)?.command)).toContain("llm models --color never");
+      host.shell.scripts.push({ stdoutText: "y".repeat(12_001) });
+      const long = (await toolOf(host, "ocr_llm").execute({ action: "providers" }, makeExec())) as {
+        output: string;
+      };
+      expect(long.output).toContain("[截断]");
+      await expect(toolOf(host, "ocr_llm").execute({ action: "test" }, makeExec())).rejects.toThrow(
+        /action 非法/u,
+      );
+      await expect(toolOf(host, "ocr_llm").execute({ action: 3 }, makeExec())).rejects.toThrow(
+        /action 非法/u,
+      );
+    });
   });
 
   // ── webServer 端点 ──────────────────────────────────────────────────────────
@@ -2822,19 +3057,21 @@ describe("host.ts（注册面 + 5 个工具执行路径 + 5 条 ocrReview Remote
 });
 
 describe("外部 CLI 可用性前置：两条路都没有候选时不起进程", () => {
-  /** 五个工具各自的必填形态（与它们各自的入参闸一致，只为了让 run 走到前置这一行）。 */
+  /** 七个工具各自的必填形态（与它们各自的入参闸一致，只为了让 run 走到前置这一行）。 */
   const TOOL_ARGS: Record<string, Record<string, unknown>> = {
     ocr_review: { repo: "/repo" },
     ocr_scan: { repo: "/repo" },
     ocr_delegate_preview: { repo: "/repo" },
     ocr_delegate_rule: { repo: "/repo", paths: ["src/a.ts"] },
     ocr_session: { repo: "/repo", action: "list" },
+    ocr_rules_check: { repo: "/repo", path: "src/a.ts" },
+    ocr_llm: { action: "providers" },
   };
 
-  it("none ⇒ 五个工具一律拒绝，且连一次 resolve 都没发生", async () => {
+  it("none ⇒ 七个工具一律拒绝，且连一次 resolve 都没发生", async () => {
     const host = makeHost();
     applyPlugin(host, noneProbe);
-    // 五个调用并发跑（用例面的 no-await-in-loop：串行 await 只是把同一批断言排成
+    // 七个调用并发跑（用例面的 no-await-in-loop：串行 await 只是把同一批断言排成
     // 一条更慢的链），失败原因逐个收成消息串再整体比对，免掉逐条 try/catch 留下的分支。
     const reasons = await Promise.all(
       Object.entries(TOOL_ARGS).map(([name, args]) =>
@@ -2845,7 +3082,7 @@ describe("外部 CLI 可用性前置：两条路都没有候选时不起进程",
     );
     expect(
       reasons.every((message) => message === reasons[0]),
-      "五处拒绝理由该是同一句",
+      "七处拒绝理由该是同一句",
     ).toBe(true);
     // 拒绝里必须带着**能照着敲**的装法，而且 npm 那条带版本：用户（或模型）拿到这句话
     // 就能装对，不必再去翻文档核对「哪个版本才是插件按着写的」。
@@ -2901,6 +3138,8 @@ describe("外部 CLI 可用性前置：两条路都没有候选时不起进程",
       "ocr_delegate_preview",
       "ocr_delegate_rule",
       "ocr_session",
+      "ocr_rules_check",
+      "ocr_llm",
     ]);
     expect(host.shell.resolveCalls).toStrictEqual([]);
   });

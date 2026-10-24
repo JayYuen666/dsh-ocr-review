@@ -8,6 +8,7 @@
 // test/fixtures/gateway-fixture.ts 的 DshConfigGateway 替身（宿主侧真身在
 // host.ts createGateway），本包剩下的文件读写只有外部 ocr CLI 的 config.json。
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
+import assert from "node:assert/strict";
 import {
   mkdtempSync,
   readFileSync,
@@ -44,7 +45,7 @@ import {
 } from "../lib/config-store.ts";
 import type { AppliedConfig, CardPayload } from "../lib/ocr-config.ts";
 import type { DshProvider } from "../lib/provider-projection.ts";
-import type { ProviderSource } from "../lib/provider-source.ts";
+import type { ProviderDescriptor, ProviderSource } from "../lib/provider-source.ts";
 import type { OcrPaths, SelectInput } from "../lib/config-store.ts";
 import { MESSAGES } from "../lib/messages.ts";
 
@@ -91,6 +92,8 @@ interface ProvidersRead {
 }
 /** settings 通道抛错时的 source 状态（本文件多处断言同一个值）。 */
 const SETTINGS_FAILED = "settings-failed";
+/** 命名空间/键缺席（含敌意 getter 塌成缺席）时的 source 状态。 */
+const NAMESPACE_UNAVAILABLE = "namespace-unavailable";
 
 /** migratePlaintextKeys 的回执形态。 */
 interface MigrateResult {
@@ -201,6 +204,89 @@ describe("providersFromSettingsValue", () => {
     ).toThrow(/无法映射到 OCR 支持的 protocol/u);
   });
 
+  it("api 显式空串/全空白不兜底：protocol 原样透传，写侧白名单拒绝", () => {
+    // llm-pi-ai 的兜底是 `request.api ?? 'openai-completions'`（nullish 才兜）：
+    // 显式空串不是「未声明」，兜成 openai 等于把畸形声明改写成可用配置。
+    const parsed = providersFromSettingsValue({
+      providers: {
+        emptyApi: { apiKeyEnv: "K", api: "", baseURL: "https://e", models: [] },
+        blankApi: { apiKeyEnv: "K", api: "   ", baseURL: "https://b", models: [] },
+      },
+    });
+    expect(parsed.map((provider) => provider.protocol)).toStrictEqual(["", ""]);
+    expect(() =>
+      renderOf({
+        existingText: "{}",
+        configLabel: CONFIG_LABEL,
+        providers: parsed,
+        provider: "emptyApi",
+        model: "m",
+        apiKeyCmd: "node x K",
+      }),
+    ).toThrow(/无法映射到 OCR 支持的 protocol/u);
+  });
+
+  it("baseURL 不是 http/https ⇒ 整条丢弃（读侧宽容，不替用户猜修正值）", () => {
+    const parsed = providersFromSettingsValue({
+      providers: {
+        notUrl: { apiKeyEnv: "K", baseURL: "not a url", models: [] },
+        ftp: { apiKeyEnv: "K", baseURL: "ftp://files.example", models: [] },
+        // 该字面量是投影层的测试数据：验证的正是这个形态的 baseURL 被整条丢弃。
+        // oxlint-disable-next-line eslint/no-script-url -- 不是可执行的脚本地址，是负向样本
+        js: { apiKeyEnv: "K", baseURL: "javascript:alert(1)", models: [] },
+        upper: { apiKeyEnv: "K", baseURL: "HTTP://upper.example", models: [] },
+      },
+    });
+    expect(parsed.map((provider) => provider.name)).toStrictEqual(["upper"]);
+  });
+
+  it("models「声明了但每条都无效」整条丢弃；未声明与显式空数组保留为空列表", () => {
+    // 「每条都无效」若也透传成 models=[]，写侧对空 models 放行任意 model，白名单被绕开。
+    const parsed = providersFromSettingsValue({
+      providers: {
+        allJunk: { baseURL: "https://j", models: [{ id: 7 }, "scalar", { name: "无 id" }] },
+        explicitEmpty: { baseURL: "https://e", models: [] },
+        notArray: { baseURL: "https://n", models: "nope" },
+        absent: { baseURL: "https://a" },
+      },
+    });
+    expect(parsed.map((provider) => provider.name)).toStrictEqual([
+      "explicitEmpty",
+      "notArray",
+      "absent",
+    ]);
+    for (const provider of parsed) {
+      expect(provider.models).toStrictEqual([]);
+    }
+  });
+
+  it("displayName 全空白回退 name；有值则 trim", () => {
+    const parsed = providersFromSettingsValue({
+      providers: {
+        blank: { baseURL: "https://b", displayName: "   ", models: [] },
+        padded: { baseURL: "https://p", displayName: "  Padded  ", models: [] },
+      },
+    });
+    expect(parsed.find((provider) => provider.name === "blank")?.displayName).toBe("blank");
+    expect(parsed.find((provider) => provider.name === "padded")?.displayName).toBe("Padded");
+  });
+
+  it("provider 名为空/全空白、原型链危险键或空点号分段 ⇒ 整条丢弃", () => {
+    // "__proto__" 必须走 JSON.parse 才是自有键：对象字面量里它设的是原型。
+    const value: unknown = JSON.parse(
+      '{"providers":{"":{"baseURL":"https://e"},"  ":{"baseURL":"https://w"},' +
+        '"__proto__":{"baseURL":"https://p"},"constructor":{"baseURL":"https://c"},' +
+        '"prototype":{"baseURL":"https://pr"},' +
+        '"foo.bar":{"baseURL":"https://fb"},"foo..bar":{"baseURL":"https://feb"},' +
+        '".foo":{"baseURL":"https://lf"},"foo.":{"baseURL":"https://rf"},' +
+        '"foo. ":{"baseURL":"https://sf"},"ok":{"baseURL":"https://ok"}}}',
+    );
+    expect(providersFromSettingsValue(value).map((provider) => provider.name)).toStrictEqual([
+      "foo.bar",
+      "ok",
+    ]);
+  });
+
   it("displayName 回退到 name；models 空数组合法", () => {
     expect(providers.find((provider) => provider.name === "amd")?.displayName).toBe("amd");
     expect(providers.find((provider) => provider.name === "antdigital")?.models).toStrictEqual([]);
@@ -292,7 +378,7 @@ describe("readProviders：官方通道的四种降级", () => {
 
   it("describe() 里没有 llm-pi-ai 那条 ⇒ namespace-unavailable", () => {
     const { source } = readOf(makeGateway({ descriptors: [{ ns: "ui-theme", value: {} }] }));
-    expect(source.status).toBe("namespace-unavailable");
+    expect(source.status).toBe(NAMESPACE_UNAVAILABLE);
     expect(source.message).toMatch(/llm-pi-ai/u);
   });
 
@@ -311,7 +397,7 @@ describe("readProviders：官方通道的四种降级", () => {
       makeGateway({ descriptors: descriptorsWithValue({ defaultProvider: "x" }) }),
     );
     expect(providers).toStrictEqual([]);
-    expect(source.status).toBe("namespace-unavailable");
+    expect(source.status).toBe(NAMESPACE_UNAVAILABLE);
     expect(source.message).toContain(PI_AI_NAMESPACE);
   });
 
@@ -324,6 +410,32 @@ describe("readProviders：官方通道的四种降级", () => {
     expect(providers).toStrictEqual([]);
     expect(source.status).toBe(SETTINGS_FAILED);
     expect(source.message).toMatch(/probe blew up/u);
+  });
+
+  it("descriptors() 返回非数组 ⇒ 折进 settings-failed，而不是在 .find 上抛穿", () => {
+    // 降级装配下门面方法可以给出 undefined；`.find` 会抛 TypeError，而 readProviders
+    // 的契约是不抛——apply / migrate 都依赖它。
+    const degraded = makeGateway({});
+    degraded.descriptors = () => undefined as unknown as ReturnType<typeof degraded.descriptors>;
+    const { providers, source } = readOf(degraded);
+    expect(providers).toStrictEqual([]);
+    expect(source.status).toBe(SETTINGS_FAILED);
+  });
+
+  it("读 descriptor 属性时抛错 ⇒ 折进 settings-failed，不穿破不抛契约", () => {
+    const hostileDescriptor = Object.defineProperty({ value: undefined }, "ns", {
+      get() {
+        throw new Error("descriptor ns blew up");
+      },
+    });
+    const { providers, source } = readOf(
+      makeGateway({
+        descriptors: [hostileDescriptor as unknown as ProviderDescriptor],
+      }),
+    );
+    expect(providers).toStrictEqual([]);
+    expect(source.status).toBe(SETTINGS_FAILED);
+    expect(source.message).toMatch(/descriptor ns blew up/u);
   });
 
   it("投影读命名空间值时抛错 ⇒ 同样折进 settings-failed，不穿破不抛契约", () => {
@@ -344,6 +456,22 @@ describe("readProviders：官方通道的四种降级", () => {
     expect(providers).toStrictEqual([]);
     expect(source.status).toBe(SETTINGS_FAILED);
     expect(source.message).toMatch(/provider field blew up/u);
+  });
+
+  it("providers 键是敌意 getter ⇒ 与键缺席同形（namespace-unavailable），不穿破不抛契约", () => {
+    // shared 的 fieldOf 把读取抛错塌成「取不到」：敌意键与「没配 providers」在本读口
+    // 不可区分，一律按 namespace-unavailable。仍能区分的故障形态（describe 形状、
+    // descriptor 属性、投影条目读取）由上面三条用例分别钉在 settings-failed。
+    const hostileValue = Object.defineProperty({}, "providers", {
+      get() {
+        throw new Error("providers key blew up");
+      },
+    });
+    const { providers, source } = readOf(
+      makeGateway({ descriptors: descriptorsWithValue(hostileValue) }),
+    );
+    expect(providers).toStrictEqual([]);
+    expect(source.status).toBe(NAMESPACE_UNAVAILABLE);
   });
 });
 
@@ -394,6 +522,27 @@ describe("markKeyFlags", () => {
     ]);
     expect(keyed[0]?.hasKey).toBe(false);
     expect(gateway.describedRefs).toStrictEqual([]);
+  });
+
+  it("凭据门面同步抛错也被接住：`.catch` 只兜 Promise 拒绝，兜不住 throw", async () => {
+    // credentialConfigured 是门面方法，实现里做参数校验/属性探测时直接 throw 很常见；
+    // 那种情况下异常在 `.catch` 挂上之前就冒出去，整个 Promise.all 拒绝，与「单个 ref
+    // 探测失败不许连坐整张卡」相反。
+    const gateway = makeGateway({ configured: ["SENSENOVA_API_KEY"] });
+    const original = gateway.credentialConfigured;
+    gateway.credentialConfigured = (ref: string): Promise<boolean> => {
+      if (ref === "XKIRO_API_KEY") {
+        throw new Error("credential facade threw synchronously");
+      }
+      return original(ref);
+    };
+    const keyed = await markKeyFlags(gateway, providers);
+    expect(keyed.map((entry) => [entry.name, entry.hasKey])).toStrictEqual([
+      ["sensenova", true],
+      ["xkiro", false],
+      ["amd", false],
+      ["antdigital", false],
+    ]);
   });
 
   it("单个 ref 探测失败只降级这一条，不连坐整张卡", async () => {
@@ -556,22 +705,29 @@ describe("renderSelectedConfig", () => {
 });
 
 describe("resolveOcrConfigPath（外部 ocr CLI 配置的位置）", () => {
-  // 家目录由 process.env.HOME 注入，不用形参也不用 vi.mock：os.homedir() 在 POSIX 先读
-  // $HOME，官方 expandHomePath 内部那次 homedir() 调用读到的是**同一个注入值**（实测两侧
-  // 都是 /home/tester）。vi.mock("node:os") 做不到这点——vitest 把 node_modules 外置化，
-  // 桩进不了官方件内部，会变成"本仓侧假、官方侧真"的互相矛盾。
+  // 家目录由环境变量注入，不用形参也不用 vi.mock：os.homedir() 在 POSIX 读 $HOME、
+  // Windows 读 %USERPROFILE%，官方 expandHomePath 内部那次 homedir() 调用读到的必须是
+  // **同一个注入值**（实测两侧读到的是同一个值）。vi.mock("node:os") 做不到这点——vitest
+  // 把 node_modules 外置化，桩进不了官方件内部，会变成"本仓侧假、官方侧真"的互相矛盾。
   // 注入还有一条副产品：`startsWith(HOME)` 这类断言不再由构造必然成立——展开走偏（原样
   // 返回、或折到真家目录）就当场可抓。
-  const HOME = "/home/tester";
+  const HOME = path.resolve("/home/tester");
   const savedHome = process.env["HOME"];
+  const savedUserProfile = process.env["USERPROFILE"];
   beforeEach(() => {
     process.env["HOME"] = HOME;
+    process.env["USERPROFILE"] = HOME;
   });
   afterEach(() => {
     if (savedHome === undefined) {
       delete process.env["HOME"];
     } else {
       process.env["HOME"] = savedHome;
+    }
+    if (savedUserProfile === undefined) {
+      delete process.env["USERPROFILE"];
+    } else {
+      process.env["USERPROFILE"] = savedUserProfile;
     }
   });
 
@@ -744,7 +900,10 @@ describe("applyProviderSelection", () => {
       url: SENSENOVA_BASE_URL,
       protocol: "openai",
     });
-    expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o600);
+    // Windows 的 stat.mode 不含 POSIX 权限位（chmod 只翻只读位），0600 这一档只在 POSIX 可判。
+    if (process.platform !== "win32") {
+      assert.equal(statSync(paths.ocrConfigJson).mode % 0o1000, 0o600);
+    }
     const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as Record<string, unknown>;
     expect(doc["language"]).toBe("English");
     expect(gateway.resolvedRefs).toStrictEqual(["SENSENOVA_API_KEY"]);
@@ -1004,7 +1163,12 @@ describe("migratePlaintextKeys", () => {
     const gateway = makeGateway({
       descriptors: descriptorsWithValue({
         providers: {
-          weird: { apiKeyEnv: "bad-name", api: "openai-completions", baseURL: "u", models: [] },
+          weird: {
+            apiKeyEnv: "bad-name",
+            api: "openai-completions",
+            baseURL: "https://weird.example",
+            models: [],
+          },
         },
       }),
       sources: { "bad-name": "file" },
@@ -1136,25 +1300,31 @@ describe("migratePlaintextKeys", () => {
     const result = await migrateOf(makeGateway(), paths);
     expect(result.migrated).toStrictEqual(["sensenova"]);
     expect(readFileSync(`${paths.ocrConfigJson}.bak`, "utf8")).toBe(before);
-    expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o600);
-    expect(statSync(`${paths.ocrConfigJson}.bak`).mode % 0o1000).toBe(0o600);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(paths.ocrConfigJson).mode % 0o1000, 0o600);
+      assert.equal(statSync(`${paths.ocrConfigJson}.bak`).mode % 0o1000, 0o600);
+    }
   });
 
-  it("旧文件权限比 0600 宽时写回仍收口到 0600（官方靠新 inode 携带 mode，不靠事后 chmod）", async () => {
-    const paths = makePaths();
-    const before = JSON.stringify({
-      custom_providers: { sensenova: { api_key: PLAINTEXT_KEY } },
-    });
-    writeFileSync(paths.ocrConfigJson, before, { mode: 0o644 });
-    expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o644);
-    const widened = await migrateOf(makeGateway(), paths);
-    expect(widened.migrated).toStrictEqual(["sensenova"]);
-    expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o600);
-    expect(statSync(`${paths.ocrConfigJson}.bak`).mode % 0o1000).toBe(0o600);
-    // 备份必须是**改前**原文：官方件在内部直接 rename，若把 .bak 挪到写之后，
-    // 备份到的就是新内容——这条与上面 :744 同向，各钉一次。
-    expect(readFileSync(`${paths.ocrConfigJson}.bak`, "utf8")).toBe(before);
-  });
+  // 前提是 POSIX 权限位：Windows 上 writeFile 的 mode 与 stat.mode 都不是这一套语义。
+  it.skipIf(process.platform === "win32")(
+    "旧文件权限比 0600 宽时写回仍收口到 0600（官方靠新 inode 携带 mode，不靠事后 chmod）",
+    async () => {
+      const paths = makePaths();
+      const before = JSON.stringify({
+        custom_providers: { sensenova: { api_key: PLAINTEXT_KEY } },
+      });
+      writeFileSync(paths.ocrConfigJson, before, { mode: 0o644 });
+      expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o644);
+      const widened = await migrateOf(makeGateway(), paths);
+      expect(widened.migrated).toStrictEqual(["sensenova"]);
+      expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o600);
+      expect(statSync(`${paths.ocrConfigJson}.bak`).mode % 0o1000).toBe(0o600);
+      // 备份必须是**改前**原文：官方件在内部直接 rename，若把 .bak 挪到写之后，
+      // 备份到的就是新内容——这条与上面 :744 同向，各钉一次。
+      expect(readFileSync(`${paths.ocrConfigJson}.bak`, "utf8")).toBe(before);
+    },
+  );
 
   it("并发「应用 provider」与「一键迁移」不互相覆盖整份文档，且不留下 .lock", async () => {
     // 落盘交给异步 writeFileAtomic 之后，"读→判→写"不再同处一个 tick：
@@ -1592,6 +1762,72 @@ describe("repointDanglingKeyScripts", () => {
   });
 });
 
+// 「读不到」与「文件不存在」是两种后果完全不同的状态：写路径把前者折成空串，就会用
+// 只含本次选择的新文档覆盖掉用户既有的全部配置。这里用「config.json 是一个目录」造出
+// 一个稳定可复现的读失败（readFileSync → EISDIR，与权限不足同属非 ENOENT 那一类），
+// 比 chmod 更可靠：root 身份下 chmod 000 仍能读，CI 里的身份不确定。
+/** 文案带插值（where / cause），断言只钉那句不会随插值变的话。 */
+const CONFIG_UNREADABLE = /已中止写入以保护既有配置（既有文件不会被覆盖）/u;
+
+/** 把 config.json 换成一个同名目录，制造非 ENOENT 的读失败。 */
+function makeConfigUnreadable(paths: OcrPaths): void {
+  rmSync(paths.ocrConfigJson, { force: true });
+  mkdirSync(paths.ocrConfigJson, { recursive: true });
+}
+
+describe("读不动的 config.json 不得被当成空文档覆盖", () => {
+  afterEach(removeTmpSandbox);
+
+  it("迁移：读不动 ⇒ 抛错且盘上不留任何改动（含 .bak）", async () => {
+    const paths = makePaths();
+    writeFileSync(
+      paths.ocrConfigJson,
+      JSON.stringify({
+        provider: "sensenova",
+        custom_providers: {
+          sensenova: { url: "u", protocol: "openai", model: "m", api_key: "sk-secret" },
+        },
+      }),
+    );
+    makeConfigUnreadable(paths);
+    await expect(migrateOf(makeGateway(), paths)).rejects.toThrow(CONFIG_UNREADABLE);
+    expect(existsSync(`${paths.ocrConfigJson}.bak`)).toBe(false);
+    // 目录还在原地：说明失败发生在写之前，而不是「先删后写」。
+    expect(existsSync(paths.ocrConfigJson)).toBe(true);
+  });
+
+  it("应用选择：读不动 ⇒ 抛错，不写半份配置", async () => {
+    const paths = makePaths();
+    makeConfigUnreadable(paths);
+    await expect(selectOf(makeGateway(), paths, "sensenova", SENSENOVA_LITE_MODEL)).rejects.toThrow(
+      CONFIG_UNREADABLE,
+    );
+    expect(existsSync(`${paths.ocrConfigJson}.bak`)).toBe(false);
+  });
+
+  it("指针自愈：读不动 ⇒ checked:false（「没做」不许报成「做过了」）且不写盘", async () => {
+    const paths = makePaths();
+    makeConfigUnreadable(paths);
+    await expect(ensureKeyScriptPointer(paths, zh)).resolves.toStrictEqual({
+      repointed: [],
+      checked: false,
+    });
+    expect(existsSync(`${paths.ocrConfigJson}.bak`)).toBe(false);
+  });
+
+  it("文件不存在仍然照旧：迁移与自愈都不因这次收紧而变成抛错", async () => {
+    const paths = makePaths();
+    await expect(migrateOf(makeGateway(), paths)).resolves.toStrictEqual({
+      migrated: [],
+      skippedUnknown: [],
+    });
+    await expect(ensureKeyScriptPointer(paths, zh)).resolves.toStrictEqual({
+      repointed: [],
+      checked: true,
+    });
+  });
+});
+
 describe("ensureKeyScriptPointer", () => {
   afterEach(() => {
     removeTmpSandbox();
@@ -1626,7 +1862,10 @@ describe("ensureKeyScriptPointer", () => {
       buildApiKeyCmd(paths.getCredScript, "OPENCODEGO_API_KEY", undefined, zh),
     );
     // mode 的低九位用取模取（不进位），避开 no-bitwise：0o600 是 0o1000 内的数。
-    expect(statSync(paths.ocrConfigJson).mode % 0o1000).toBe(0o600);
+    // Windows 不实现 POSIX 权限位，这一档只在 POSIX 判。
+    if (process.platform !== "win32") {
+      assert.equal(statSync(paths.ocrConfigJson).mode % 0o1000, 0o600);
+    }
   });
 
   it("指针本就健康 ⇒ 不写盘（配置字节不变，也没有 .bak）", async () => {

@@ -20,6 +20,8 @@ const TOOL_NAMES = [
   "ocr_delegate_preview",
   "ocr_delegate_rule",
   "ocr_session",
+  "ocr_rules_check",
+  "ocr_llm",
 ] as const;
 
 /** 两侧都必须点名的部署级键：导出 `Config` 上那些**不进设置卡**的非 volatile 字段
@@ -43,6 +45,10 @@ const REMOTE_METHODS = [
   "migrate()",
   "test()",
   "probe()",
+  "mcp()",
+  "saveMcp(request)",
+  "auth()",
+  "chatGpt(request)",
 ] as const;
 
 /** 两侧都必须写明的 Remote 命名空间（卡片按 `remote.<它>` 取服务，写错一侧就没人能连上）。 */

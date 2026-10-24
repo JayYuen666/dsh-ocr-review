@@ -58,6 +58,7 @@ import {
   expandHomeForSeparator,
   loadOcrConfig,
   parseExistingConfig,
+  readExistingText,
   readText,
   renderConfigDoc,
   renderSelectedConfig,
@@ -277,7 +278,9 @@ export async function applyProviderSelection(
   // 用旧快照盖掉（最坏情况：明文 api_key 复活）。锁只圈文件 RMW，不圈上面那个
   // 凭据可达性 await，避免把外部服务的延迟算进持锁时间。
   await updateConfigLocked(paths.ocrConfigJson, async () => {
-    const existing = readText(paths.ocrConfigJson);
+    // 写侧必须用严格读：「读不到」与「文件不存在」在这里是两种后果完全不同的状态，
+    // 折成空串就等于用只含本次选择的新文档覆盖掉用户既有的全部配置。
+    const existing = readExistingText(paths.ocrConfigJson, messages);
     const next = renderSelectedConfig(
       {
         existingText: existing,
@@ -362,7 +365,7 @@ export async function migratePlaintextKeys(
   // 抛错 / 坏 JSON 抛「已中止写入」/ 形状不合 / 缺脚本），为的是错误与回执的先后语义
   // 一字不动；真正的读—判—写在锁内对**新快照**重跑一遍，config.json 很小，多解析
   // 一次远比并发下用旧快照覆盖对方的写入便宜。
-  const precheck = readText(paths.ocrConfigJson);
+  const precheck = readExistingText(paths.ocrConfigJson, messages);
   if (!precheck.trim()) {
     return { migrated: [], skippedUnknown: [] };
   }
@@ -414,7 +417,11 @@ export async function migratePlaintextKeys(
     // 锁内不再判一次"空文件"：`parseExistingConfig`（lib/config-store.ts）对空白输入返回
     // `{}`，于是下面的 `custom_providers` 形状闸门自然走成同一条"无可迁移对象"的早返回，
     // 多写一次判据只会留下一条永远测不到的分支。
-    const doc = parseExistingConfig(readText(paths.ocrConfigJson), paths.ocrConfigJson, messages);
+    const doc = parseExistingConfig(
+      readExistingText(paths.ocrConfigJson, messages),
+      paths.ocrConfigJson,
+      messages,
+    );
     const customsRaw = fieldOf(doc, "custom_providers");
     if (!isRecord(customsRaw)) {
       return { migrated: [], skippedUnknown: [] };
@@ -474,7 +481,14 @@ export async function ensureKeyScriptPointer(
     return { repointed: [], checked: false };
   }
   const current = { script: scriptPath, dshHome: resolveDshHome() };
-  const text = readText(paths.ocrConfigJson);
+  // 严格读：读不动（EACCES/EIO）与「文件不存在」在这里必须分开——前者什么都没检查，
+  // 回 checked: true 等于把「没做」报成「做过了」。
+  let text: string;
+  try {
+    text = readExistingText(paths.ocrConfigJson, messages);
+  } catch {
+    return { repointed: [], checked: false };
+  }
   if (text.trim() === "") {
     // 还没有配置文件：不进锁。updateConfigLocked 会 mkdir 建出配置目录，
     // 仅仅调用一次工具就把用户目录凭空造出来不是本包该有的副作用。
@@ -486,7 +500,11 @@ export async function ensureKeyScriptPointer(
     // 结论一致——为了省一次锁而多留一个必须靠并发才能触发的分支，不值。锁是一次 mkdir +
     // 一次 wx 建锁，相对一次分钟级评审可忽略。
     const repointed = await updateConfigLocked(paths.ocrConfigJson, async () => {
-      const doc = parseExistingConfig(readText(paths.ocrConfigJson), paths.ocrConfigJson, messages);
+      const doc = parseExistingConfig(
+        readExistingText(paths.ocrConfigJson, messages),
+        paths.ocrConfigJson,
+        messages,
+      );
       const result = repointDanglingKeyScripts(doc, current, messages);
       if (result.repointed.length === 0) {
         return result.repointed;

@@ -113,12 +113,12 @@ describe("ocr-review host 构建", () => {
     const text = await buildHost();
     expect(text).toContain("const PLUGIN_DIR = import.meta.dirname;");
     // 构建脚本的写入目标 = 脚本自身目录（= 包根）；改这一行必须同步改本断言。
-    // 走「临时文件 + rename」而不是直接覆盖：同目录 rename 是原位的，中断不会留下
-    // 半份 host.js。
+    // 原子落盘与构建编排已移到 @jayyuen66/dsh-plugin-shared 的统一构建切面
+    // （写盘手法的判据由 shared 自己的测试钉）；这里只钉目标路径仍在本仓声明。
     const builder = await readFile(path.join(PKG_ROOT, "build-host.mjs"), "utf8");
     expect(builder).toContain("const root = import.meta.dirname;");
-    expect(builder).toContain('const target = path.join(root, "host.js")');
-    expect(builder).toContain("await rename(tmp, target);");
+    expect(builder).toContain('path.join(root, "host.js")');
+    expect(builder).toContain('from "@jayyuen66/dsh-plugin-shared/lib/build-host"');
     const artifactStat = await stat(path.join(PKG_ROOT, "host.js"));
     const credStat = await stat(path.join(PKG_ROOT, "scripts", "get-cred.mjs"));
     expect(artifactStat.isFile(), "host.js 已产出（npm run build）").toBe(true);

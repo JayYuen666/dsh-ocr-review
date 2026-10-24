@@ -1,5 +1,10 @@
 // ocr-review/tsconfig.client.json —— 编译选项全部继承 @jayyuen66/dsh-plugin-shared/config/tsconfig.client.base.json，这里只留本包与基线不同的部分。
 {
   "extends": "@jayyuen66/dsh-plugin-shared/config/tsconfig.client.base.json",
-  "include": ["src/**/*.ts", "test/client-card.test.ts"]
+  // include 在 TS 里是**整体替换**而非与基线合并：本基线（tsconfig.client.base.json）
+  // 现在没有 include，所以这里写出全量清单没有可丢失面；基线将来若加 include，这里必须
+  // 同步带上，失败形态是「某个全局声明突然找不到」，不会指向配置本身。
+  // client 程序的成员按目录收录：src/** 加 test/client/（client 侧用例只住那一个目录，
+  // 根 tsconfig.json 的 exclude 与它指向同一目录，归属不靠两份清单逐文件登记）。
+  "include": ["src/**/*.ts", "test/client/**/*.ts"]
 }

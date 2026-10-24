@@ -1,5 +1,5 @@
 # ocr-review：open-code-review 工作区审查插件（bundle）。
-# 双面包机制：本包含 Host 半（host.ts：5 个工具 ocr_review/ocr_scan/
+# 双面包机制：本包含 Host 半（host.ts：7 个工具 ocr_review/ocr_scan/
 # ocr_delegate_preview/ocr_delegate_rule/ocr_session + 由 `Config` 上 `.volatile()`
 # 隐式投影的设置面（命名空间就是下面这条的 id）+ 设置卡的 `ocrReview` Remote 读面）与
 # Client 半（src/client-entry.ts → client.js：设置卡片，从宿主设置服务的
@@ -10,7 +10,9 @@
 # 组合包层：本文件由 package.json 的 dsh.bundle.patch 指向，随
 # `dsh plugin --profile web add/remove ./plugins/ocr-review` 维护。行按裸包名
 # 引用本包（client-modules 只扫描裸包名条目的 dsh.client 声明）。
-# 注意 pnpm ≥12.3.0：12.0.0 的 add 本地目录有 #14437 bug。
+# pnpm 12.0–12.2 的 `pnpm add <本地目录>` 不可用（上游 #14437：无别名的本地路径被当
+# registry 包名解析；12.1.0/12.2.0 复现，12.2.0 的 release notes 无修复），12.3.0 起修复。
+# 把本包目录加进 profile 前先确认 pnpm ≥12.3.0；从 registry 装不受影响。
 - insert:
     - id: ocr-review
       name: "@jayyuen66/dsh-ocr-review"

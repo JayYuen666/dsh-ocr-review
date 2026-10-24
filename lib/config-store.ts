@@ -16,6 +16,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { withFileLock, writeFileAtomic } from "@deepseek-ai/dsh-atomic-write";
 import { expandHomePath } from "@deepseek-ai/dsh-home-paths";
+import { errorText } from "@jayyuen66/dsh-plugin-shared/lib/errors";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 // 本模块产出的错误与降级原因全进消息表（lib/messages.ts），由 host.ts 按官方 locale
 // 偏好取一份注入——纯函数不读设置，所以 messages 是入参。
@@ -67,12 +68,42 @@ export function loadOcrConfig(configJsonText: string): {
   return { current, raw: doc };
 }
 
-/** config.json 的当前文本（读不到/不存在一律空串，交由 loadOcrConfig 的宽容读侧处理）。 */
+/** 读侧专用：config.json 的当前文本，读不到一律空串。
+ *
+ *  只给「读侧要宽容」的那一类调用用（设置卡打开时渲染当前选择：盘上文件坏了也必须
+ *  能打开卡片，用户正是靠卡片去修）。**写侧不能用它**——把 EACCES/EIO 折成空串等于
+ *  把「读不到」当成「文件不存在」，随后整份覆盖就丢掉了用户既有的全部配置；写侧走
+ *  readExistingText。 */
 export function readText(configPath: string): string {
   try {
     return readFileSync(configPath, "utf8");
   } catch {
     return "";
+  }
+}
+
+/** 文件不存在是正常态（首写、被用户删掉），其余读失败不是。 */
+function isNotFound(error: unknown): boolean {
+  return isRecord(error) && fieldOf(error, "code") === "ENOENT";
+}
+
+/** 写侧专用：把「文件不存在 / 内容为空」与「文件读不动」分开。
+ *
+ *  前者返回空串，`parseExistingConfig` 依约给出 `{}`，写出来的就是只含本次选择的
+ *  新文档；后者必须抛错——这一层往下是「读 → 改 → 整份写回」，把读不到当成空文档
+ *  会让一次瞬时 EIO 变成用户全部 providers / keys / mcp_servers / language 被覆盖，
+ *  而备份（`.bak`）也救不了第二次。 */
+export function readExistingText(configPath: string, messages: OcrReviewMessages): string {
+  try {
+    return readFileSync(configPath, "utf8");
+  } catch (error) {
+    if (isNotFound(error)) {
+      return "";
+    }
+    throw new Error(
+      format(messages.configUnreadable, { where: configPath, cause: errorText(error) }),
+      { cause: error },
+    );
   }
 }
 

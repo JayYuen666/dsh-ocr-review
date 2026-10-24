@@ -1,4 +1,4 @@
-// 设置卡读面（Typert Remote）的宿主侧直测：注册、五个方法的成功/拒绝分支，以及客户端
+// 设置卡读面（Typert Remote）的宿主侧直测：注册、九个方法的成功/拒绝分支，以及客户端
 // descriptor 与宿主 `@Remote` 标记的对质。客户端读取器的装配在文件末单独一组。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -19,7 +19,8 @@ import plugin, {
 import type { Config, HostCtx, OcrAvailabilityProbe, OcrReviewRemoteDeps } from "../host.ts";
 import type { DshConfigGateway } from "../lib/provider-source.ts";
 import { MESSAGES } from "../lib/messages.ts";
-import { OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
+import { isRemoteRefused, OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
+import type { OcrProbeReply, OcrTestReply } from "../lib/remote-shape.ts";
 import { OCR_DESCRIPTORS, createOcrReader } from "../src/remote.ts";
 
 /** 每个用例一份临时 OCR 配置位置：`<X>/.opencodereview/config.json` 是唯一被接受的布局。 */
@@ -156,12 +157,22 @@ function serviceOf(deps: OcrReviewRemoteDeps): OcrReviewRemoteService {
 }
 
 describe("设置卡读面（官方 Typert Remote 源模式）", () => {
-  it("装进真 Context：五个方法都带 @Remote 标记，客户端 descriptor 逐项对质", () => {
+  it("装进真 Context：九个方法都带 @Remote 标记，客户端 descriptor 逐项对质", () => {
     const service = serviceOf(depsOf().deps);
     const markers = remoteMethods(service)
       .map((marker) => marker.method)
       .toSorted();
-    assert.deepEqual(markers, ["migrate", "probe", "providers", "select", "test"]);
+    assert.deepEqual(markers, [
+      "auth",
+      "chatGpt",
+      "mcp",
+      "migrate",
+      "probe",
+      "providers",
+      "saveMcp",
+      "select",
+      "test",
+    ]);
     assert.deepEqual(OCR_DESCRIPTORS.map((descriptor) => descriptor.method).toSorted(), markers);
     for (const descriptor of OCR_DESCRIPTORS) {
       assert.equal(descriptor.service, OCR_REMOTE_NAMESPACE);
@@ -178,6 +189,13 @@ describe("设置卡读面（官方 Typert Remote 源模式）", () => {
       select?.parameters.map((parameter) => [parameter.name, parameter.source]),
       [["request", "json"]],
     );
+    for (const method of ["saveMcp", "chatGpt"]) {
+      const descriptor = OCR_DESCRIPTORS.find((entry) => entry.method === method);
+      assert.deepEqual(
+        descriptor?.parameters.map((parameter) => [parameter.name, parameter.source]),
+        [["request", "json"]],
+      );
+    }
   });
 
   it("注册口缺席时返回 false（可选读面，不让 apply 下线）", () => {
@@ -249,7 +267,7 @@ describe("设置卡读面（官方 Typert Remote 源模式）", () => {
     delete process.env["HOME"];
     try {
       const { deps } = depsOf({
-        scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.0 darwin/arm64" }],
+        scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.3 darwin/arm64" }],
       });
       const service = serviceOf(deps);
       const probed = await service.probe();
@@ -360,16 +378,110 @@ describe("设置卡读面（官方 Typert Remote 源模式）", () => {
 
   it("probe：一致 ⇒ consistent 真且不给换版命令；版本落进 versionSink", async () => {
     const { deps, versionSink } = depsOf({
-      scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.0 darwin/arm64" }],
+      scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.3 darwin/arm64" }],
     });
     const reply = await serviceOf(deps).probe();
     assert.equal(reply.ok, true);
     if (!("status" in reply)) {
-      assert.equal(reply.version, "1.13.0");
+      assert.equal(reply.version, "1.13.3");
       assert.equal(reply.consistent, true);
       assert.equal(reply.changeText, "");
-      assert.equal(versionSink.value, "1.13.0");
+      assert.equal(versionSink.value, "1.13.3");
     }
+  });
+
+  it("mcp：只回 mcp_servers；saveMcp 写回并保留其他配置", async () => {
+    const { deps, configPath } = depsOf();
+    writeFileSync(
+      configPath,
+      JSON.stringify({ language: "English", mcp_servers: { docs: { command: "npx" } } }),
+    );
+    const read = await serviceOf(deps).mcp();
+    assert.equal("status" in read, false);
+    if (!("status" in read)) {
+      assert.deepEqual(JSON.parse(read.json), { docs: { command: "npx" } });
+    }
+    const saved = await serviceOf(deps).saveMcp({
+      json: JSON.stringify({ remote: { type: "remote", url: "https://mcp.example.com" } }),
+    });
+    assert.deepEqual(saved, { ok: true, count: 1 });
+    const written = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    assert.equal(written["language"], "English");
+    assert.deepEqual(written["mcp_servers"], {
+      remote: { type: "remote", url: "https://mcp.example.com" },
+    });
+    const bad = await serviceOf(deps).saveMcp({ json: "{" });
+    assert.deepEqual([bad.ok, bad.ok ? 0 : bad.status], [false, 400]);
+    const wrong = await serviceOf(deps).saveMcp({ json: 3 } as never);
+    assert.deepEqual([wrong.ok, wrong.ok ? 0 : wrong.status], [false, 400]);
+    const noRequest = await serviceOf(deps).saveMcp(null as never);
+    assert.deepEqual([noRequest.ok, noRequest.ok ? 0 : noRequest.status], [false, 400]);
+    writeFileSync(configPath, "{");
+    const corrupt = await serviceOf(deps).mcp();
+    assert.deepEqual([corrupt.ok, corrupt.ok ? 0 : corrupt.status], [false, 400]);
+    const badPath = await serviceOf(
+      depsOf({ config: { ocrConfigPath: "relative/ocr.json" } }).deps,
+    ).mcp();
+    assert.deepEqual([badPath.ok, badPath.ok ? 0 : badPath.status], [false, 500]);
+  });
+
+  it("auth：状态与登录命令；失败仍回执 output，壳层抛错回 400", async () => {
+    const ok = await serviceOf(
+      depsOf({ scripts: [{ exitCode: 0, stdout: "Logged in as a@b" }] }).deps,
+    ).auth();
+    assert.deepEqual(ok, {
+      ok: true,
+      output: "Logged in as a@b",
+      loginCommand: "ocr auth login --provider chatgpt",
+    });
+    const failed = await serviceOf(
+      depsOf({ scripts: [{ exitCode: 1, stdout: "not logged in" }] }).deps,
+    ).auth();
+    assert.deepEqual(failed, {
+      ok: false,
+      output: "not logged in",
+      loginCommand: "ocr auth login --provider chatgpt",
+    });
+    const broken = await serviceOf(
+      depsOf({ scripts: [{ throws: new Error("no shell") }] }).deps,
+    ).auth();
+    assert.equal(isRemoteRefused(broken), true);
+    if (isRemoteRefused(broken)) {
+      assert.equal(broken.status, 400);
+    }
+    const saved = process.env["HOME"];
+    delete process.env["HOME"];
+    try {
+      const noHome = await serviceOf(
+        depsOf({ scripts: [{ exitCode: 0, stdout: "ok" }] }).deps,
+      ).auth();
+      assert.equal(noHome.ok, true);
+    } finally {
+      if (saved !== undefined) {
+        process.env["HOME"] = saved;
+      }
+    }
+  });
+
+  it("chatGpt：写 provider/model 且不写 key；空模型/坏配置回 400", async () => {
+    const { deps, configPath } = depsOf();
+    const saved = await serviceOf(deps).chatGpt({ model: "gpt-6" });
+    assert.deepEqual(saved, { ok: true, model: "gpt-6" });
+    const written = JSON.parse(readFileSync(configPath, "utf8")) as {
+      provider: string;
+      providers: { chatgpt: Record<string, unknown> };
+    };
+    assert.equal(written.provider, "chatgpt");
+    assert.deepEqual(written.providers.chatgpt, { model: "gpt-6" });
+    const empty = await serviceOf(deps).chatGpt({ model: " " });
+    assert.deepEqual([empty.ok, empty.ok ? 0 : empty.status], [false, 400]);
+    const wrong = await serviceOf(deps).chatGpt({ model: 3 } as never);
+    assert.deepEqual([wrong.ok, wrong.ok ? 0 : wrong.status], [false, 400]);
+    const noRequest = await serviceOf(deps).chatGpt(null as never);
+    assert.deepEqual([noRequest.ok, noRequest.ok ? 0 : noRequest.status], [false, 400]);
+    writeFileSync(configPath, "{");
+    const corrupt = await serviceOf(deps).chatGpt({ model: "gpt-6" });
+    assert.deepEqual([corrupt.ok, corrupt.ok ? 0 : corrupt.status], [false, 400]);
   });
 
   it("probe：版本不一致 ⇒ 带上换版命令", async () => {
@@ -432,13 +544,62 @@ describe("设置卡读面（官方 Typert Remote 源模式）", () => {
 });
 
 describe("客户端读取器（Remote 消费侧）", () => {
-  it("没有远程面时交 undefined；形状不合同样按没有处理", () => {
-    assert.equal(createOcrReader({}), undefined);
-    assert.equal(createOcrReader({ get: () => ({}) }), undefined);
-    assert.equal(createOcrReader({ get: () => null }), undefined);
+  it("remote 缺席/形状不合 ⇒ 读取时抛可读错误（解析不快照在构造期）", async () => {
+    const absent = createOcrReader({});
+    await assert.rejects(async () => absent.providers(), /remote 未提供/u);
+    const shapeless = createOcrReader({ get: () => ({}) });
+    await assert.rejects(async () => shapeless.providers(), /remote 未提供/u);
+    const nul = createOcrReader({ get: () => null });
+    await assert.rejects(async () => nul.providers(), /remote 未提供/u);
   });
 
-  it("$mount 只挂一次；五个方法按位置参数转给命名空间服务", async () => {
+  it("remote 晚于读取器出现 ⇒ 下一次读取接上（不做构造期快照）", async () => {
+    // 本插件与官方网关之间没有加载顺序保证：网关可能在本插件 apply 之后才
+    // provide("remote")。构造期快照会让读取器永远拿不到它。
+    // remote 用一个可变槽位持有：用例要改的是「此刻有没有」，不是绑定本身。
+    const state: { remote: unknown } = { remote: undefined };
+    const namespace = {
+      providers: async (): Promise<unknown> => ({ ok: true, value: { providers: [] } }),
+      select: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      migrate: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      test: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      probe: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      mcp: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      saveMcp: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      auth: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      chatGpt: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+    };
+    const reader = createOcrReader({
+      get: (name: string): unknown => {
+        if (name === "remote") {
+          return state.remote;
+        }
+        return name === `remote.${OCR_REMOTE_NAMESPACE}` ? namespace : undefined;
+      },
+    });
+    await assert.rejects(async () => reader.providers(), /remote 未提供/u);
+    state.remote = { $mount: async (): Promise<void> => undefined };
+    // node:assert 没有 resolves：await 本身就是断言，rejection 会让本用例失败。
+    await reader.providers();
+  });
+
+  it("$mount 只挂一次；九个方法按位置参数转给命名空间服务", async () => {
     let mounts = 0;
     const calls: unknown[] = [];
     const namespace = {
@@ -473,6 +634,22 @@ describe("客户端读取器（Remote 消费侧）", () => {
           },
         };
       },
+      mcp: async () => {
+        calls.push(["mcp"]);
+        return { ok: true, value: { ok: true, json: "{}" } };
+      },
+      saveMcp: async (request: unknown) => {
+        calls.push(["saveMcp", request]);
+        return { ok: true, value: { ok: true, count: 0 } };
+      },
+      auth: async () => {
+        calls.push(["auth"]);
+        return { ok: true, value: { ok: true, output: "", loginCommand: "ocr auth login" } };
+      },
+      chatGpt: async (request: unknown) => {
+        calls.push(["chatGpt", request]);
+        return { ok: true, value: { ok: true, model: "gpt-6" } };
+      },
     };
     const ctx = {
       get: (name: string): unknown => {
@@ -487,7 +664,6 @@ describe("客户端读取器（Remote 消费侧）", () => {
       },
     };
     const reader = createOcrReader(ctx);
-    assert.ok(reader !== undefined);
     assert.deepEqual(await reader.providers(), { providers: [] });
     assert.deepEqual(await reader.select("alpha", "alpha-1"), {
       ok: false,
@@ -497,8 +673,67 @@ describe("客户端读取器（Remote 消费侧）", () => {
     await reader.migrate();
     await reader.test();
     await reader.probe();
+    assert.deepEqual(await reader.mcp(), { ok: true, json: "{}" });
+    assert.deepEqual(await reader.saveMcp("{}"), { ok: true, count: 0 });
+    await reader.auth();
+    assert.deepEqual(await reader.chatGpt("gpt-6"), { ok: true, model: "gpt-6" });
     assert.equal(mounts, 1);
     assert.deepEqual(calls[1], ["select", { provider: "alpha", model: "alpha-1" }]);
+    assert.deepEqual(calls[6], ["saveMcp", { json: "{}" }]);
+    assert.deepEqual(calls[8], ["chatGpt", { model: "gpt-6" }]);
+  });
+
+  it("挂载失败不缓存：下一次读取重新 $mount 并成功", async () => {
+    // `??=` 缓存的是已 settled 的 promise：失败不清空的话，同一读取器此后每次读取
+    // 都立刻以同一条错误失败，且永远不会重试。
+    let mounts = 0;
+    let mountShouldFail = true;
+    const namespace = {
+      providers: async (): Promise<unknown> => ({ ok: true, value: { providers: [] } }),
+      select: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      migrate: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      test: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      probe: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      mcp: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      saveMcp: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      auth: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+      chatGpt: async (): Promise<never> => {
+        throw new Error("unused");
+      },
+    };
+    const reader = createOcrReader({
+      get: (name: string): unknown => {
+        if (name !== "remote") {
+          return name === `remote.${OCR_REMOTE_NAMESPACE}` ? namespace : undefined;
+        }
+        return {
+          $mount: async (): Promise<void> => {
+            mounts += 1;
+            if (mountShouldFail) {
+              throw new Error("gateway cold");
+            }
+          },
+        };
+      },
+    });
+    await assert.rejects(async () => reader.providers(), /gateway cold/u);
+    mountShouldFail = false;
+    await reader.providers();
+    assert.equal(mounts, 2);
   });
 
   it("网关回执是失败 ⇒ 抛（卡片那层按「请求失败」显示）；命名空间缺席同样抛", async () => {
@@ -515,16 +750,49 @@ describe("客户端读取器（Remote 消费侧）", () => {
               migrate: async () => ({ ok: false }),
               test: async () => ({ ok: false }),
               probe: async () => ({ ok: false }),
+              mcp: async () => ({ ok: false }),
+              saveMcp: async () => ({ ok: false }),
+              auth: async () => ({ ok: false }),
+              chatGpt: async () => ({ ok: false }),
             },
     };
     const reader = createOcrReader(failing);
-    assert.ok(reader !== undefined);
     await assert.rejects(async () => reader.providers(), /gateway\/internal: boom/u);
     const absent = createOcrReader({
       get: (name: string): unknown =>
         name === "remote" ? { $mount: async (): Promise<void> => undefined } : undefined,
     });
-    assert.ok(absent !== undefined);
     await assert.rejects(async () => absent.providers(), /未提供/u);
+  });
+});
+
+describe("isRemoteRefused：判别「请求被拒」与「结论不理想」", () => {
+  it("ok 不能当判别式：test 的 ok 两态都取得到，与拒绝回执的 ok=false 重叠", () => {
+    // 两者都是 { ok: false, ... }，靠 ok 判会把「LLM 测试没过」说成「请求被拒」，
+    // 用户看到的文案与接下来该做什么完全不同。判据是拒绝回执独有的 status。
+    const refused: OcrTestReply = { ok: false, error: "boom", status: 400 };
+    const testFailed: OcrTestReply = { ok: false, output: "auth failed" };
+    const testPassed: OcrTestReply = { ok: true, output: "ok" };
+    assert.equal(isRemoteRefused(refused), true);
+    assert.equal(isRemoteRefused(testFailed), false);
+    assert.equal(isRemoteRefused(testPassed), false);
+    // 收窄之后才能读 error/status 而不用断言
+    if (isRemoteRefused(refused)) {
+      assert.equal(refused.status, 400);
+      assert.equal(refused.error, "boom");
+    }
+  });
+
+  it("probe 的 ok=false（版本不一致）同样不是拒绝", () => {
+    const inconsistent: OcrProbeReply = {
+      ok: false,
+      version: "1.12.0",
+      expectedVersion: "1.13.3",
+      consistent: false,
+      output: "",
+      reason: "",
+      changeText: "",
+    };
+    assert.equal(isRemoteRefused(inconsistent), false);
   });
 });
