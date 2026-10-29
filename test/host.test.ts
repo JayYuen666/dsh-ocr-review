@@ -30,6 +30,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Context } from "@deepseek-ai/cordis";
 import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import type { JobId, JobKind } from "@deepseek-ai/dsh-jobs";
+import { SessionId as brandSessionId } from "@deepseek-ai/dsh-session";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
 import { MESSAGES } from "../lib/messages.ts";
 import { resolveOcrAvailability, EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
@@ -279,6 +280,18 @@ const OCR_JOB_ID = /^ocr-review-[0-9a-f]{16}$/u;
  */
 function makeJobRegistry(pumpPollMs = PUMP_MS): LocalJobRegistry {
   return new LocalJobRegistry(new Context(), registryDefaults({ pumpPollMs }));
+}
+
+/** 官方 `registry.resolveOwner` 读的 agent 注册表面：会话 id → 活 Agent 的 ctx。 */
+interface AgentRegistryStub {
+  get: (session: string) => { ctx: Context } | undefined;
+}
+
+/** 带 agent 注册表的注册表实例：有 owner 的作业要在 start 时查到这条活 Agent。 */
+function makeOwnedJobRegistry(agents: AgentRegistryStub): LocalJobRegistry {
+  const ctx = new Context();
+  ctx.reflect.provide("agents", agents);
+  return new LocalJobRegistry(ctx, registryDefaults({ pumpPollMs: PUMP_MS }));
 }
 
 /**
@@ -546,6 +559,8 @@ interface FakeHost {
   shell: FakeShell;
   /** 官方注册表的实现本身（见 makeJobRegistry）；后台评审作业的真身都在它里面。 */
   jobs: LocalJobRegistry;
+  /** 会话 id → 该会话的 Agent ctx（`jobs.start` 的 owner 校验要查这一位）。 */
+  agents: Map<string, Context>;
   /** ctx.effect 登记的释放器（卸载用例要手动跑一遍）。 */
   effectDisposers: (() => void)[];
   /** `reflect.provide` 收到的服务（Remote 读面是否上线、其依赖闭包能否取数）。 */
@@ -557,7 +572,7 @@ interface FakeHost {
    *  子 fiber 先卸后装，主 fiber 的效应那时还没轮到）。 */
   injectEffectDisposers: (() => void)[];
   /** ctx.on 注册的事件监听器（按事件名分组）：用例经 emit 触发，验证会话回收接合。 */
-  listeners: Map<string, Set<() => void>>;
+  listeners: Map<string, Set<(payload?: unknown) => void>>;
   /** 被问过存在性的 ref（卡片侧）。 */
   describedRefs: string[];
   /** 被问过「能否解析」的 ref（应用侧）。 */
@@ -582,9 +597,9 @@ interface FakeHost {
   /** ctx.effect(factory)：立即执行并把返回的释放器收进 effectDisposers。 */
   effect: (factory: () => (() => void) | undefined) => void;
   /** ctx.on(event, listener)：cordis 返回释放器；替身记录监听器供用例触发。 */
-  on: (event: string, listener: () => void) => () => void;
+  on: (event: string, listener: (payload?: unknown) => void) => () => void;
   /** 用例侧触发：按注册顺序调用该事件的监听器（复刻 cordis emit）。 */
-  emit: (event: string) => void;
+  emit: (event: string, payload?: unknown) => void;
 }
 
 /** 宿主替身的可选项：两个官方通道的装配状态与回答。 */
@@ -655,6 +670,7 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
     },
   };
   let settingsLookups = 0;
+  const agents = new Map<string, Context>();
   const host: FakeHost = {
     registeredTools: [],
     registeredRoutes: [],
@@ -662,7 +678,13 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
     listeners: new Map(),
     configureCalls: [],
     fiber: { id: "ocr-review-fiber" },
-    jobs: makeJobRegistry(),
+    jobs: makeOwnedJobRegistry({
+      get: (session) => {
+        const ctx = agents.get(session);
+        return ctx === undefined ? undefined : { id: session, ctx };
+      },
+    }),
+    agents,
     effectDisposers: [],
     provided: new Map(),
     reflect: {
@@ -740,9 +762,9 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
         set.delete(listener);
       };
     },
-    emit: (event) => {
+    emit: (event, payload) => {
       for (const listener of host.listeners.get(event) ?? []) {
-        listener();
+        listener(payload);
       }
     },
     get: (name: string) => {
@@ -777,6 +799,15 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
           options.settingsVanishes === true && settingsLookups > 1 ? undefined : host.settings;
       } else if (name === "jobs" && options.jobs !== false) {
         service = host.jobs;
+      } else if (name === "agents") {
+        // 官方 agent 注册表：只给 owner 判定读的那一位（会话 id → 活 Agent）。
+        service = {
+          // 官方 Agent 的 `id` 就是会话 id（注册表按它写 view.owner 与 Lifecycle 记录）。
+          get: (session: string) => {
+            const ctx = host.agents.get(session);
+            return ctx === undefined ? undefined : { id: session, ctx };
+          },
+        };
       } else if (name === "credentials" && options.credentialsService !== false) {
         service =
           options.partialCredentials === true ? { describe: credentials.describe } : credentials;
@@ -973,11 +1004,23 @@ function fakeExec(signal: AbortSignal, agent: unknown): HostExec {
   return { signal, agent } as HostExec;
 }
 
-function makeExec(cwd?: string): HostExec {
+function makeExec(cwd?: string, sessionId?: string): HostExec {
+  if (sessionId !== undefined) {
+    return {
+      signal: new AbortController().signal,
+      agent: { session: { id: sessionId, header: cwd === undefined ? {} : { cwd } } },
+    } as HostExec;
+  }
   return {
     signal: new AbortController().signal,
     agent: cwd === undefined ? {} : { session: { header: { cwd } } },
   } as HostExec;
+}
+
+/** 把一个会话登记成活 Agent（owner 校验用），并返回该会话的 exec。 */
+function ownExec(host: FakeHost, sessionId: string, cwd?: string): HostExec {
+  host.agents.set(sessionId, new Context());
+  return makeExec(cwd, sessionId);
 }
 
 /**
@@ -1909,22 +1952,148 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     it("会话 dispose ⇒ 经注册表回收在跑的后台评审，reason 落进 detail", async () => {
       const host = makeHost();
       applyPlugin(host);
-      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+      const exec = ownExec(host, "s1");
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, exec);
       const [proc] = host.shell.procs;
-      const [job] = host.jobs.list();
+      const [job] = host.jobs.list(brandSessionId("s1"));
       expect(job?.status).toBe("running");
-      host.emit(SESSION_DISPOSED);
+      expect(job?.owner, "会话发起的作业带 owner").toBe("s1");
+      host.emit(SESSION_DISPOSED, { id: "s1" });
       // 经 registry.kill 而不是裸 proc.kill：名册里那条必须立刻显出"正在收"，
       // 否则观察者会一直以为它还在跑（实测这条曾经就是停在 running 的）。
-      expect(host.jobs.get(onlyJob(job)).status).toBe("stopping");
+      expect(host.jobs.get(onlyJob(job), brandSessionId("s1")).status).toBe("stopping");
       expect(proc?.killCount, "会话回收那一臂仍要把进程杀掉").toBe(1);
       proc?.settle();
       await settledTick();
-      const [settled] = host.jobs.list();
+      const [settled] = host.jobs.list(brandSessionId("s1"));
       expect(settled?.status).toBe("killed");
       // detail 的组成钉死（生产者结局在前、注册表追加 reason），reason 本体取字典：
       // 字典改文案不该让这条契约用例红，改**拼接次序**才该。
       expect(settled?.detail).toBe(`killed before exit; ${zh.jobReasonSessionStopped}`);
+    });
+
+    it("会话 dispose 只收自己的作业：别的会话与 agentless 都不动", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, ownExec(host, "s1"));
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, ownExec(host, "s2"));
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+      expect(host.shell.procs).toHaveLength(3);
+      const s1Job = host.jobs.list(brandSessionId("s1")).find((job) => job.owner === "s1");
+      const s2Job = host.jobs.list(brandSessionId("s2")).find((job) => job.owner === "s2");
+      const agentless = host.jobs.list().find((job) => job.owner === undefined);
+      if (s1Job === undefined || s2Job === undefined || agentless === undefined) {
+        throw new Error("三条作业都在册");
+      }
+      host.emit(SESSION_DISPOSED, { id: "s1" });
+      expect(host.jobs.get(s1Job.id, brandSessionId("s1")).status, "s1 的作业被收").toBe(
+        "stopping",
+      );
+      expect(host.jobs.get(s2Job.id, brandSessionId("s2")).status, "s2 的作业不动").toBe("running");
+      expect(host.jobs.get(agentless.id).status, "agentless 作业不动").toBe("running");
+      for (const proc of host.shell.procs) {
+        proc.settle();
+      }
+      await settledTick();
+    });
+
+    it("agentless 作业不随任何会话 dispose 回收，随插件卸载一起收", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+      const [proc] = host.shell.procs;
+      const [job] = host.jobs.list();
+      host.emit(SESSION_DISPOSED, { id: "s1" });
+      expect(host.jobs.get(onlyJob(job)).status, "agentless 不归这条会话").toBe("running");
+      expect(proc?.killCount).toBe(0);
+      for (const dispose of host.effectDisposers) {
+        dispose();
+      }
+      expect(host.jobs.get(onlyJob(job)).status, "卸载时统一收").toBe("stopping");
+      expect(proc?.killCount).toBe(1);
+      proc?.settle();
+      await settledTick();
+    });
+
+    it("卸载收掉有主作业：别的会话起的后台评审也随插件卸载结束", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, ownExec(host, "s1"));
+      const [proc] = host.shell.procs;
+      const [job] = host.jobs.list(brandSessionId("s1"));
+      for (const dispose of host.effectDisposers) {
+        dispose();
+      }
+      expect(
+        host.jobs.get(onlyJob(job), brandSessionId("s1")).status,
+        "台账里的有主作业也要收",
+      ).toBe("stopping");
+      expect(proc?.killCount).toBe(1);
+      proc?.settle();
+      await settledTick();
+    });
+
+    it("卸载也移除有主作业的已落定记录", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, ownExec(host, "s1"));
+      const [proc] = host.shell.procs;
+      proc?.settle();
+      await settledTick();
+      expect(host.jobs.list(brandSessionId("s1"))).toHaveLength(1);
+      for (const dispose of host.effectDisposers) {
+        dispose();
+      }
+      expect(host.jobs.list(brandSessionId("s1")), "已落定记录随卸载移除").toStrictEqual([]);
+    });
+
+    it("会话 dispose 也移除该会话已落定的记录", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, ownExec(host, "s1"));
+      const [proc] = host.shell.procs;
+      proc?.settle();
+      await settledTick();
+      host.emit(SESSION_DISPOSED, { id: "s1" });
+      expect(host.jobs.list(brandSessionId("s1")), "会话的记录随会话回收").toStrictEqual([]);
+      expect(proc?.killCount).toBe(0);
+    });
+
+    it("卸载不碰别的插件（别的 kind）的无主作业", async () => {
+      const host = makeHost();
+      const detach = host.jobs.attachController("test");
+      const foreignGate = Promise.withResolvers<{ status: "completed" }>();
+      const foreign = host.jobs.start({
+        kind: "bash",
+        label: "foreign",
+        run: () => ({ cancel: noop(), done: foreignGate.promise }),
+      });
+      detach();
+      applyPlugin(host);
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+      const [proc] = host.shell.procs;
+      for (const dispose of host.effectDisposers) {
+        dispose();
+      }
+      expect(host.jobs.get(foreign).status, "别的 kind 的作业不动").toBe("running");
+      foreignGate.resolve({ status: "completed" });
+      proc?.settle();
+      await settledTick();
+    });
+
+    it("session/disposed 载荷认不出会话 ⇒ 一条作业都不动", async () => {
+      const host = makeHost();
+      applyPlugin(host);
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, ownExec(host, "s1"));
+      const [proc] = host.shell.procs;
+      const [job] = host.jobs.list(brandSessionId("s1"));
+      host.emit(SESSION_DISPOSED, {});
+      expect(host.jobs.get(onlyJob(job), brandSessionId("s1")).status).toBe("running");
+      host.emit(SESSION_DISPOSED, { id: "" });
+      expect(host.jobs.get(onlyJob(job), brandSessionId("s1")).status).toBe("running");
+      expect(proc?.killCount).toBe(0);
+      proc?.settle();
+      await settledTick();
     });
 
     it("注册表已经不认这些记录 ⇒ 会话回收就地收敛，不把异常抛给事件总线", async () => {
@@ -1932,10 +2101,11 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       const real = host.jobs;
       host.jobs = registryWithThrowingKill(real);
       applyPlugin(host);
-      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+      const exec = ownExec(host, "s1");
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, exec);
       const [proc] = host.shell.procs;
       const uncaught = await collectUncaught(async () => {
-        host.emit(SESSION_DISPOSED);
+        host.emit(SESSION_DISPOSED, { id: "s1" });
       });
       // 事件处理器里抛出的错误由 Node 以 `process.nextTick(() => { throw err })` 重抛 ⇒ 未捕获
       // 异常 ⇒ **整个宿主进程退出**（本机实跑复现）。会话结束时再炸一次宿主没有任何补救价值，
@@ -1943,7 +2113,9 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(uncaught, "会话回收链不许把异常交给 Node").toStrictEqual([]);
       // 注册表不认这些记录 ⇒ 手里没有进程句柄可杀，如实记录不假装收过。
       expect(proc?.killCount).toBe(0);
-      expect(real.list()[0]?.status, "名册归别人管时不假装收过了").toBe("running");
+      expect(real.list(brandSessionId("s1"))[0]?.status, "名册归别人管时不假装收过了").toBe(
+        "running",
+      );
       // 收尾把这条活作业落定，别把泵留给别人（判据统一写在文件级 `afterEach` 那一处）。
       proc?.settle();
       await settledTick();
@@ -1952,7 +2124,8 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     it("proc.kill 自己抛（ESRCH 那一类）⇒ 被 cancel 兜住，名册照样推到 stopping", async () => {
       const host = makeHost();
       applyPlugin(host);
-      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+      const exec = ownExec(host, "s1");
+      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, exec);
       const [proc] = host.shell.procs;
       if (proc === undefined) {
         throw new Error("后台评审没起出进程");
@@ -1960,17 +2133,18 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       proc.kill = () => {
         throw new Error("ESRCH: no such process");
       };
-      const [job] = host.jobs.list();
+      const [job] = host.jobs.list(brandSessionId("s1"));
       const uncaught = await collectUncaught(async () => {
-        host.emit(SESSION_DISPOSED);
+        host.emit(SESSION_DISPOSED, { id: "s1" });
       });
       expect(uncaught).toStrictEqual([]);
       // 这条断言才是 `killProc` 自己的牙齿（而不是 `stop` 那层 catch 顺带兜住）：官方 `killJob`
       // 先调 `job.cancel()` 再把记录推到 stopping（installed dsh-jobs-local:611-622），
       // cancel 一抛那条就永远停在 running。
-      expect(host.jobs.get(onlyJob(job)).status, "cancel 抛错不能把记录留在 running").toBe(
-        "stopping",
-      );
+      expect(
+        host.jobs.get(onlyJob(job), brandSessionId("s1")).status,
+        "cancel 抛错不能把记录留在 running",
+      ).toBe("stopping");
       // 收尾落定（判据统一写在文件级 `afterEach` 那一处）。
       proc.settle();
       await settledTick();
@@ -2068,6 +2242,18 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       ).rejects.toThrow(/no ctx\.jobs/u);
       expect(host.shell.procs).toHaveLength(0);
       expect(host.shell.resolveCalls).toHaveLength(0);
+    });
+
+    it("宿主没装 ctx.jobs 不影响前台评审（wait:true 不经过注册表）", async () => {
+      // 准入条件若按「有没有 jobs」写，会把一条本来能跑的前台路径关掉。
+      const host = makeHost({ jobs: false });
+      applyPlugin(host);
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const result = await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      );
+      expect((result as { status: string }).status).toBe("success");
     });
 
     it("注册表拒收（并发满员）⇒ 刚起的进程立刻被杀，错误照原样抛出", async () => {

@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { z } from "zod";
 import { buildClient } from "../build-client.mjs";
 
 /** 本包包名与包根（profile 的 link: 目标必须正好是它，否则比的是另一份残留副本）。 */
@@ -94,7 +95,8 @@ function profileBundleName(): string {
 /** 本包 cordis.patch.yml 声明的裸条目 id（= 0.1.7 的 settings 命名空间 = 表单入参）。 */
 function patchEntryIds(): string[] {
   const patch = readFileSync(path.join(PKG_DIR, "cordis.patch.yml"), "utf8");
-  return [...patch.matchAll(/^\s*(?:-\s+)?id:\s*(?<id>\S+)\s*$/gmu)].map(
+  return Array.from(
+    patch.matchAll(/^\s*(?:-\s+)?id:\s*(?<id>\S+)\s*$/gmu),
     (row) => row.groups?.["id"] ?? "",
   );
 }
@@ -279,6 +281,9 @@ async function loadClientExports(): Promise<{
   const mod = loaded.factory((name: string) => {
     if (name === "react") {
       return fakeReact;
+    }
+    if (name === "zod") {
+      return { z };
     }
     throw new Error(`unexpected require in client factory: ${name}`);
   });

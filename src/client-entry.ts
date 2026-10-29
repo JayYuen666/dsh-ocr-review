@@ -20,6 +20,7 @@
 
 import { createElement, useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { z } from "zod";
 import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 import type { LocaleDictOf } from "@deepseek-ai/dsh-client-ui-slots";
@@ -50,6 +51,19 @@ import type { LocaleNs, Translate } from "./ui-messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { claimApply } from "@jayyuen66/dsh-plugin-shared/lib/card-apply";
 import { diffTouched } from "@jayyuen66/dsh-plugin-shared/lib/card-diff";
+import {
+  CARD_UI_CSS,
+  CardForm,
+  Field,
+  NumberField,
+  SaveBar,
+  Section,
+  SelectField,
+  TextField,
+  ToggleField,
+  splitHint,
+} from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
+import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
 import { OCR_BUNDLE_PACKAGE } from "../lib/remote-shape.ts";
 import { createOcrReader } from "./remote.ts";
 import type { OcrReader } from "./remote.ts";
@@ -82,9 +96,33 @@ function strOf(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/** 未知值 → 安全数字（非 number 给 fallback）。 */
-function numOf(value: unknown, fallback: number): number {
-  return typeof value === "number" ? value : fallback;
+/** 设置行的取值域：枚举/计数都交给 zod 声明，界面只消费解析后的类型。 */
+const EFFORT_SCHEMA = z.enum(["auto", "low", "medium", "high"]);
+const LANGUAGE_SCHEMA = z.enum(["中文", "English"]);
+type OcrEffort = z.infer<typeof EFFORT_SCHEMA>;
+type OcrLanguage = z.infer<typeof LANGUAGE_SCHEMA>;
+const COUNT_SCHEMA = z.int().min(0);
+
+/** 未知值 → 安全数字（非整数/越界给 fallback）。 */
+function numOf(value: unknown, fallback: number, schema: z.ZodType<number>): number {
+  const parsed = schema.safeParse(value);
+  return parsed.success ? parsed.data : fallback;
+}
+
+/** 未知值 → 枚举里的一个取值（域外给 fallback）。 */
+function textOf<Value extends string>(
+  value: unknown,
+  schema: z.ZodType<Value>,
+  fallback: Value,
+): Value {
+  const parsed = schema.safeParse(value);
+  return parsed.success ? parsed.data : fallback;
+}
+
+/** 未知值 → 布尔（非布尔给 fallback）。 */
+function booleanOf(value: unknown, fallback: boolean): boolean {
+  const parsed = z.boolean().safeParse(value);
+  return parsed.success ? parsed.data : fallback;
 }
 
 /** 错误摘要（非 Error 抛出也要可读；catch 分支共用）。 */
@@ -94,26 +132,53 @@ function errorSummary(error: unknown): string {
 
 /* ── providers 载荷逐字段投影（防御纵深，不加 any 断言）────────────── */
 
-function modelOf(raw: unknown): DshModel {
-  return { id: strOf(fieldOf(raw, "id")), name: strOf(fieldOf(raw, "name")) };
-}
+const STRING_OR_EMPTY = z.preprocess(
+  (value) => (typeof value === "string" ? value : ""),
+  z.string(),
+);
+const NULLABLE_STRING = z.preprocess(
+  (value) => (typeof value === "string" ? value : null),
+  z.string().nullable(),
+);
+const TRUE_ONLY = z.preprocess((value) => value === true, z.boolean());
 
-function providerOf(raw: unknown): DshProvider {
-  const modelsArr = fieldOf(raw, "models");
-  const models = Array.isArray(modelsArr) ? modelsArr.map((item) => modelOf(item)) : [];
-  const apiKeyEnvRaw = fieldOf(raw, "apiKeyEnv");
-  return {
-    name: strOf(fieldOf(raw, "name")),
-    displayName: strOf(fieldOf(raw, "displayName")),
-    apiKeyEnv: typeof apiKeyEnvRaw === "string" ? apiKeyEnvRaw : null,
-    baseURL: strOf(fieldOf(raw, "baseURL")),
-    models,
-    hasKey: fieldOf(raw, "hasKey") === true,
-  };
-}
+const MODEL_SCHEMA = z.object({
+  id: STRING_OR_EMPTY,
+  name: STRING_OR_EMPTY,
+});
+
+const PROVIDER_SCHEMA = z.object({
+  name: STRING_OR_EMPTY,
+  displayName: STRING_OR_EMPTY,
+  apiKeyEnv: NULLABLE_STRING,
+  baseURL: STRING_OR_EMPTY,
+  models: z.preprocess(
+    (value): unknown[] =>
+      Array.isArray(value) ? value.map((item) => (isRecord(item) ? item : {})) : [],
+    z.array(MODEL_SCHEMA),
+  ),
+  hasKey: TRUE_ONLY,
+});
+
+const CURRENT_SCHEMA = z.object({
+  provider: STRING_OR_EMPTY,
+  model: STRING_OR_EMPTY,
+  keyIsDynamic: TRUE_ONLY,
+  url: STRING_OR_EMPTY,
+});
+
+const SOURCE_SCHEMA = z.object({
+  status: STRING_OR_EMPTY,
+  message: STRING_OR_EMPTY,
+});
+
+const ENDPOINT_VERIFY_SCHEMA = z.object({
+  ok: TRUE_ONLY,
+  message: STRING_OR_EMPTY,
+});
 
 /** 可得性来源的合法域（与 host 侧 `OcrBinarySource` 同一份取值）。形状不合即「没报」。 */
-const BINARY_SOURCES = new Set(["bundled", "path", "none"]);
+const BINARY_SOURCE_SCHEMA = z.enum(["bundled", "path", "none"]);
 
 /**
  * 解析宿主送的可得性对象。导出是为了让「wire 键名」这条契约能被钉住：卡片与 host
@@ -123,26 +188,28 @@ const BINARY_SOURCES = new Set(["bundled", "path", "none"]);
  * 作废——「宿主报了 PATH 却没报版本」仍然是一条用户要看的事实。`measuredVersion` 例外，
  * 它恒在（null = 还没测过），因为「没测过」与「旧宿主不带这字段」在卡片上是同一句话。
  */
+const BINARY_SCHEMA = z.object({
+  source: BINARY_SOURCE_SCHEMA,
+  path: STRING_OR_EMPTY,
+  channel: STRING_OR_EMPTY,
+  expectedVersion: STRING_OR_EMPTY,
+  installHint: STRING_OR_EMPTY,
+  measuredVersion: NULLABLE_STRING,
+});
+
 export function binaryOf(raw: unknown): OcrBinaryView | null {
-  if (!isRecord(raw)) {
+  const parsed = BINARY_SCHEMA.safeParse(raw);
+  if (!parsed.success) {
     return null;
   }
-  const source = strOf(raw["source"]);
-  if (!BINARY_SOURCES.has(source)) {
-    return null;
-  }
-  const path = strOf(raw["path"]);
-  const channel = strOf(raw["channel"]);
-  const expectedVersion = strOf(raw["expectedVersion"]);
-  const installHint = strOf(raw["installHint"]);
-  const measured = raw["measuredVersion"];
+  const { source, path, channel, expectedVersion, installHint, measuredVersion } = parsed.data;
   return {
     source,
     ...(path === "" ? {} : { path }),
     ...(channel === "" ? {} : { channel }),
     ...(expectedVersion === "" ? {} : { expectedVersion }),
     ...(installHint === "" ? {} : { installHint }),
-    measuredVersion: typeof measured === "string" ? measured : null,
+    measuredVersion,
   };
 }
 
@@ -163,69 +230,51 @@ export async function loadCliStatus(reader: OcrReader | undefined): Promise<OcrB
   }
 }
 
+const EMPTY_PAYLOAD: ProvidersPayload = {
+  providers: [],
+  current: { provider: "", model: "", keyIsDynamic: false, url: "" },
+  getCredReady: false,
+  source: { status: "", message: "" },
+  endpointVerify: null,
+  ocrBinary: null,
+};
+
+const PROVIDERS_PAYLOAD_SCHEMA = z.object({
+  providers: z.preprocess(
+    (value): unknown[] =>
+      Array.isArray(value) ? value.map((item) => (isRecord(item) ? item : {})) : [],
+    z.array(PROVIDER_SCHEMA),
+  ),
+  current: z.preprocess((value) => (isRecord(value) ? value : {}), CURRENT_SCHEMA),
+  getCredReady: TRUE_ONLY,
+  source: z.preprocess((value) => (isRecord(value) ? value : {}), SOURCE_SCHEMA),
+  endpointVerify: z.preprocess((value) => {
+    const parsed = ENDPOINT_VERIFY_SCHEMA.safeParse(value);
+    return parsed.success ? parsed.data : null;
+  }, ENDPOINT_VERIFY_SCHEMA.nullable()),
+  ocrBinary: z.unknown().transform((value) => binaryOf(value)),
+});
+
 function providersPayloadOf(json: unknown): ProvidersPayload {
-  const providersArr = fieldOf(json, "providers");
-  const providers = Array.isArray(providersArr) ? providersArr.map((item) => providerOf(item)) : [];
-  const currentRaw = fieldOf(json, "current");
-  const current = {
-    provider: strOf(fieldOf(currentRaw, "provider")),
-    model: strOf(fieldOf(currentRaw, "model")),
-    keyIsDynamic: fieldOf(currentRaw, "keyIsDynamic") === true,
-    url: strOf(fieldOf(currentRaw, "url")),
-  };
-  // source 是宿主给的结构化降级状态（status + 给用户看的 message）；wire 上一切
-  // 未知取值都按「不可用」处理，只有 status === "ready" 才允许渲染选择器。
-  const sourceRaw = fieldOf(json, "source");
-  // 装载期端点自检：宿主没跑（或旧宿主不带该字段）时为 null；形状不合按 null 处理。
-  const verifyRaw = fieldOf(json, "endpointVerify");
-  const endpointVerify =
-    verifyRaw === null || verifyRaw === undefined
-      ? null
-      : { ok: fieldOf(verifyRaw, "ok") === true, message: strOf(fieldOf(verifyRaw, "message")) };
-  return {
-    providers,
-    current,
-    getCredReady: fieldOf(json, "getCredReady") === true,
-    source: {
-      status: strOf(fieldOf(sourceRaw, "status")),
-      message: strOf(fieldOf(sourceRaw, "message")),
-    },
-    endpointVerify,
-    ocrBinary: binaryOf(fieldOf(json, "ocrBinary")),
-  };
+  const parsed = PROVIDERS_PAYLOAD_SCHEMA.safeParse(json);
+  return parsed.success ? parsed.data : EMPTY_PAYLOAD;
 }
 
-/** 三行表单控件（数字/文本/下拉）共用的类名 = CARD_CSS 里 `.ocr-select{…}` 那条规则。
- *  抽出来是因为两处 input 与一处 select 必须同宽同边框：写三遍字面量时改一处漏两处，
- *  症状是设置卡里某一行的控件比其它行窄。 */
-const FORM_CONTROL_CLASS = "ocr-select";
+/** 动作按钮行的类名（共享组件的行内按钮组；多处共用，见 sonarjs 的重复字面量门禁）。 */
+const ACTIONS_CLASS = "ocr-actions";
 
-/** 小节标题的类名（卡片头、CLI 状态行、详情页区块共用；sonarjs 的重复字面量门禁）。 */
+/** 小节标题的类名（详情页区块共用；sonarjs 的重复字面量门禁）。 */
 const CARD_NAME_CLASS = "ocr-card-name";
 
 const CARD_CSS = [
-  // 设置卡外壳（复刻其它自研卡片/一方 PluginCard：边框圆角卡片 + 可折叠 header）
-  ".ocr-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}",
-  ".ocr-card:hover{border-color:var(--dsw-alias-label-dimmed)}",
-  ".ocr-card-open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}",
-  ".ocr-card-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:transparent;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}",
-  ".ocr-card-header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}",
-  ".ocr-card-head{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}",
-  ".ocr-card-name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}",
-  ".ocr-card-desc{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}",
-  ".ocr-card-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}",
-  ".ocr-card-chevron-open{transform:rotate(180deg)}",
-  ".ocr-card-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:8px 0 12px;font-size:13px;line-height:1.5}",
-  ".ocr-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0}",
-  ".ocr-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99);margin-top:2px}",
-  ".ocr-select{flex:none;width:min(46%,240px);box-sizing:border-box;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,#d8dbe2);border-radius:8px;padding:5px 8px}",
-  ".ocr-btn{appearance:auto;font:inherit;font-size:12px;cursor:pointer;border-radius:6px;padding:4px 12px;border:1px solid var(--dsw-alias-border-l2,#d8dbe2);background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit)}",
-  ".ocr-btn:disabled{opacity:.5;cursor:not-allowed}",
-  ".ocr-btn-primary{background:var(--dsw-alias-brand-primary,#2f6fed);border-color:var(--dsw-alias-brand-primary,#2f6fed);color:var(--dsw-alias-label-primary-foreground,#fff)}",
-  ".ocr-status{font-size:12px;margin-top:6px;white-space:pre-wrap;word-break:break-word}",
-  ".ocr-err{color:#c4483f}",
+  ".ocr-card-name{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:600;line-height:1.4}",
+  ".ocr-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99);line-height:1.5}",
+  ".ocr-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}",
+  ".ocr-status{font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;margin:8px 0 0}",
+  ".ocr-err{color:var(--dsw-alias-state-error-primary)}",
   ".ocr-ok{color:var(--dsw-alias-label-primary,inherit)}",
   ".ocr-muted{color:var(--dsw-alias-label-tertiary,#8a8f99)}",
+  ".ocr-adminTextarea{min-height:160px}",
 ].join("\n");
 
 export interface DshModel {
@@ -340,304 +389,6 @@ export function cardStore(scope: EntryForm): {
   };
 }
 
-export function SaveBar(props: {
-  t: Translate;
-  dirty: boolean;
-  writable: boolean;
-  busy: boolean;
-  error: string | null;
-  onSave: () => void;
-  onDiscard: () => void;
-}): ReactNode {
-  const { t } = props;
-  const disabled = !props.writable || props.busy;
-  const btnStyle: Record<string, string> = {
-    appearance: "auto",
-    font: "inherit",
-    fontSize: "12px",
-    cursor: disabled || !props.dirty ? "not-allowed" : "pointer",
-    borderRadius: "6px",
-    padding: "4px 12px",
-    border: "1px solid var(--dsw-alias-border-l2,#d8dbe2)",
-    background: "var(--dsw-alias-bg-layer-1,transparent)",
-    color: "var(--dsw-alias-label-primary,inherit)",
-    opacity: disabled ? "0.5" : "1",
-  };
-  const saveBtn = createElement(
-    "button",
-    {
-      type: "button",
-      "data-field": "save",
-      disabled: disabled || !props.dirty,
-      onClick: props.onSave,
-      style: {
-        ...btnStyle,
-        background: "var(--dsw-alias-brand-primary,#2f6fed)",
-        borderColor: "var(--dsw-alias-brand-primary,#2f6fed)",
-        color: "var(--dsw-alias-label-primary-foreground,#fff)",
-      },
-    },
-    props.busy ? t("saving") : t("save"),
-  );
-  const discardBtn = createElement(
-    "button",
-    {
-      type: "button",
-      "data-field": "discard",
-      disabled: disabled || !props.dirty,
-      onClick: props.onDiscard,
-      style: btnStyle,
-    },
-    t("revert"),
-  );
-  const dirtyText = props.dirty ? t("statusDirty") : t("statusClean");
-  let statusNode: ReactNode;
-  if (props.error !== null) {
-    statusNode = createElement("span", { style: { fontSize: 12, color: "#c4483f" } }, props.error);
-  } else if (props.writable) {
-    statusNode = createElement(
-      "span",
-      { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary,#8a8f99)" } },
-      dirtyText,
-    );
-  } else {
-    statusNode = createElement(
-      "span",
-      { style: { fontSize: 12, color: "var(--dsw-alias-label-tertiary,#8a8f99)" } },
-      t("statusReadOnly"),
-    );
-  }
-  return createElement(
-    "div",
-    {
-      style: {
-        display: "flex",
-        gap: 8,
-        alignItems: "center",
-        padding: "10px 0 2px",
-        borderTop: "1px dashed var(--dsw-alias-border-l2,#d8dbe2)",
-        marginTop: 6,
-        flexWrap: "wrap",
-      },
-    },
-    saveBtn,
-    discardBtn,
-    statusNode,
-  );
-}
-
-/** 设置卡外壳：复刻同款自研卡片（边框圆角卡片 + 可折叠 header + chevron）。 */
-function OcrPluginCard(props: {
-  title: string;
-  description: string;
-  children?: ReactNode;
-}): ReactNode {
-  const { title, description, children } = props;
-  const [open, setOpen] = useState(false);
-  const pathKey = "d";
-  const headRow = createElement(
-    "span",
-    { className: "ocr-card-head" },
-    createElement("span", { className: CARD_NAME_CLASS }, title),
-    createElement("span", { className: "ocr-card-desc" }, description),
-  );
-  const chevron = createElement(
-    "svg",
-    {
-      width: 14,
-      height: 14,
-      viewBox: "0 0 14 14",
-      "aria-hidden": true,
-      className: `ocr-card-chevron${open ? " ocr-card-chevron-open" : ""}`,
-    },
-    createElement("path", {
-      [pathKey]: "M3 5l4 4 4-4",
-      fill: "none",
-      stroke: "currentColor",
-      strokeWidth: 1.5,
-      strokeLinecap: "round",
-      strokeLinejoin: "round",
-    }),
-  );
-  const header = createElement(
-    "button",
-    {
-      type: "button",
-      className: "ocr-card-header",
-      "aria-expanded": open,
-      onClick: () => {
-        setOpen(!open);
-      },
-    },
-    headRow,
-    chevron,
-  );
-  const body = open ? createElement("div", { className: "ocr-card-body" }, children) : null;
-  // 根节点是 div 而不是 li：宿主把本卡放进 PackageDetail 的 <section data-plugin-config>
-  // 与 SlotOutlet 的 <div data-slot>，两处都不是列表，li 在此是非法嵌套。本卡靠 class 画
-  // 外观，不需要列表语义。
-  return createElement(
-    "div",
-    { className: `ocr-card${open ? " ocr-card-open" : ""}` },
-    header,
-    body,
-  );
-}
-
-interface NumberRowProps {
-  label: string;
-  hint: string;
-  field: string;
-  value: number;
-  min: number;
-  /** undefined = 不设上限（如 timeoutMinutes/maxComments 的"0=不限/全量"语义）。 */
-  max?: number;
-  disabled: boolean;
-  onCommit: (num: number) => void;
-}
-
-/** 整数数字输入行（保存条模式：合法输入上报草稿，不直写）。 */
-function NumberRow(props: NumberRowProps): ReactNode {
-  const { label, hint, value, min, max, disabled, onCommit } = props;
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => {
-    setDraft(String(value));
-  }, [value]);
-  /** 用**本次输入的值**上报，不读 `draft`：state 更新是异步的，`onChange` 里
-   *  `setDraft(x)` 之后立刻读 `draft` 拿到的还是上一个字符，草稿会永远滞后一格。 */
-  const stage = (text: string): void => {
-    const parsed = Number(text);
-    if (Number.isInteger(parsed) && parsed >= min && (max === undefined || parsed <= max)) {
-      onCommit(parsed);
-    }
-  };
-  return createElement(
-    "div",
-    { className: "ocr-row" },
-    createElement(
-      "div",
-      { style: { minWidth: 0, marginRight: 12 } },
-      createElement("div", {}, label),
-      createElement("div", { className: "ocr-hint" }, hint),
-    ),
-    createElement("input", {
-      type: "number",
-      "data-field": props.field,
-      value: draft,
-      min,
-      max,
-      disabled,
-      "aria-label": label,
-      onChange: (ev: { target: { value: string } }) => {
-        setDraft(ev.target.value);
-        stage(ev.target.value);
-      },
-      onKeyDown: (ev: { key: string; preventDefault: () => void }) => {
-        if (ev.key === "Enter") {
-          ev.preventDefault();
-          stage(draft);
-        }
-      },
-      className: FORM_CONTROL_CLASS,
-    }),
-  );
-}
-
-interface TextRowProps {
-  label: string;
-  hint: string;
-  field: string;
-  value: string;
-  placeholder: string;
-  disabled: boolean;
-  onCommit: (text: string) => void;
-}
-
-/** 文本输入行（保存条模式：改动只上报草稿）。空串是合法取值（= 用宿主默认位置），
- *  所以不像 NumberRow 那样要求「解析成功」才上报。 */
-function TextRow(props: TextRowProps): ReactNode {
-  const { label, hint, value, placeholder, disabled, onCommit } = props;
-  const [draft, setDraft] = useState(value);
-  useEffect(() => {
-    setDraft(value);
-  }, [value]);
-  /** 同 NumberRow：读参数而不是 `draft`，否则草稿永远滞后一格。 */
-  const stage = (text: string): void => {
-    onCommit(text.trim());
-  };
-  return createElement(
-    "div",
-    { className: "ocr-row" },
-    createElement(
-      "div",
-      { style: { minWidth: 0, marginRight: 12 } },
-      createElement("div", {}, label),
-      createElement("div", { className: "ocr-hint" }, hint),
-    ),
-    createElement("input", {
-      type: "text",
-      "data-field": props.field,
-      value: draft,
-      placeholder,
-      disabled,
-      "aria-label": label,
-      className: FORM_CONTROL_CLASS,
-      style: { width: "min(60%,320px)" },
-      onChange: (ev: { target: { value: string } }) => {
-        setDraft(ev.target.value);
-        stage(ev.target.value);
-      },
-      onKeyDown: (ev: { key: string; preventDefault: () => void }) => {
-        if (ev.key === "Enter") {
-          ev.preventDefault();
-          stage(draft);
-        }
-      },
-    }),
-  );
-}
-
-interface SelectRowProps {
-  label: string;
-  hint: string;
-  field: string;
-  options: { value: string; label: string; disabled?: boolean }[];
-  current: unknown;
-  disabled: boolean;
-  onChange: (field: string, value: string) => void;
-}
-
-function SelectRow(props: SelectRowProps): ReactNode {
-  const current = typeof props.current === "string" ? props.current : "";
-  const options = props.options.map((option) =>
-    createElement(
-      "option",
-      { key: option.value, value: option.value, disabled: option.disabled === true },
-      option.label,
-    ),
-  );
-  const labelBlock = createElement(
-    "div",
-    { style: { minWidth: 0, marginRight: 12 } },
-    createElement("div", {}, props.label),
-    createElement("div", { className: "ocr-hint" }, props.hint),
-  );
-  const select = createElement(
-    "select",
-    {
-      className: FORM_CONTROL_CLASS,
-      "aria-label": props.label,
-      value: current,
-      disabled: props.disabled,
-      onChange: (ev: { target: { value: string } }) => {
-        props.onChange(props.field, ev.target.value);
-      },
-    },
-    options,
-  );
-  return createElement("div", { className: "ocr-row" }, labelBlock, select);
-}
-
 export interface OcrCardDeps {
   /** 取文案（官方 ctx.locale.bind 的结果，见 apply）。 */
   t: Translate;
@@ -660,9 +411,9 @@ export interface OcrCardDeps {
   binary: OcrBinaryView | null;
   /** 最近一次 `ocr version` 的回执；null = 还没检测过。 */
   probeMsg: { ok: boolean; text: string } | null;
-  effortValue: unknown;
-  languageValue: unknown;
-  autoVerifyValue: unknown;
+  effortValue: OcrEffort;
+  languageValue: OcrLanguage;
+  autoVerifyValue: boolean;
   maxCommentsValue: number;
   timeoutMinutesValue: number;
   ocrConfigPathValue: string;
@@ -775,11 +526,10 @@ function statusClass(ok: boolean): string {
  */
 export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
   const { t } = deps;
-  const label = createElement("div", { className: CARD_NAME_CLASS }, t("binaryTitle"));
   const button = createElement(
     "button",
     {
-      className: "ocr-btn",
+      className: "dsu-btn",
       type: "button",
       disabled: deps.busy !== null,
       onClick: deps.onProbe,
@@ -787,20 +537,18 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
     },
     deps.busy === "probe" ? t("detecting") : t("detectCli"),
   );
-  const row = createElement(
+  const controls = createElement(
     "div",
-    { className: "ocr-row", style: { justifyContent: "flex-start", gap: 8 } },
-    label,
+    { className: ACTIONS_CLASS, "data-field": "cli-status" },
     button,
   );
-  const statusText = binaryStatusText(t, deps.binary);
-  const status = createElement("div", { className: "ocr-hint" }, statusText);
+  const status = createElement("p", { className: "dsu-hint" }, binaryStatusText(t, deps.binary));
   const versionText = cliVersionText(t, deps.binary);
   const versionLine =
-    versionText === "" ? null : createElement("div", { className: "ocr-hint" }, versionText);
+    versionText === "" ? null : createElement("p", { className: "dsu-hint" }, versionText);
   const hintText = cliInstallText(deps.binary);
   const installLine =
-    hintText === "" ? null : createElement("div", { className: "ocr-hint" }, hintText);
+    hintText === "" ? null : createElement("p", { className: "dsu-hint" }, hintText);
   const probe = deps.probeMsg
     ? createElement(
         "div",
@@ -809,12 +557,12 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
       )
     : null;
   return createElement(
-    "div",
-    { style: { padding: "2px 0" }, "data-field": "cli-status" },
-    row,
+    Section,
+    { title: t("binaryTitle"), hint: t("binaryProbeHint") },
     status,
     versionLine,
     installLine,
+    controls,
     probe,
   );
 }
@@ -1006,50 +754,13 @@ export function OcrCliActivation(props: CliStatusShare & PluginActivationOwnerPr
   return buildCliActivation(props.t, props, cliInstallText(status));
 }
 
-/** 数据齐（source.status === "ready"）那一支：provider/model 两行 + 三个动作按钮 +
- *  当前配置与 key 两行提示。拆出来是因为这一支画的是整块表单，与上面三条「一行提示」
- *  的降级支本就不是同一件事。 */
-function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): ReactNode {
+/** 数据齐时的动作行：三个按钮共用一只在飞旗标，按钮文案只跟**自己**那条走。 */
+function buildActionField(deps: OcrCardDeps): ReactNode {
   const { t } = deps;
-  const providerOptions = data.providers.map((provider) => ({
-    value: provider.name,
-    label: providerOptionLabel(t, provider),
-    disabled: !provider.hasKey,
-  }));
-  const fallbackModelName = deps.effectiveModel === "" ? t("noModel") : deps.effectiveModel;
-  const modelOptions = (
-    deps.modelOptions.length > 0
-      ? deps.modelOptions
-      : [{ id: deps.effectiveModel, name: fallbackModelName }]
-  ).map((model) => ({ value: model.id, label: model.name }));
-  const providerRow = createElement(SelectRow, {
-    label: "Provider",
-    hint: t("providerHint"),
-    field: "ocrProvider",
-    current: deps.effectiveProvider,
-    disabled: data.providers.length === 0,
-    options: providerOptions,
-    onChange: (field, value) => {
-      void field;
-      deps.onPickProvider(value);
-    },
-  });
-  const modelRow = createElement(SelectRow, {
-    label: "Model",
-    hint: deps.chosenProvider ? deps.chosenProvider.baseURL : "",
-    field: "ocrModel",
-    current: deps.effectiveModel,
-    disabled: !deps.chosenProvider || deps.modelOptions.length === 0,
-    options: modelOptions,
-    onChange: (field, value) => {
-      void field;
-      deps.onPickModel(value);
-    },
-  });
   const applyBtn = createElement(
     "button",
     {
-      className: "ocr-btn ocr-btn-primary",
+      className: "dsu-btn dsu-btnPrimary",
       type: "button",
       disabled: deps.busy !== null,
       onClick: deps.onApply,
@@ -1060,7 +771,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
   const testBtn = createElement(
     "button",
     {
-      className: "ocr-btn",
+      className: "dsu-btn",
       type: "button",
       disabled: deps.busy !== null,
       onClick: deps.onTest,
@@ -1071,7 +782,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
   const migrateBtn = createElement(
     "button",
     {
-      className: "ocr-btn",
+      className: "dsu-btn",
       type: "button",
       disabled: deps.busy !== null,
       onClick: deps.onMigrate,
@@ -1079,60 +790,141 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     },
     t("migrateKeys"),
   );
-  const actionRow = createElement(
-    "div",
-    { className: "ocr-row", style: { justifyContent: "flex-start", gap: 8 } },
-    applyBtn,
-    testBtn,
-    migrateBtn,
+  return createElement(
+    Field,
+    { label: t("actionsLabel"), wide: true },
+    createElement("div", { className: ACTIONS_CLASS }, applyBtn, testBtn, migrateBtn),
   );
+}
+
+/** 当前配置 / key / 装载期自检三行提示（自检失败只作提示，不挡表单）。 */
+function buildProviderInfo(deps: OcrCardDeps, data: ProvidersPayload): ReactNode[] {
+  const { t } = deps;
   const cur = data.current;
   const currentHint = cur.provider === "" ? t("noProvider") : currentConfigText(t, cur);
-  const currentInfo = createElement("div", { className: "ocr-hint" }, currentHint);
-  const keyInfo = createElement("div", { className: "ocr-hint" }, deps.keyHint);
-  // 装载期自检失败只作提示：配置照样可以改（正因为端点可能配错，才不该挡住表单）。
+  const currentInfo = createElement("p", { className: "dsu-hint" }, currentHint);
+  const keyInfo = createElement("p", { className: "dsu-hint" }, deps.keyHint);
   const verify = data.endpointVerify ?? null;
   const verifyWarning =
     verify !== null && !verify.ok
       ? createElement(
-          "div",
-          { className: STATUS_ERROR_CLASS, "data-field": "endpoint-verify" },
+          "p",
+          { className: "dsu-error", "data-field": "endpoint-verify" },
           t("endpointVerifyFailed", { reason: verify.message }),
         )
       : null;
-  return createElement(
-    "div",
-    {},
-    verifyWarning,
-    providerRow,
-    modelRow,
-    actionRow,
-    currentInfo,
-    keyInfo,
-  );
+  return [verifyWarning, currentInfo, keyInfo];
+}
+
+/** 数据齐（source.status === "ready"）那一支：模型四个字段 + 动作行 + 三行提示。 */
+function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): ReactNode[] {
+  const { t } = deps;
+  const providerOptions: SelectOption[] = data.providers.map((provider) => ({
+    value: provider.name,
+    label: providerOptionLabel(t, provider),
+    disabled: !provider.hasKey,
+  }));
+  const fallbackModelName = deps.effectiveModel === "" ? t("noModel") : deps.effectiveModel;
+  const modelOptions: SelectOption[] = (
+    deps.modelOptions.length > 0
+      ? deps.modelOptions
+      : [{ id: deps.effectiveModel, name: fallbackModelName }]
+  ).map((model) => ({ value: model.id, label: model.name }));
+  const effortOptions: SelectOption[] = [
+    { value: "auto", label: t("effortAuto") },
+    { value: "low", label: t("effortLow") },
+    { value: "medium", label: t("effortMedium") },
+    { value: "high", label: t("effortHigh") },
+  ];
+  // value 是写进 config.language 并透传给外部 ocr CLI 的枚举值，label 是语言的
+  // 自称——两侧都不是界面文案，故不进字典（见 src/ui-messages.ts 头注释）。
+  const languageOptions: SelectOption[] = [
+    { value: "中文", label: "中文" },
+    { value: "English", label: "English" },
+  ];
+  const modelUrl = deps.chosenProvider?.baseURL ?? "";
+  const providerField = createElement(SelectField, {
+    label: "Provider",
+    ...splitHint(t("providerHint")),
+    field: "ocrProvider",
+    value: deps.effectiveProvider,
+    options: providerOptions,
+    disabled: data.providers.length === 0,
+    onChange: deps.onPickProvider,
+  });
+  const modelField = createElement(SelectField, {
+    label: "Model",
+    ...(modelUrl === "" ? {} : { hint: modelUrl }),
+    field: "ocrModel",
+    value: deps.effectiveModel,
+    options: modelOptions,
+    disabled: !deps.chosenProvider || deps.modelOptions.length === 0,
+    onChange: deps.onPickModel,
+  });
+  const effortField = createElement(SelectField, {
+    label: t("effortLabel"),
+    ...splitHint(t("effortHint")),
+    field: "effort",
+    value: deps.effortValue,
+    options: effortOptions,
+    disabled: !deps.writable,
+    onChange: (next: string): void => {
+      deps.onField("effort", next);
+    },
+  });
+  const languageField = createElement(SelectField, {
+    label: t("languageLabel"),
+    ...splitHint(t("languageHint")),
+    field: "language",
+    value: deps.languageValue,
+    options: languageOptions,
+    disabled: !deps.writable,
+    onChange: (next: string): void => {
+      deps.onField("language", next);
+    },
+  });
+  const verifyField = createElement(ToggleField, {
+    label: t("autoVerifyLabel"),
+    ...splitHint(t("autoVerifyHint")),
+    field: "autoVerify",
+    checked: deps.autoVerifyValue,
+    disabled: !deps.writable,
+    onChange: (next: boolean): void => {
+      deps.onField("autoVerify", next);
+    },
+  });
+  return [
+    providerField,
+    modelField,
+    effortField,
+    languageField,
+    verifyField,
+    buildActionField(deps),
+    ...buildProviderInfo(deps, data),
+  ];
 }
 
 /** Provider / Model 选择与应用区：三条降级各出一行提示（数据未就绪/读取失败/
  *  数据源不可用），只有 source.status === "ready" 才交给 buildReadyProviderSection 画表单。 */
 export function buildProviderSection(deps: OcrCardDeps): ReactNode {
   const { t } = deps;
+  let body: ReactNode;
   if (deps.fetchError !== null) {
     const reason = t("loadProvidersFailed", { error: deps.fetchError });
-    return createElement("div", { className: STATUS_ERROR_CLASS }, reason);
-  }
-  if (deps.data === null) {
-    return createElement("div", { className: "ocr-status ocr-muted" }, t("loadingProviders"));
-  }
-  if (deps.data.source.status !== "ready") {
+    body = createElement("p", { className: "dsu-error" }, reason);
+  } else if (deps.data === null) {
+    body = createElement("p", { className: "dsu-hint" }, t("loadingProviders"));
+  } else if (deps.data.source.status === "ready") {
+    body = buildReadyProviderSection(deps, deps.data);
+  } else {
     // 不点名任何宿主文件：卡片并不知道（也不该知道）配置与凭据存在哪里，
     // 原因由宿主的 source.message 给（settings/credentials 服务缺席、命名空间未
     // 注册、读取抛错…），卡片只负责把原因显示出来（原因本身是 host 侧双语过的）。
     const sourceMessage = deps.data.source.message;
     const reason = sourceMessage === "" ? t("noReason") : sourceMessage;
-    const line = t("readProvidersFailed", { reason });
-    return createElement("div", { className: STATUS_ERROR_CLASS }, line);
+    body = createElement("p", { className: "dsu-error" }, t("readProvidersFailed", { reason }));
   }
-  return buildReadyProviderSection(deps, deps.data);
+  return createElement(Section, { title: t("modelSection") }, body);
 }
 
 interface SelectionResult {
@@ -1206,112 +998,74 @@ function resolveSelection(
   };
 }
 
-/** 设置行（effort/language/autoVerify + 保存条）。 */
+/** 审查参数小节：评论条数、运行超时、配置文件路径 + 保存条。 */
 export function buildSettingsSection(
   deps: OcrCardDeps,
   writable: boolean,
   setField: (field: string, value: unknown) => void,
 ): ReactNode {
   const { t } = deps;
-  const effortRow = createElement(SelectRow, {
-    label: t("effortLabel"),
-    hint: t("effortHint"),
-    field: "effort",
-    current: deps.effortValue,
-    disabled: !writable,
-    options: [
-      { value: "auto", label: t("effortAuto") },
-      { value: "low", label: t("effortLow") },
-      { value: "medium", label: t("effortMedium") },
-      { value: "high", label: t("effortHigh") },
-    ],
-    onChange: (field, draft) => {
-      setField(field, draft);
-    },
-  });
-  const languageRow = createElement(SelectRow, {
-    label: t("languageLabel"),
-    hint: t("languageHint"),
-    field: "language",
-    current: deps.languageValue,
-    disabled: !writable,
-    // value 是写进 config.language 并透传给外部 ocr CLI 的枚举值，label 是语言的
-    // 自称——两侧都不是界面文案，故不进字典（见 src/ui-messages.ts 头注释）。
-    options: [
-      { value: "中文", label: "中文" },
-      { value: "English", label: "English" },
-    ],
-    onChange: (field, draft) => {
-      setField(field, draft);
-    },
-  });
-  const verifyRow = createElement(SelectRow, {
-    label: t("autoVerifyLabel"),
-    hint: t("autoVerifyHint"),
-    field: "autoVerify",
-    current: deps.autoVerifyValue === true ? "on" : "off",
-    disabled: !writable,
-    options: [
-      { value: "on", label: t("onLabel") },
-      { value: "off", label: t("offLabel") },
-    ],
-    onChange: (field, draft) => {
-      setField(field, draft === "on");
-    },
-  });
-  const maxCommentsRow = createElement(NumberRow, {
+  const maxCommentsRow = createElement(NumberField, {
     label: t("maxCommentsLabel"),
-    hint: t("maxCommentsHint"),
+    ...splitHint(t("maxCommentsHint")),
     field: "maxComments",
     value: deps.maxCommentsValue,
-    min: 0,
+    ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
+    step: 1,
+    invalidHint: t("outOfRange"),
     disabled: !writable,
-    onCommit: (num) => {
-      setField("maxComments", num);
+    onChange: (next: number | undefined): void => {
+      setField("maxComments", next);
     },
   });
-  const timeoutRow = createElement(NumberRow, {
+  const timeoutRow = createElement(NumberField, {
     label: t("timeoutLabel"),
-    hint: t("timeoutHint"),
+    ...splitHint(t("timeoutHint")),
     field: "timeoutMinutes",
     value: deps.timeoutMinutesValue,
-    min: 0,
+    ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
+    step: 1,
+    invalidHint: t("outOfRange"),
     disabled: !writable,
-    onCommit: (num) => {
-      setField("timeoutMinutes", num);
+    onChange: (next: number | undefined): void => {
+      setField("timeoutMinutes", next);
     },
   });
-  const configPathRow = createElement(TextRow, {
+  const configPathRow = createElement(TextField, {
     label: t("configPathLabel"),
-    hint: t("configPathHint"),
+    ...splitHint(t("configPathHint")),
     field: "ocrConfigPath",
     value: deps.ocrConfigPathValue,
     placeholder: "~/.opencodereview/config.json",
+    monospace: true,
+    wide: true,
     disabled: !writable,
-    onCommit: (text) => {
-      setField("ocrConfigPath", text);
+    onChange: (next: string): void => {
+      setField("ocrConfigPath", next.trim());
     },
   });
   const saveRow = createElement(SaveBar, {
-    t,
     dirty: deps.dirty,
     writable,
     busy: deps.settingsBusy,
     error: deps.saveError,
+    saveLabel: t("save"),
+    savingLabel: t("saving"),
+    revertLabel: t("revert"),
+    dirtyLabel: t("statusDirty"),
+    cleanLabel: t("statusClean"),
+    readOnlyLabel: t("statusReadOnly"),
     onSave: deps.onSave,
     onDiscard: deps.onDiscard,
   });
   const statusHintNode =
     deps.statusHint !== null && deps.statusHint !== ""
-      ? createElement("div", { className: "ocr-hint" }, deps.statusHint)
+      ? createElement("p", { className: "dsu-hint" }, deps.statusHint)
       : null;
   return createElement(
-    "div",
-    { style: { padding: "2px 0" } },
+    Section,
+    { title: t("reviewSection") },
     statusHintNode,
-    effortRow,
-    languageRow,
-    verifyRow,
     maxCommentsRow,
     timeoutRow,
     configPathRow,
@@ -1339,32 +1093,23 @@ export interface AdminSectionProps {
   onUseChatGpt: () => void;
 }
 
-const sectionStyle: Record<string, string> = { padding: "6px 0" };
-const titleStyle: Record<string, string> = { fontWeight: "600", fontSize: "13px" };
-const hintStyle: Record<string, string> = { fontSize: "12px", opacity: "0.8", margin: "2px 0 6px" };
-const textareaStyle: Record<string, string> = {
-  width: "100%",
-  minHeight: "120px",
-  fontFamily: "monospace",
-  fontSize: "12px",
-  boxSizing: "border-box",
-};
-
 function buildMcpAdmin(props: AdminSectionProps): ReactNode {
   const { t } = props;
   const textarea = createElement("textarea", {
     "data-field": "mcpJson",
     value: props.mcpJson,
     disabled: !props.writable || props.mcpBusy || !props.available,
+    "aria-label": t("mcpTitle"),
+    className: "dsu-input dsu-textarea dsu-mono ocr-adminTextarea",
     onChange: (event: { target: { value: string } }) => {
       props.onMcpChange(event.target.value);
     },
-    style: textareaStyle,
   });
   const button = createElement(
     "button",
     {
       type: "button",
+      className: "dsu-btn",
       "data-field": "mcpSave",
       disabled: !props.writable || props.mcpBusy || !props.available,
       onClick: props.onMcpSave,
@@ -1372,16 +1117,14 @@ function buildMcpAdmin(props: AdminSectionProps): ReactNode {
     props.mcpBusy ? t("mcpSaving") : t("mcpSave"),
   );
   const message =
-    props.mcpMsg === null ? null : createElement("div", { className: "ocr-hint" }, props.mcpMsg);
+    props.mcpMsg === null ? null : createElement("p", { className: "dsu-hint" }, props.mcpMsg);
   return createElement(
-    "div",
-    { style: sectionStyle },
-    createElement("div", { style: titleStyle }, t("mcpTitle")),
-    createElement("div", { style: hintStyle }, t("mcpHint")),
+    Section,
+    { title: t("mcpTitle"), hint: t("mcpHint") },
     props.available
       ? textarea
-      : createElement("div", { className: "ocr-hint" }, t("adminUnavailable")),
-    button,
+      : createElement("p", { className: "dsu-hint" }, t("adminUnavailable")),
+    createElement("div", { className: ACTIONS_CLASS }, button),
     message,
   );
 }
@@ -1392,6 +1135,7 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
     "button",
     {
       type: "button",
+      className: "dsu-btn",
       "data-field": "authCheck",
       disabled: props.authBusy || !props.available,
       onClick: props.onCheckAuth,
@@ -1402,6 +1146,8 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
     "data-field": "chatGptModel",
     value: props.authModel,
     disabled: !props.writable || props.authBusy || !props.available,
+    "aria-label": t("chatGptModelLabel"),
+    className: "dsu-input",
     onChange: (event: { target: { value: string } }) => {
       props.onAuthModelChange(event.target.value);
     },
@@ -1410,6 +1156,7 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
     "button",
     {
       type: "button",
+      className: "dsu-btn",
       "data-field": "chatGptUse",
       disabled: !props.writable || props.authBusy || !props.available,
       onClick: props.onUseChatGpt,
@@ -1419,27 +1166,25 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
   const output =
     props.authOutput === null
       ? null
-      : createElement("pre", { style: textareaStyle }, props.authOutput);
+      : createElement("pre", { className: "ocr-status dsu-mono" }, props.authOutput);
   const message =
-    props.authMsg === null ? null : createElement("div", { className: "ocr-hint" }, props.authMsg);
+    props.authMsg === null ? null : createElement("p", { className: "dsu-hint" }, props.authMsg);
   return createElement(
-    "div",
-    { style: sectionStyle },
-    createElement("div", { style: titleStyle }, t("chatGptTitle")),
-    createElement("div", { style: hintStyle }, t("chatGptHint")),
-    check,
-    createElement("div", { style: hintStyle }, `${t("chatGptLoginHint")} ${props.loginCommand}`),
+    Section,
+    { title: t("chatGptTitle"), hint: t("chatGptHint") },
+    createElement("div", { className: ACTIONS_CLASS }, check),
+    createElement("p", { className: "dsu-hint" }, `${t("chatGptLoginHint")} ${props.loginCommand}`),
     output,
-    createElement("div", { style: hintStyle }, t("chatGptModelLabel")),
+    createElement("p", { className: "dsu-hint" }, t("chatGptModelLabel")),
     model,
-    use,
+    createElement("div", { className: ACTIONS_CLASS }, use),
     message,
   );
 }
 
 /** MCP 配置 + ChatGPT 登录态/切换：都写 OCR 自己的配置，放在设置卡下方。 */
 export function buildAdminSection(props: AdminSectionProps): ReactNode {
-  return createElement("div", { style: sectionStyle }, buildMcpAdmin(props), buildAuthAdmin(props));
+  return createElement("div", null, buildMcpAdmin(props), buildAuthAdmin(props));
 }
 
 /** providers 读面的两个落态口（对象化以受 max-params 约束）。 */
@@ -1742,9 +1487,9 @@ export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
 
 /** 设置行的渲染值（touched 优先、快照兜底，再按各行自己的类型收口）。 */
 interface DraftFields {
-  effortValue: unknown;
-  languageValue: unknown;
-  autoVerifyValue: unknown;
+  effortValue: OcrEffort;
+  languageValue: OcrLanguage;
+  autoVerifyValue: boolean;
   maxCommentsValue: number;
   timeoutMinutesValue: number;
   ocrConfigPathValue: string;
@@ -1757,11 +1502,11 @@ function draftFieldsOf(
   const eff = (field: string, def: unknown): unknown =>
     field in touched ? touched[field] : (value[field] ?? def);
   return {
-    effortValue: eff("effort", "auto"),
-    languageValue: eff("language", "中文"),
-    autoVerifyValue: eff("autoVerify", true),
-    maxCommentsValue: numOf(eff("maxComments", 12), 12),
-    timeoutMinutesValue: numOf(eff("timeoutMinutes", 0), 0),
+    effortValue: textOf(eff("effort", "auto"), EFFORT_SCHEMA, "auto"),
+    languageValue: textOf(eff("language", "中文"), LANGUAGE_SCHEMA, "中文"),
+    autoVerifyValue: booleanOf(eff("autoVerify", true), true),
+    maxCommentsValue: numOf(eff("maxComments", 12), 12, COUNT_SCHEMA),
+    timeoutMinutesValue: numOf(eff("timeoutMinutes", 0), 0, COUNT_SCHEMA),
     ocrConfigPathValue: strOf(eff("ocrConfigPath", "")),
   };
 }
@@ -1794,13 +1539,13 @@ function cardHints(
 }
 
 /** Provider 区 = provider/model 表单 + 最近一次动作的回执条。 */
-function buildProviderPanel(deps: OcrCardDeps): ReactNode {
+function buildProviderPanel(deps: OcrCardDeps): ReactNode[] {
   const { actionMsg } = deps;
   const providerSection = buildProviderSection(deps);
   const actionMsgNode = actionMsg
-    ? createElement("div", { className: statusClass(actionMsg.ok) }, actionMsg.text)
+    ? createElement("p", { className: statusClass(actionMsg.ok) }, actionMsg.text)
     : null;
-  return createElement("div", { style: { padding: "2px 0" } }, providerSection, actionMsgNode);
+  return [providerSection, actionMsgNode];
 }
 
 type AdminState = Omit<AdminSectionProps, "t" | "writable">;
@@ -2031,17 +1776,7 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const cliStatus = buildCliStatusRow(deps);
   const settingsSection = buildSettingsSection(deps, writable, setField);
   const adminSection = buildAdminSection({ ...adminState, t, writable });
-  // 头部两行先取成变量：嵌进 createElement 里再调 t() 会顶到 max-nested-calls 上限。
-  const headTitle = t("cardTitle");
-  const headDesc = t("cardDescription");
-  return createElement(
-    OcrPluginCard,
-    { title: headTitle, description: headDesc },
-    cliStatus,
-    providerPanel,
-    settingsSection,
-    adminSection,
-  );
+  return createElement(CardForm, null, cliStatus, providerPanel, settingsSection, adminSection);
 }
 
 export interface CardSlotProps {
@@ -2120,7 +1855,7 @@ function apply(ctx: ClientCtx): void {
   ctx.effect(() => {
     const tag = document.createElement("style");
     tag.id = "ocr-review-card-css";
-    tag.textContent = CARD_CSS;
+    tag.textContent = `${CARD_CSS}\n${CARD_UI_CSS}`;
     document.head.append(tag);
     return () => {
       tag.remove();

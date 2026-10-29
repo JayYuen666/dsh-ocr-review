@@ -18,6 +18,9 @@ import {
 
 /** 整体上限：MCP 配置是一份人工维护的小表，不承载大文件。 */
 const MCP_MAX_BYTES = 64 * 1024;
+
+/** remote MCP server 的 url 只认 http(s)。 */
+const HTTP_URL = /^https?:\/\//iu;
 const MCP_MAX_SERVERS = 100;
 const MCP_MAX_ARRAY = 100;
 const MCP_MAX_TEXT = 4096;
@@ -171,7 +174,7 @@ function normalizeRemote(
   if (!url.ok) {
     return url;
   }
-  if (!/^https?:\/\//iu.test(url.value)) {
+  if (!HTTP_URL.test(url.value)) {
     return failure(name, "url", "must start with http:// or https://", messages);
   }
   const entry: Record<string, unknown> = { type: "remote", url: url.value };

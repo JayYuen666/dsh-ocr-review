@@ -37,8 +37,12 @@ import {
 } from "./argv-guard.ts";
 import type { ReviewOutputFormat } from "./argv-guard.ts";
 
-/** `ocr review|scan|delegate preview` 的背景说明 flag（三处命令构造共用一条）。
- *  pushTextFlag 按 `flag.slice(2)` 反推报错用的参数名，故值必须带 `--` 前缀。 */
+/** Homebrew 安装路径（`Cellar` / `Homebrew` 任一段）。 */
+const HOMEBREW_PATH = /(?:^|[/\\])(?:Cellar|Homebrew)(?:[/\\]|$)/iu;
+/** `ocr` 版本行：`open-code-review v1.13.3`（允许预发布/构建元数据）。 */
+const OCR_VERSION =
+  /open-code-review\s+v?(?<version>\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/u;
+
 /** `--exclude` 的模式条数上限。**不是审查范围的上限**，只是防一条失控输入把命令串撑爆；
  *  真实使用里几十条就到头，给到 2000 是为了"尽量不截断"——超了会明确告警，不静默丢。 */
 const EXCLUDE_LIST_LIMIT = 2000;
@@ -51,6 +55,8 @@ const RULE_FILE_MAX_BYTES = 256 * 1024;
 const BACKGROUND_FILE_MAX_BYTES = 1024 * 1024;
 const MAX_GIT_PROCS_FLAG = "--max-git-procs";
 
+/** `ocr review|scan|delegate preview` 的背景说明 flag（三处命令构造共用一条）。
+ *  pushTextFlag 按 `flag.slice(2)` 反推报错用的参数名，故值必须带 `--` 前缀。 */
 const BACKGROUND_FLAG = "--background";
 
 /**
@@ -565,7 +571,7 @@ export function inferOcrInstallChannel(candidate: string): OcrInstallChannel {
   if (resolved.includes("node_modules")) {
     return "npm";
   }
-  return /(?:^|[/\\])(?:Cellar|Homebrew)(?:[/\\]|$)/iu.test(resolved) ? "brew" : "unknown";
+  return HOMEBREW_PATH.test(resolved) ? "brew" : "unknown";
 }
 
 /** 用户自选的装法偏好：没装时先推哪一条（部署级设置项 `ocrInstallHint`）。 */
@@ -742,10 +748,7 @@ export function buildVersionCommand(): string {
  * 读不出即 null：未发布构建的 `<Version>` 是 `dev`，没有版本号可报，猜一个等于编一个。
  */
 export function parseOcrVersion(text: string): string | null {
-  const version =
-    /open-code-review\s+v?(?<version>\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/u.exec(
-      text,
-    )?.groups?.["version"];
+  const version = OCR_VERSION.exec(text)?.groups?.["version"];
   return version ?? null;
 }
 

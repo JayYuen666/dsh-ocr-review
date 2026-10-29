@@ -306,6 +306,9 @@ type JobsService = Pick<
 /** 官方注册表里本包作业的 kind；宿主据此签发的 id 形如 `ocr-review-<16 位 hex>`。 */
 const OCR_JOB_KIND = "ocr-review";
 
+/** 本插件起过的作业台账：id → 发起会话（无主作业记 undefined）。 */
+type JobLedger = Map<JobId, SessionIdFace | undefined>;
+
 /**
  * 本 kind 在注册表里的**已落定**记录上限。同时能跑几个不在这里——那是注册表的容量闸
  * （实测未拥有桶 10，满员是**拒绝**新 start，不是淘汰旧的）。
@@ -336,16 +339,23 @@ function isLiveOcrStatus(status: JobStatus): boolean {
  * @param jobs 官方注册表
  * @returns {void}
  */
-function pruneOcrJobHistory(jobs: JobsService): void {
+function pruneOcrJobHistory(
+  jobs: JobsService,
+  owner: SessionIdFace | undefined,
+  ledger: JobLedger,
+): void {
+  // `list(caller)` 只返回无主作业与该 caller 自己的：别的会话的记录不在这个视图里，
+  // 它们随各自的 owner 销毁回收；这里替它 remove 会让那条会话稍后读 job_output 时查无此作业。
   const settled = jobs
-    .list()
+    .list(owner)
     .filter((job) => job.kind === OCR_JOB_KIND && !isLiveOcrStatus(job.status));
   // 剪到 MAX-1 而不是 MAX：这一趟在 `start` **之前**跑，起完就是 MAX 条。按 MAX 剪等于
   // 每次登记后窗口里都是 MAX+1 条，而文案与卡片说的是"保留最近 MAX 条"（差的那一格
   // 选择在剪枝边界修，而不是把 MAX 改成 11）。
   const excess = settled.length - (OCR_JOB_HISTORY_MAX - 1);
   for (const job of settled.slice(0, Math.max(excess, 0))) {
-    jobs.remove(job.id);
+    jobs.remove(job.id, owner);
+    ledger.delete(job.id);
   }
 }
 
@@ -409,15 +419,60 @@ async function enforceOcrDeadline(
  * @param reason 写进模型可见 detail 的理由（双语字典取）
  * @returns {void}
  */
-function reclaimOcrJobs(jobs: JobsService, reason: string): void {
-  const mine = jobs.list().filter((job) => job.kind === OCR_JOB_KIND);
-  for (const job of mine) {
+function reclaimSessionJobs(
+  jobs: JobsService,
+  reason: string,
+  owner: SessionIdFace,
+  ledger: JobLedger,
+): void {
+  for (const job of jobs.list(owner)) {
+    if (job.kind === OCR_JOB_KIND && job.owner === owner) {
+      ledger.delete(job.id);
+      if (isLiveOcrStatus(job.status)) {
+        jobs.kill(job.id, owner, reason);
+      } else {
+        jobs.remove(job.id, owner);
+      }
+    }
+  }
+}
+
+/** 卸载时收一条有主作业：id 只有台账知道，kill/remove 必须带 owner 作 caller。 */
+function reclaimOwnedJob(jobs: JobsService, id: JobId, owner: SessionIdFace, reason: string): void {
+  try {
+    // 台账只记本包起过的 id，故这里不再判 kind：那个判据在构造上恒真，只会逼出一条假用例。
+    const job = jobs.get(id, owner);
     if (isLiveOcrStatus(job.status)) {
-      jobs.kill(job.id, undefined, reason);
+      jobs.kill(id, owner, reason);
     } else {
-      // 已落定的也要 remove：本包不留常驻状态、也没有"下一次 apply 来剪窗口"（用户直接
-      // 禁用本包就再没有 apply），留着就是每条最多 256 KiB 的环永久钉在宿主里。
-      jobs.remove(job.id);
+      jobs.remove(id, owner);
+    }
+  } catch {
+    // 记录已先走一步（会话 owner 销毁、或已被裁剪）：无事可做。
+  }
+}
+
+/**
+ * 卸载时收掉本包起过的全部作业：无主的经 `list()` 枚举，有主的只有台账知道 id
+ * （注册表对没有 caller 的视图隐藏它们，且 kill/remove 必须带 owner 作 caller）。
+ */
+function reclaimAllJobs(jobs: JobsService, reason: string, ledger: JobLedger): void {
+  for (const job of jobs.list()) {
+    if (job.kind === OCR_JOB_KIND) {
+      if (isLiveOcrStatus(job.status)) {
+        jobs.kill(job.id, undefined, reason);
+      } else {
+        // 已落定的也要 remove：本包不留常驻状态、也没有"下一次 apply 来剪窗口"（用户直接
+        // 禁用本包就再没有 apply），留着就是每条最多 256 KiB 的环永久钉在宿主里。
+        jobs.remove(job.id);
+      }
+    }
+  }
+  const owned = new Map(ledger);
+  ledger.clear();
+  for (const [id, owner] of owned) {
+    if (owner !== undefined) {
+      reclaimOwnedJob(jobs, id, owner, reason);
     }
   }
 }
@@ -496,6 +551,24 @@ export type AgentWire = Omit<ToolRunAgent, "session"> & { readonly session?: Ses
  *  invocation"，声明成可选等于把取消能力在 5 个调用点静默降级）。`agent` 走上面的
  *  走线投影。 */
 export type ToolExec = Pick<ToolRunContext, "signal"> & { readonly agent?: AgentWire };
+
+/** 官方会话 id 的面（与 `JobSpec.owner` 同源：都来自 dsh-session 的品牌串）。 */
+type SessionIdFace = NonNullable<AgentWire["session"]>["id"];
+
+/** 工具调用发起时的会话 id；形状不对就当没有（agentless）。 */
+function sessionIdOf(exec: ToolExec): SessionIdFace | undefined {
+  const id = exec.agent?.session?.id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+/** 该调用可绑定的作业 owner：会话 id 存在、且宿主注册表里确有这条活 Agent。
+ *  给不出活 Agent 时退回 agentless —— 拿一个注册表不认的 id 去 start 只会整条失败。 */
+function ownerOf(host: HostCtx, exec: ToolExec): SessionIdFace | undefined {
+  const id = sessionIdOf(exec);
+  const agents = host.get("agents");
+  const owner = id !== undefined && agents?.get(id) !== undefined ? id : undefined;
+  return owner;
+}
 
 /** 当前会话工作区（repo 缺省回退源）；非字符串视为缺。
  *  官方形状：`agent?: Agent` → `session: Session` → `header: SessionHeader` →
@@ -763,6 +836,9 @@ interface BackgroundJob {
   workdir: string;
   tool: string;
   repo: string;
+  /** 发起该作业的会话；宿主交不出这条会话的活 Agent 时为 undefined（agentless 作业）。
+   *  有 owner 的作业随会话销毁回收，agentless 的只在插件卸载时统一收。 */
+  owner?: SessionIdFace | undefined;
   /** 执行器 stdout 缓冲上限（entry config `stdoutMaxBytes`，与前台同一字段）。 */
   stdoutMaxBytes: number;
   /** 兜底回收窗口（entry config `ocrBackgroundMaxMs`；0 = 无窗口，判据见 OCR_BACKGROUND_MAX_MS）。 */
@@ -851,7 +927,11 @@ interface BackgroundReceipt {
  * @param job 这次后台评审的描述
  * @returns 后台启动回执（canonical 对象，模型侧契约）
  */
-async function startBackground(host: HostCtx, job: BackgroundJob): Promise<BackgroundReceipt> {
+async function startBackground(
+  host: HostCtx,
+  job: BackgroundJob,
+  ledger: JobLedger,
+): Promise<BackgroundReceipt> {
   const registry: JobsService | undefined = host.get("jobs");
   if (registry === undefined) {
     // 没有注册表就不起进程：本包不再自带一张作业表，"起了但谁也看不见、谁也停不掉"
@@ -871,13 +951,14 @@ async function startBackground(host: HostCtx, job: BackgroundJob): Promise<Backg
   const proc = await host.shell.execute(spec);
   // 剪枝先于作业**登记**（进程已在上面起来）：注册表的容量闸只管"活的"，已落定的
   // 旧记录只有我们 remove 才会消失。
-  pruneOcrJobHistory(registry);
+  pruneOcrJobHistory(registry, job.owner, ledger);
   const messages = localeMessages(host);
   let jobId: JobId;
   try {
     jobId = startUnderOcrController(registry, {
       kind: OCR_JOB_KIND,
       label: `${job.tool} ${job.repo}`,
+      ...(job.owner === undefined ? {} : { owner: job.owner }),
       output: reviewSources(proc, messages),
       run: () => ({
         // 这层吞异常不是风格：官方契约明写生产者的 `cancel` 会往上抛（dsh-jobs 的
@@ -898,6 +979,7 @@ async function startBackground(host: HostCtx, job: BackgroundJob): Promise<Backg
     killProc(proc);
     throw error;
   }
+  ledger.set(jobId, job.owner);
   // 兜底 deadline（时长来自 entry config；kill 理由按实际窗口换算，别把可配置的
   // 窗口说成写死的"2 小时"——理由是模型可见的 detail）。
   const backstopMinutes = Math.round(job.backgroundMaxMs / 60_000);
@@ -2199,6 +2281,7 @@ function registerReviewTool(
   config: Config,
   probe: OcrAvailabilityProbe,
   versionSink: { value: string | null },
+  ledger: JobLedger,
 ): void {
   // 注册期快照一份文案（工具 description 随注册进 tools 服务，换语言要重新 apply）；
   // 执行期每次现取，回显文本立即跟随设置页偏好。
@@ -2287,15 +2370,20 @@ function registerReviewTool(
         // 收养）OCR 进程都会被 TERM→1s→KILL，不留孤儿烧 token（lib/cli.ts）。
         const guarded = wrapWithHostReaper(withHomeEnv(command, homeOverride), runMsgs);
         if (outPath === undefined) {
-          return await startBackground(host, {
-            command: guarded,
-            workdir,
-            tool: "ocr_review",
-            repo,
-            stdoutMaxBytes: config.stdoutMaxBytes,
-            backgroundMaxMs: config.ocrBackgroundMaxMs,
-            env: ocrEnv(config),
-          });
+          return await startBackground(
+            host,
+            {
+              command: guarded,
+              workdir,
+              tool: "ocr_review",
+              repo,
+              owner: ownerOf(host, exec),
+              stdoutMaxBytes: config.stdoutMaxBytes,
+              backgroundMaxMs: config.ocrBackgroundMaxMs,
+              env: ocrEnv(config),
+            },
+            ledger,
+          );
         }
         try {
           await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
@@ -2333,6 +2421,7 @@ function registerScanTool(
   config: Config,
   probe: OcrAvailabilityProbe,
   versionSink: { value: string | null },
+  ledger: JobLedger,
 ): void {
   const msgs = localeMessages(host);
   // ocr_scan：无 git diff 的全文件扫描。
@@ -2408,15 +2497,20 @@ function registerScanTool(
         // 同 ocr_review：宿主回收守护（lib/cli.ts wrapWithHostReaper）。
         const guarded = wrapWithHostReaper(withHomeEnv(command, homeOverride), runMsgs);
         if (outPath === undefined) {
-          return await startBackground(host, {
-            command: guarded,
-            workdir,
-            tool: "ocr_scan",
-            repo,
-            stdoutMaxBytes: config.stdoutMaxBytes,
-            backgroundMaxMs: config.ocrBackgroundMaxMs,
-            env: ocrEnv(config),
-          });
+          return await startBackground(
+            host,
+            {
+              command: guarded,
+              workdir,
+              tool: "ocr_scan",
+              repo,
+              owner: ownerOf(host, exec),
+              stdoutMaxBytes: config.stdoutMaxBytes,
+              backgroundMaxMs: config.ocrBackgroundMaxMs,
+              env: ocrEnv(config),
+            },
+            ledger,
+          );
         }
         try {
           await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
@@ -2860,6 +2954,10 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
   const endpointVerify: { value: EndpointVerify | null } = { value: null };
   // 外部 CLI 的实测版本同样落在这次 apply 的闭包里：装载期填一次，之后每次「检测」覆盖它。
   const versionSink: { value: string | null } = { value: null };
+  // 本插件起过的作业台账（id → 发起会话）。有 owner 的作业在注册表里对**别的会话**
+  // 不可见（`list(caller)` 只返回无主作业与该 caller 自己的），卸载时无法靠 `list()`
+  // 枚举它们，故留这一份最小台账；条目随已落定记录的裁剪与会话回收一起删。
+  const jobLedger: JobLedger = new Map();
   if (config.startupVerify) {
     void probeEndpointAtApply(host, config, endpointVerify);
     void probeVersionAtApply(host, config, versionSink);
@@ -2871,7 +2969,7 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     () => () => {
       const jobs: JobsService | undefined = ctx.get("jobs");
       if (jobs !== undefined) {
-        reclaimOcrJobs(jobs, localeMessages(ctx).jobReasonUnload);
+        reclaimAllJobs(jobs, localeMessages(ctx).jobReasonUnload, jobLedger);
       }
     },
     "ocr-review: background jobs",
@@ -2880,16 +2978,22 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
   // 调用中止而停（任何模式下都能后台运行），但会话本身结束时不留孤儿进程与在跑作业。
   ctx.effect(
     () =>
-      ctx.on("session/disposed", () => {
+      ctx.on("session/disposed", (session) => {
         const jobs: JobsService | undefined = ctx.get("jobs");
         if (jobs === undefined) {
+          return;
+        }
+        // 认不出是哪条会话就不动手：宁可留一条到插件卸载，也不能按 kind 全量回收
+        // 别人的作业——那正是这条缺口原来的形态。
+        const owner = session.id;
+        if (typeof owner !== "string" || owner.length === 0) {
           return;
         }
         // 事件处理器里不许抛：注册表被重载/关掉时 kill 会对陌生 id 抛
         // （installed dsh-jobs-local/lib/index.js:554-558 的 expect）。会话都已结束，
         // 这里再炸一次宿主没有任何补救价值。
         try {
-          reclaimOcrJobs(jobs, localeMessages(ctx).jobReasonSessionStopped);
+          reclaimSessionJobs(jobs, localeMessages(ctx).jobReasonSessionStopped, owner, jobLedger);
         } catch {
           // 记录已被注册表收走：无事可做。
         }
@@ -2906,8 +3010,8 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     child.effect(() => child.settings.configure({ auto: false }, host.fiber));
   });
 
-  registerReviewTool(host, config, probe, versionSink);
-  registerScanTool(host, config, probe, versionSink);
+  registerReviewTool(host, config, probe, versionSink, jobLedger);
+  registerScanTool(host, config, probe, versionSink, jobLedger);
   registerDelegatePreviewTool(host, config, probe);
   registerDelegateRuleTool(host, config, probe);
   registerSessionTool(host, config, probe);

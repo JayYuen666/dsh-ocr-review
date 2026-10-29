@@ -4,6 +4,42 @@
 [语义化版本](https://semver.org/lang/zh-CN/)，最新版本在最上。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.9
+
+这一版把后台评审的作业归属钉到发起会话，并把设置卡与读面校验统一到 shared 组件和 zod；
+插件页展示面进包，宿主开发线抬到 0.2.2-alpha.2。对外工具与 Remote 方法面不变。
+
+### Changed
+
+- **后台作业按会话归属**：能解析到活 Agent 时，`jobs.start` 带 `owner`；`job_list` / `job_output` /
+  `job_kill` 对该作业只在所属会话可见。会话销毁只回收它自己的作业（活的 kill、已落定的 remove），
+  不再按 kind 全量回收别的会话的评审；解析不到活 Agent 的调用仍起无主作业，只在插件卸载时统一收。
+- **作业台账**：新增 id → 发起会话的最小台账。注册表对没有 caller 的视图隐藏有主作业，卸载时靠它
+  枚举；已落定记录的裁剪按 caller 可见面（无主桶 + 自己的）计算。
+- **设置卡迁到 shared 组件与 zod**：`src/remote.ts` 的三个 strict codec 改由 zod schema 生成；
+  `src/client-entry.ts` 的枚举、计数与 providers 载荷改 zod 逐层校验，控件改用 shared 的
+  `CARD_UI_CSS` / `CardForm` / `Field` 等。`zod` 进 `dependencies`，client 产物按宿主
+  `PLATFORM_MODULES` 外置。
+- **插件页展示面进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、
+  `docs/DETAIL.zh.md`；`exports` 增加 `./locale/*.json`，`files` 收进 locale 与 docs。
+- **宿主开发线抬到 `0.2.2-alpha.2`**：devDependencies 与 catalog/overrides 同值；`engines.dsh`
+  与 peer 仍写支持窗口 `^0.2.1-rc.3`，README 补滚动窗口说明。
+- **正则常量提升**：argv-guard / config-store / mcp-config / output / parse / provider-projection
+  的内联正则提取为命名常量，行为不变，满足 lint 的重复字面量门禁。
+
+### Fixed
+
+- **脱敏不再误伤路径段**：独立 key 形态的匹配落在 `/` 或 `\` 两侧时按路径段保留，不再把带大写
+  组件的仓库路径（例如 `Documents/...`）抹成 `***REDACTED***`。
+- **会话销毁的回收范围**：`session/disposed` 过去按 kind 回收全部 OCR 作业，会把别的会话正在读的
+  评审一并杀掉；现在只收 payload 那条会话的作业，认不出会话就什么都不做。
+
+### Docs
+
+- README 双语补后台作业的归属、容量桶、清理与残留暴露面，改正 `ocrReview` 方法数与 peer 枚数；
+  DETAIL 改正无 key 的 provider（列出但禁用）与 `timeoutMinutes` 的取值口径；`THIRD_PARTY_NOTICES`
+  同步 zod 依赖与 dsh 0.2.2-alpha.2 的核对基线。
+
 ## 0.1.8
 
 这一版把外部 OCR 契约从 1.13.0 抬到 **1.13.3**，并把模型工具面从「审查/扫描/委托/会话」扩到

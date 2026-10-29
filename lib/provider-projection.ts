@@ -14,6 +14,9 @@ import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 /** llm-pi-ai 命名空间里 provider 表的字段名。 */
 const PROVIDERS_FIELD = "providers";
 
+/** provider 的 baseURL 只认 http(s)。 */
+const HTTP_URL = /^https?:\/\//iu;
+
 /** provider 的单个模型（settings 值里的形状，多余字段上游加了也不影响）。 */
 export interface DshModel {
   id: string;
@@ -137,7 +140,7 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
   // 这类形态此前能一路写进 config.json，故障延到 OCR 调用期才暴露。读侧宽容的落法
   // 是整条丢弃（卡片照常打开，用户去 settings 修），不是替用户猜一个修正值。
   const baseURL = typeof entry["baseURL"] === "string" ? entry["baseURL"].trim() : "";
-  if (!baseURL || !/^https?:\/\//iu.test(baseURL)) {
+  if (!baseURL || !HTTP_URL.test(baseURL)) {
     return null;
   }
   // 「models 未声明」（缺省/非数组，含显式空数组）与「声明了但每条都无效」必须分开：

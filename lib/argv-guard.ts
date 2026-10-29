@@ -14,6 +14,10 @@ import path from "node:path";
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 
+/** 归一后剥掉的尾随分隔符。 */
+const TRAILING_POSIX_SLASHES = /\/+$/u;
+const TRAILING_PATH_SEPARATORS = /[\\/]+$/u;
+
 /**
  * POSIX sh 单引号转义：' → '\''。把任意字符串安全放进单引号内，防注入。
  *
@@ -60,12 +64,12 @@ export function assertAbsoluteRoot(root: unknown, messages: OcrReviewMessages): 
   // 当成已校验的根交给下游，所以不跨平台放宽。
   if (trimmed.startsWith("/")) {
     const normalized = path.posix.normalize(trimmed);
-    return normalized.length > 1 ? normalized.replace(/\/+$/u, "") : normalized;
+    return normalized.length > 1 ? normalized.replace(TRAILING_POSIX_SLASHES, "") : normalized;
   }
   if (process.platform === "win32" && path.win32.isAbsolute(trimmed)) {
     const normalized = path.win32.normalize(trimmed);
     // 盘符根 `C:\` 保留反斜杠；其余形态收成无尾随分隔符的目录。
-    return normalized.length > 3 ? normalized.replace(/[\\/]+$/u, "") : normalized;
+    return normalized.length > 3 ? normalized.replace(TRAILING_PATH_SEPARATORS, "") : normalized;
   }
   throw new Error(format(messages.repoMustBeAbsolute, { root: trimmed }));
 }

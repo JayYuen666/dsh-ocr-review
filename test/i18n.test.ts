@@ -17,7 +17,7 @@ function placeholders(template: string): Set<string> {
 }
 
 /** 中文字面（含全角标点里的汉字；`\p{Script=Han}` 覆盖 CJK 汉字区）。 */
-const HAN = /[\p{Script=Han}]/u;
+const HAN = /\p{Script=Han}/u;
 
 /** 取字典的键清单（两语同一类型，键集由 tsc 保证，这里只当运行时数据比对）。 */
 function keysOf(catalog: { zh: Record<string, string> }): string[] {

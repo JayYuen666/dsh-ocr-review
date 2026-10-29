@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "代码评审（open-code-review）",
+    "description": "调用外部 ocr 命令行跑变更集评审，回报它给出的意见，并管理评审所用的模型。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

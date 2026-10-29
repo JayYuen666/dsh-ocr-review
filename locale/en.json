@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Open code review",
+    "description": "Runs the external ocr CLI over a change set, reports its review comments, and manages the model it reviews with.",
+    "detail": "docs/DETAIL.md"
+  }
+}

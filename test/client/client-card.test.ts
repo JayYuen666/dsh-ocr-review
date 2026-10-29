@@ -17,7 +17,6 @@ import {
   apply,
   inject,
   cardStore,
-  SaveBar,
   buildProviderSection,
   buildSettingsSection,
   buildAdminSection,
@@ -37,6 +36,7 @@ import {
   currentConfigText,
   providerOptionLabel,
 } from "../../src/client-entry.ts";
+import { SaveBar } from "@jayyuen66/dsh-plugin-shared/lib/card-ui";
 import type {
   CardActionKind,
   OcrBinaryView,
@@ -108,7 +108,7 @@ const enTable: Record<string, string> = { ...UI_MESSAGES.en };
 const tZh: Translate = (key, params) => localeText(zhTable, key, params ?? {});
 const tEn: Translate = (key, params) => localeText(enTable, key, params ?? {});
 
-const HAN = /[\p{Script=Han}]/u;
+const HAN = /\p{Script=Han}/u;
 const noop = (): void => {
   void 0;
 };
@@ -439,11 +439,16 @@ const saveBar = SaveBar;
 const saveBarOf = (t: Translate, state: Partial<SaveBarState> = {}): string =>
   textOf(
     saveBar({
-      t,
       dirty: state.dirty ?? true,
       writable: state.writable ?? true,
       busy: state.busy ?? false,
       error: state.error ?? null,
+      saveLabel: t("save"),
+      savingLabel: t("saving"),
+      revertLabel: t("revert"),
+      dirtyLabel: t("statusDirty"),
+      cleanLabel: t("statusClean"),
+      readOnlyLabel: t("statusReadOnly"),
       onSave: noop,
       onDiscard: noop,
     }),
@@ -526,8 +531,8 @@ describe("apply 的官方 locale 接线", () => {
       [PLUGIN_ENTRY_ID, "zh"],
       [PLUGIN_ENTRY_ID, "en"],
     ]);
-    expect(harness.registered[0]?.dicts.zh.cardTitle).toBe(UI_MESSAGES.zh.cardTitle);
-    expect(harness.registered[0]?.dicts.en.cardTitle).toBe(UI_MESSAGES.en.cardTitle);
+    expect(harness.registered[0]?.dicts.zh.modelSection).toBe(UI_MESSAGES.zh.modelSection);
+    expect(harness.registered[0]?.dicts.en.modelSection).toBe(UI_MESSAGES.en.modelSection);
   });
 
   it("bind 出的 translator 以 t 经 slots.register payload 下发", () => {
@@ -659,7 +664,8 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(en).toContain("Migrate plain-text keys");
     expect(en).toContain("no key configured");
     expect(en).toContain("Keys are read dynamically via get-cred.mjs");
-    expect(en).not.toMatch(HAN);
+    // 「中文」是语言枚举值本身的自称（刻意不进字典），它不算残留翻译。
+    expect(en.replaceAll("中文", "")).not.toMatch(HAN);
     const zhHint = tZh("keyScriptMissing");
     const zhDeps = depsWith(tZh, { data: READY_DATA, keyHint: zhHint });
     const zh = textOf(buildProviderSection(zhDeps));
@@ -710,24 +716,34 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(withReason).toContain("reason from host");
   });
 
-  it("设置区：行标题/说明与下拉项文本整体换语言", () => {
+  it("设置区：模型四行与审查参数三行整体换语言", () => {
+    const modelDeps = (t: Translate): OcrCardDeps =>
+      depsWith(t, {
+        data: READY_DATA,
+        chosenProvider: SENSENOVA,
+        modelOptions: SENSENOVA.models,
+      });
+    const zhModel = textOf(buildProviderSection(modelDeps(tZh)));
+    expect(zhModel).toContain("审查深度 (effort)");
+    expect(zhModel).toContain("auto — 跟随 OCR 配置");
+    expect(zhModel).toContain("medium — 均衡");
+    expect(zhModel).toContain("评审语言");
+    expect(zhModel).toContain("应用后自动验证");
     const zh = textOf(buildSettingsSection(depsWith(tZh), true, noop));
-    expect(zh).toContain("审查深度 (effort)");
-    expect(zh).toContain("auto — 跟随 OCR 配置");
-    expect(zh).toContain("medium — 均衡");
     expect(zh).toContain("摘要评论条数 (maxComments)");
-    expect(zh).toContain("开启");
-    const en = textOf(buildSettingsSection(depsWith(tEn), true, noop));
-    expect(en).toContain("Review depth (effort)");
-    expect(en).toContain("auto — follow the OCR config");
-    expect(en).toContain("medium — balanced");
-    expect(en).toContain("Summary comment cap (maxComments)");
-    expect(en).toContain("On");
+    const enModel = textOf(buildProviderSection(modelDeps(tEn)));
+    expect(enModel).toContain("Review depth (effort)");
+    expect(enModel).toContain("auto — follow the OCR config");
+    expect(enModel).toContain("medium — balanced");
+    expect(enModel).toContain("Verify after applying");
     // 评审语言的两项：value 是写进 config.language 的枚举值、label 是语言自称，
     // 两语下都保持「中文 / English」原样（刻意不进字典，见 ui-messages.ts 头注释）。
-    expect(en).toContain("中文");
-    expect(en).toContain("English");
-    expect(en).toContain("Review language");
+    expect(enModel).toContain("中文");
+    expect(enModel).toContain("English");
+    expect(enModel).toContain("Review language");
+    const en = textOf(buildSettingsSection(depsWith(tEn), true, noop));
+    expect(en).toContain("Summary comment cap (maxComments)");
+    expect(en).toContain("Review parameters");
   });
 
   it("当前配置行与 provider 标签由字典模板插值（两语各得其所）", () => {
@@ -1003,7 +1019,7 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     const props = fieldProps(node, "probe");
     expect(props?.disabled).toBe(true);
     expect(textOf(node)).toContain("检测中…");
-    expect(textOf(node)).not.toContain("检测版本");
+    expect(textOf(fieldProps(node, "probe"))).not.toContain("检测版本");
   });
 
   it("文案只跟着**自己**那条动作走：探测在飞时「应用」不许读成「应用中…」", () => {

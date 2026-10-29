@@ -201,7 +201,7 @@ describe("commaList 的边界闸", () => {
   });
 
   it("limit 非法（NaN / ≤0）回落到保守默认，而不是静默放开上限", () => {
-    const many = [...Array.from({ length: 260 }).keys()].map((index) => `f${index}.ts`);
+    const many = Array.from(Array.from({ length: 260 }).keys(), (index) => `f${index}.ts`);
     // out.length >= NaN 恒为 false ⇒ 修复前上限完全失效。回落默认后 260 条超限 ⇒ 抛错，
     // 而不是悄悄只留 200 条（默认 200 仍在，只是超限从静默丢变成明说拒绝）。
     expect(() => listOf(many, "paths", Number.NaN)).toThrow(/超过 200 条上限（多出 60 条）/u);

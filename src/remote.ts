@@ -7,7 +7,7 @@
 // 为什么 descriptor 是**手写**的：宿主网关在源模式（SRC）下从方法签名推参数名，参数与
 // 结果都走 `{ mode: "src-json" }`，不需要生成器的 `typeSymbol` / `create()` 产物。但**客户端**
 // 的贡献校验（`$mount` → `requireStrictCodec`）要求每个入参都带 strict codec，非 strict 会
-// 拒绝整份贡献。于是这里的入参 codec 写成 strict 的手写 parser：它只在客户端做形状校验，
+// 拒绝整份贡献。于是这里的入参 codec 写成 strict 的 zod schema：它只在客户端做形状校验，
 // 从不跨网；宿主那边仍按源模式从签名取参数名。
 //
 // ⚠ **为什么走 `ctx.get("remote")` 而不是把 `remote` 写进 `inject`**：cordis 对**未 inject 的
@@ -22,6 +22,7 @@ import type {
   TypertCodec,
 } from "@deepseek-ai/dsh-typert-protocol";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { z } from "zod";
 
 import { OCR_BUNDLE_PACKAGE, OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
 import type {
@@ -46,20 +47,43 @@ const OCR_SERVICE_KEY = `remote.${OCR_REMOTE_NAMESPACE}`;
  *  lib/remote-shape.ts，client-entry.ts 的槽位键引的是同一个常量）。 */
 const PACKAGE_NAME = OCR_BUNDLE_PACKAGE;
 
+/** strict codec 的统一出口：失败交给 zod 的 `prettifyError`，读到的是一份带字段路径的说明。 */
+function parseOrThrow<Result>(schema: z.ZodType<Result>, value: unknown): Result {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new TypeError(z.prettifyError(parsed.error));
+  }
+  return parsed.data;
+}
+
+const SELECT_MESSAGE = "select request requires string provider and model";
+const SELECT_SCHEMA = z.object(
+  {
+    provider: z.string({ error: SELECT_MESSAGE }),
+    model: z.string({ error: SELECT_MESSAGE }),
+  },
+  { error: "select request must be an object" },
+);
+
+const MCP_SAVE_MESSAGE = "mcp save request requires a string json";
+const MCP_SAVE_SCHEMA = z.object(
+  { json: z.string({ error: MCP_SAVE_MESSAGE }) },
+  { error: MCP_SAVE_MESSAGE },
+);
+
+const CHAT_GPT_MESSAGE = "chatgpt request requires a string model";
+const CHAT_GPT_SCHEMA = z.object(
+  { model: z.string({ error: CHAT_GPT_MESSAGE }) },
+  { error: CHAT_GPT_MESSAGE },
+);
+
 /** 选择请求的客户端 parser：两位都是必填串。 */
 const SELECT_CODEC: TypertCodec<OcrSelectRequest> = {
   mode: "strict",
   typeSymbol: `${PACKAGE_NAME}#select-request`,
   create: () => ({
     parse(value: unknown): OcrSelectRequest {
-      if (!isRecord(value)) {
-        throw new TypeError("select request must be an object");
-      }
-      const { provider, model } = value;
-      if (typeof provider !== "string" || typeof model !== "string") {
-        throw new TypeError("select request requires string provider and model");
-      }
-      return { provider, model };
+      return parseOrThrow(SELECT_SCHEMA, value);
     },
   }),
 };
@@ -70,10 +94,7 @@ const MCP_SAVE_CODEC: TypertCodec<OcrMcpSaveRequest> = {
   typeSymbol: `${PACKAGE_NAME}#mcp-save-request`,
   create: () => ({
     parse(value: unknown): OcrMcpSaveRequest {
-      if (!isRecord(value) || typeof value["json"] !== "string") {
-        throw new TypeError("mcp save request requires a string json");
-      }
-      return { json: value["json"] };
+      return parseOrThrow(MCP_SAVE_SCHEMA, value);
     },
   }),
 };
@@ -84,10 +105,7 @@ const CHAT_GPT_CODEC: TypertCodec<OcrChatGptRequest> = {
   typeSymbol: `${PACKAGE_NAME}#chatgpt-request`,
   create: () => ({
     parse(value: unknown): OcrChatGptRequest {
-      if (!isRecord(value) || typeof value["model"] !== "string") {
-        throw new TypeError("chatgpt request requires a string model");
-      }
-      return { model: value["model"] };
+      return parseOrThrow(CHAT_GPT_SCHEMA, value);
     },
   }),
 };

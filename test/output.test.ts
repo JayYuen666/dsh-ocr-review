@@ -151,7 +151,7 @@ describe("assertToolOutput", () => {
     // 会一次性把每条都压进调用栈实参，`RangeError: Maximum call stack size exceeded`
     // 顶掉本来的「不合形态」结论——而这个函数正是要在那种时刻给出结论的地方。
     const arraySchema = { type: "array", items: { type: "string" } };
-    const many = Array.from({ length: 200_000 }, () => 1);
+    const many = Array.from({ length: 200_000 }).fill(1);
     expect(() => guardOf(many, arraySchema as JsonSchemaNode)).toThrow(
       /result\[0\]: expected string/u,
     );
@@ -246,6 +246,20 @@ describe("redactKeyMaterial", () => {
     expect(redactKeyMaterial(paths)).toBe(paths);
     const prose = "the api_key field is missing; token count 1234567890 in max_tokens=12000";
     expect(redactKeyMaterial(prose)).toBe(prose);
+  });
+
+  it("路径分隔符两侧的段不抹：拍平后含大写组件的仓库路径段（session file_path）保持可定位", () => {
+    // ocr session list 的 file_path 形如
+    //   /Users/…/sessions/Users-yuanjiang-Documents-dsh-plugins-dsh-zvec-grep/<uuid>.jsonl
+    // 段里的 `Documents` 大写曾让它过掉「数字或大写」护栏、整段被抹成 ***REDACTED***，
+    // 首条 session 因此读不出可 --resume 的位置（uuid 段以数字开头、本来就不命中）。
+    const filePath =
+      "/Users/yuanjiang/.opencodereview/sessions/Users-yuanjiang-Documents-dsh-plugins-dsh-zvec-grep/5aced024-7dd4-4ce7-8386-b28bc4606ec0.jsonl";
+    expect(redactKeyMaterial(`{"file_path": "${filePath}"}`)).toBe(`{"file_path": "${filePath}"}`);
+    // 同形状的 token 不在斜杠两侧时仍是 key：上下文豁免不许把脱敏本体放宽。
+    expect(redactKeyMaterial("leaked Users-yuanjiang-Documents-dsh-plugins-key")).toBe(
+      "leaked ***REDACTED***",
+    );
   });
 
   it("无空格的小写长 run 不随长度平方放大（脱敏同步跑在宿主事件循环上）", () => {

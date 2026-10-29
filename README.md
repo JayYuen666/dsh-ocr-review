@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-ocr-review?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
-  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/dm/@jayyuen66/dsh-ocr-review?style=flat-square" alt="npm downloads" /></a>
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-ocr-review?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-ocr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-ocr-review/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
@@ -67,7 +67,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`. The package is on the public npm registry, so installation needs no credentials.
 
 - **Upgrading an installed copy is remove-then-add.** On a profile running HMR (the shipped ones do), `add` on a package the profile already depends on refuses before pnpm runs (`already-installed`) — run `remove` first, then `add` the target version; the new one starts without a restart. Without HMR the same `add` runs pnpm and reports `restart-required`.
-- **Requires Node.js `>= 22.12` and host `dsh` on the `0.2.1-rc.3` line.** The host reads `engines.dsh` (`^0.2.1-rc.3`) and decides on it alone; prereleases participate in the comparison. An incompatible host needs the explicit risk grant `dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<version> --dsh-version <exact> --accept-risk`.
+- **Requires Node.js `>= 22.12` and host `dsh` on the `0.2.1-rc.3` line.** The host reads `engines.dsh` (`^0.2.1-rc.3`) and decides on it alone; prereleases participate in the comparison. An incompatible host needs the explicit risk grant `dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<version> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against the three most recently released host versions at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **No `@deepseek-ai/*` under `dependencies`, by contract** (`test/publish-manifest.test.ts` enforces it). Consumer profiles install with `nodeLinker: hoisted` and `autoInstallPeers: false`, so a host package there is materialized as a real directory next to the copy the running host already loaded. `@deepseek-ai/dsh-tools` keys its scheduler with a plain `Symbol` (not `Symbol.for`), so symbol identity is per instance and **every native tool call in that profile throws** — while this package's build, typecheck and coverage gates stay green right up to that moment.
 - **The five host packages `host.js` imports as values are required peers**: `@deepseek-ai/schemastery` (the host fork — only it resolves `.volatile()` fields), `@deepseek-ai/dsh-credentials`, `@deepseek-ai/dsh-home-paths`, `@deepseek-ai/dsh-atomic-write` and `@deepseek-ai/dsh-typert-protocol` (the Remote service base). Each is repeated in `devDependencies` at the same pin so this repository's own typecheck resolves them; the build externalizes all manifest tables, keeping bare specifiers in the artifact.
 - **What ships**: `host.js`, `client.js`, `cordis.patch.yml`, `scripts/`, `icon.svg`, `CHANGELOG.md` and `THIRD_PARTY_NOTICES.md`. `prepack` rebuilds the bundles, so nothing stale is published.
@@ -111,7 +111,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # pinned to the version thi
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
 - `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, whose single registration line is `- id: ocr-review` with `name` set to the bare package name — the bare name is what makes the host scan the client half.
-- The card needs a web profile (`dsh.client.platform: web`, `immediately: true`). The five `ocrReview` methods are installed unconditionally on the apply fiber, so a host whose web layer never comes up (a TUI) still has the tools and settings.
+- The card needs a web profile (`dsh.client.platform: web`, `immediately: true`). The nine `ocrReview` methods are installed unconditionally on the apply fiber, so a host whose web layer never comes up (a TUI) still has the tools and settings.
 - The gateway exposes the methods only to clients of this profile; this package adds nothing in front of it.
 - Deployment defaults go on the registration line's `config:` (cordis validates through the exported `Config` schema); precedence: settings-card runtime value > line config > built-in default.
 
@@ -149,7 +149,7 @@ The deployment keys below are deliberately **not** on the card — they are plai
 | --- | --- | --- |
 | `llmTestTimeoutMs` | `90000` | Wall clock for `ocr llm test`, shared by autoVerify and the card's test connection; raise it on slow machines |
 | `startupVerify` | `true` | Run the endpoint self-check (and one version measurement) at apply. The same switch governs both, because the criterion is "may a load spawn processes"; turn it off if loads must stay process-free |
-| `ocrBackgroundMaxMs` | `0` | Backstop window for background reviews (registry wait to the deadline, then kill); 0 = no window — a run ends only when the host exits, the session stops, the plugin unloads or the job is killed |
+| `ocrBackgroundMaxMs` | `0` | Backstop window for background reviews (registry wait to the deadline, then kill); 0 = no window — an owned run also ends when its session stops, while an agentless one ends only when the host exits, the plugin unloads or the job is killed |
 | `stdoutMaxBytes` | `400000` | Shell executor stdout cap, shared by foreground and background runs (review results go through the `--output` temp file precisely to step outside it) |
 | `ocrNoAutoUpdate` | `false` | true puts `OCR_NO_UPDATE=1` on every command this package spawns, stopping upstream's mid-review `npm i -g` of a newer release; false keeps upstream behaviour. The version probe sets the variable regardless |
 | `ocrInstallHint` | `both` | Which install command to lead with when nothing is installed: `both` / `brew` / `npm`. A fallback, not an override — an existing copy is always described by its own source, because telling a formula user to run `npm i -g` leaves a second copy behind while PATH still resolves the old one. The npm command always carries the verified version; the brew one never can |
@@ -189,9 +189,10 @@ Refusals answer `{ok: false, error, status}` where `status` is a **retained sema
 | --- | --- |
 | What the model gains | `job_list` shows the review, `job_output` reads its stdout/stderr (non-consuming — it never steals bytes from the session reader), `job_kill` stops it. Results still come from the `ocr_session` record |
 | No registry, no background | A host without the jobs service makes `wait: false` throw an error naming the missing piece instead of starting a subprocess nobody can observe; foreground runs are unaffected |
-| The shared bucket | The unowned job slots are shared host-wide and overflow refuses new starts, so one hung CLI parks a slot forever. That is what the optional `ocrBackgroundMaxMs` backstop is for — it uses the registry's own wait + kill, not a host timer |
-| Cleanup | Settled records of this kind are pruned down to a fixed window before each start; live and stopping records are never pruned (the registry answers overflow by refusing, not by killing somebody's review). At unload, live jobs are killed through the registry and settled ones removed |
-| Exposure | Unowned means any caller can list / read / kill it. Known and accepted for this adoption; closing it would mean rolling the job registration back |
+| Ownership | When the calling agent resolves to a live session, the job is started with that session as its `owner`; `job_list` / `job_output` / `job_kill` then only reach it from that session. A call with no live agent starts an agentless job |
+| Capacity buckets | Owned jobs count against their owner's bucket; agentless jobs share the unowned bucket host-wide. Overflow refuses a new start, so one hung CLI can park a slot — the optional `ocrBackgroundMaxMs` backstop uses the registry's own wait + kill, not a host timer |
+| Cleanup | Before each start, settled records of this kind visible to that caller (the shared unowned bucket plus the caller's own) are pruned to a fixed window; live and stopping records are never pruned (the registry answers overflow by refusing, not by killing somebody's review). A session disposal kills or removes only that session's jobs; unload reclaims everything, using a small id → owner ledger because the registry hides other owners' jobs |
+| Exposure | An owned job is visible to, and killable by, its own session only. Agentless jobs remain visible to every caller — the residual exposure, present only when no live agent could be resolved |
 | Nothing may throw | An error raised inside a host event handler takes the whole host process down, and the official package does not cover producers either — the cancel chain catches at two layers, each pinned by its own test |
 
 ## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Data and privacy
@@ -209,7 +210,7 @@ Refusals answer `{ok: false, error, status}` where `status` is a **retained sema
 - **Version reads cost a spawn** and never happen on render; the card shows the last measurement or nothing — a page render cannot install, update or probe anything.
 - **The atomic-write lock timeout surfaces in English.** Contention past the official wait budget throws the official package's own timeout text — the one user-visible error here that bypasses the bilingual message table.
 - **`partial` is a terminal success state.** Some files failed but coverage stands and the comments are valid; it is neither upgraded to success nor folded into failure.
-- **Unowned background jobs are visible to every session** (see Background runs) — accepted with the adoption, and the only way to close it is to roll the registration back.
+- **Agentless background jobs are visible to every session** (see Background runs). A call that cannot resolve a live agent starts one; owned jobs are fenced to their session.
 
 ## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> FAQ
 

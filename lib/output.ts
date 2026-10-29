@@ -252,17 +252,17 @@ function arrayViolations(
  *  能嵌套任意多个候选起点，而「run 内是否存在数字或大写」这类前瞻要把后面整段 run 反向
  *  回溯一遍——逐起点相乘就是 O(n²)（实测 400_000 字符 51 秒，正好是 `stdoutMaxBytes`
  *  的默认档）。run 是首个 `-` 之后的那一段：前缀只含字母，故首个 `-` 必是分界。 */
-const STANDALONE_KEY = /\b[A-Za-z]{2,5}-[A-Za-z0-9_-]{20,}\b/gu;
+const STANDALONE_KEY = /\b[A-Za-z]{2,5}-[\w-]{20,}\b/gu;
 /** `Authorization: <scheme> <value>` / `Proxy-Authorization: …`：认**头名**而不是
  *  枚举认证方案。头名本身就是「后面跟着凭据」的信号，Basic / Token / Digest 乃至
  *  vendor 自定义 scheme 都不会漏；而只认头名还避开了正文里「token based
  *  authentication」这类措辞被误抹。scheme 组连同其后的空白一起捕获，回填时凭据被
  *  替换而 scheme 词保留。 */
 const AUTH_HEADER_VALUE =
-  /(?<name>\b(?:proxy-)?authorization["'\s]*[:=]["'\s]*)(?:(?<scheme>[a-z][a-z0-9_-]*[ \t]+))?[^\s"',;)}\]]{4,}/giu;
+  /(?<name>\b(?:proxy-)?authorization["'\s]*[:=]["'\s]*)(?<scheme>[a-z][\w-]*[ \t]+)?[^\s"',;)}\]]{4,}/giu;
 /** 裸 scheme + 值（没有头名时 OCR 也会整行回显）。scheme 只留 bearer：它在散文中几乎
  *  不出现，而 token / basic 之类会撞上「token count」「basic usage」等普通措辞。 */
-const BEARER_VALUE = /(?<scheme>\bbearer[ \t]+)[a-z0-9._~+/=-]{4,}/giu;
+const BEARER_VALUE = /(?<scheme>\bbearer[ \t]+)[\w.~+/=-]{4,}/giu;
 /** `api_key: "xxx"`、`apiKey=xxx`、`token: xxx`、`x-api-key: xxx` 等赋值形态。
  *  值下限取 4 且容许一个 scheme 词：`token: Basic <base64>` 里赋值形态先能吃到的只是
  *  scheme 词（Basic 恰好 5 字符），下限更高时整条失配，后面那个 base64 就原样进了日志。
@@ -274,17 +274,28 @@ const BEARER_VALUE = /(?<scheme>\bbearer[ \t]+)[a-z0-9._~+/=-]{4,}/giu;
  *  字符类写 `[A-Z0-9]` 而不是 `[A-Za-z0-9]`：这条正则带 `i` 标志，两者等价，
  *  而重复的字符区间会让静态检查报 duplicates-in-character-class。 */
 const KEY_ASSIGNMENT =
-  /(?<name>(?<![A-Z0-9])(?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token)["'\s]*[:=]["'\s]*)(?:(?<scheme>[a-z][a-z0-9_-]*[ \t]+))?[^\s"',;)}\]]{4,}/giu;
+  /(?<name>(?<![A-Z0-9])(?:api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token)["'\s]*[:=]["'\s]*)(?<scheme>[a-z][\w-]*[ \t]+)?[^\s"',;)}\]]{4,}/giu;
 /** GitHub 系 token 的**下划线**形态（`ghp_…`、`github_pat_…`）：STANDALONE_KEY 要求
  *  「字母前缀 + 连字符」分界，这类值里没有连字符，前缀后又紧跟下划线，故单列一条。
  *  不并进 STANDALONE_KEY 是为了不放开那里的连字符要求——那条要求同时承担「别把
  *  kebab 小写路径当 key 抹掉」的职责。 */
-const UNDERSCORE_TOKEN = /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}\b/gu;
+const UNDERSCORE_TOKEN = /\b(?:gh[pousr]|github_pat)_\w{20,}\b/gu;
 const REDACTION = "***REDACTED***";
+/** token 尾部至少一枚非 `-` 的字母/数字。 */
+const TOKEN_TAIL_CHARACTER = /[0-9A-Z]/u;
 
-/** 独立 key 形态的替换臂：随机串段里真有数字或大写才抹，否则原样交回（文件路径要保持可读）。 */
-function redactStandaloneKey(match: string): string {
-  return /[0-9A-Z]/u.test(match.slice(match.indexOf("-") + 1)) ? REDACTION : match;
+/** 独立 key 形态的替换臂：随机串段里真有数字或大写才抹，否则原样交回（文件路径要保持可读）。
+ *  两侧任一是路径分隔符的匹配是路径段而非 key：ocr CLI 会把仓库路径拍平成 kebab 段嵌进
+ *  session 的 file_path（`…/sessions/Users-yuanjiang-Documents-…/uuid.jsonl`），原路径里
+ *  只要有大写组件（macOS 的 Documents/Desktop 一类）就过得了「数字或大写」那道护栏——
+ *  裸 key 从不出现在斜杠两侧，路径段也从不出现在别处，按上下文分比按字符集猜稳。 */
+function redactStandaloneKey(match: string, offset: number, whole: string): string {
+  const before = whole[offset - 1];
+  const after = whole[offset + match.length];
+  if (before === "/" || after === "/" || before === "\\" || after === "\\") {
+    return match;
+  }
+  return TOKEN_TAIL_CHARACTER.test(match.slice(match.indexOf("-") + 1)) ? REDACTION : match;
 }
 
 /**

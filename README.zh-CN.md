@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/v/@jayyuen66/dsh-ocr-review?style=flat-square&logo=npm&logoColor=white" alt="npm version" /></a>
-  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/dm/@jayyuen66/dsh-ocr-review?style=flat-square" alt="npm downloads" /></a>
+  <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-ocr-review?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-ocr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-ocr-review/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
@@ -67,7 +67,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 卸载用 `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`。包在公共 npm 上，安装不需要凭据。
 
 - **升级已装的那一份要「先 remove 再 add」。** profile 跑着 HMR（出厂那几个都跑）时，`add` 一个 profile 已经依赖着的包会在 pnpm 动手之前就被拒（`already-installed`）——先 `remove` 再 `add` 目标版本，新版不必重启就起跑。没跑 HMR 时同一个 `add` 照样走 pnpm，报 `restart-required`。
-- **要求 Node.js `>= 22.12`，宿主 dsh 在 `0.2.1-rc.3` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.3`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。
+- **要求 Node.js `>= 22.12`，宿主 dsh 在 `0.2.1-rc.3` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.3`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 用 `nodeLinker: hoisted` 与 `autoInstallPeers: false` 安装，宿主包进了那张表就会落成真实目录，与宿主进程已加载的那份并存。`@deepseek-ai/dsh-tools` 的调度器键是普通 `Symbol`（不是 `Symbol.for`），符号身份按实例计算——那个 profile 里**每一次原生工具调用都抛**，而本包的构建、类型检查与覆盖率门在此前一路绿。
 - **`host.js` 以值导入的五枚宿主包是非 optional 的 peer**：`@deepseek-ai/schemastery`（宿主 fork——`.volatile()` 的解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`（Remote 的 Service 基类）。五枚同时以同一钉版另列进 `devDependencies`，本仓自己的类型检查才解析得到；构建对 manifest 三张表一律外部化，产物里保持裸说明符。
 - **发布面**：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepack` 重建两个 bundle，发出去的永远是当前源码的产物。
@@ -111,7 +111,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
 - `package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，其唯一注册行是 `- id: ocr-review`、`name` 为裸包名——宿主只按裸包名扫描 client 半。
-- 卡片要 web profile（`dsh.client.platform: web`、`immediately: true`）。五个 `ocrReview` 方法由 apply fiber 无条件注册，宿主的 web 层从不起（如 TUI）时工具与设置照常在。
+- 卡片要 web profile（`dsh.client.platform: web`、`immediately: true`）。九个 `ocrReview` 方法由 apply fiber 无条件注册，宿主的 web 层从不起（如 TUI）时工具与设置照常在。
 - 网关只把方法暴露给本 profile 的客户端；本包不在它前面再加一层。
 - 部署默认写在注册行的 `config:` 上（cordis 按导出的 `Config` schema 校验）；优先级：设置卡运行时值 > 行 config > 内置默认。
 
@@ -149,7 +149,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 | --- | --- | --- |
 | `llmTestTimeoutMs` | `90000` | `ocr llm test` 的墙钟，autoVerify 与卡片「测试连接」共用；评审机慢就调大 |
 | `startupVerify` | `true` | 装载期跑一次端点自检（顺带量一次版本）。两条归同一开关，因为判据同是「装载期允不允许起进程」；要求装载零进程的部署关掉它 |
-| `ocrBackgroundMaxMs` | `0` | 后台评审的兜底回收窗口（注册表等到 deadline 即 kill）；0 = 不设窗口——只有宿主退出、会话停止、插件卸载或作业被杀才结束 |
+| `ocrBackgroundMaxMs` | `0` | 后台评审的兜底回收窗口（注册表等到 deadline 即 kill）；0 = 不设窗口——有主作业还会在所属会话停止时结束，无主作业则只在宿主退出、插件卸载或作业被杀时结束 |
 | `stdoutMaxBytes` | `400000` | shell 执行器的 stdout 缓冲上限，前台与后台共用（评审结果走 `--output` 临时文件，正是为了绕开它） |
 | `ocrNoAutoUpdate` | `false` | 置真时本包起的每条命令都带 `OCR_NO_UPDATE=1`，拦住上游在评审中途把新版 `npm i -g` 装上；置假保持上游行为。版本探测不受本开关影响，恒定带上该变量 |
 | `ocrInstallHint` | `both` | 还没装时先推哪条装法：`both` / `brew` / `npm`。只是兜底而非覆盖——机器上已有一份时按那份自己的来源说，因为对着 brew 用户端出 `npm i -g` 会多出第二份、PATH 上还是旧的。npm 那条恒带核对版本，brew 那条恒带不了 |
@@ -189,9 +189,10 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 | --- | --- |
 | 模型多看到的 | `job_list` 列得出这场评审、`job_output` 读得到它的 stdout/stderr（非消费式——不会从会话读取器那里抢字节）、`job_kill` 停得掉它。评审结果仍以 `ocr_session` 会话记录为准 |
 | 没注册表就没后台 | 宿主没有 jobs 服务时，`wait: false` 直接抛错点名缺件，而不是起一个没人看得见的子进程；前台运行不受影响 |
-| 共用桶 | 未拥有的作业槽全宿主共用，满员直接拒绝新 start，一条挂死的 CLI 会永久占一格。`ocrBackgroundMaxMs` 那个可选兜底窗口就是为它设的——用注册表自己的 wait + kill，不用宿主 timer |
-| 清理 | 每次登记前把本 kind 的已落定记录剪到固定窗口；在跑与正在收的一条不剪（注册表对超额的答法是拒绝，不是替人杀评审）。卸载时，活着的经注册表 kill，已落定的 remove |
-| 暴露面 | 未拥有意味着任何 caller 都能 list / read / kill。这是本次换装已知并接受的暴露面；收回它的唯一方式是回滚作业登记 |
+| 归属 | 调用方能解析到活会话时，作业以该会话为 `owner` 登记；此后只有那个会话能经 `job_list` / `job_output` / `job_kill` 碰到它。解析不到活 Agent 的调用起的是无主作业 |
+| 容量桶 | 有主作业计入各自 owner 的桶；无主作业共用全宿主的未拥有桶。满员都直接拒绝新 start，一条挂死的 CLI 会占住一格——`ocrBackgroundMaxMs` 那个可选兜底窗口就是为它设的，用注册表自己的 wait + kill，不用宿主 timer |
+| 清理 | 每次登记前，把该 caller 可见面（无主桶 + 自己的）里本 kind 的已落定记录剪到固定窗口；在跑与正在收的一条不剪（注册表对超额的答法是拒绝，不是替人杀评审）。会话销毁只回收该会话的作业；卸载时统一回收全部，有主作业的 id 靠一份最小的「id → owner」台账枚举，因为注册表对别的 owner 隐藏它们 |
+| 暴露面 | 有主作业只对所属会话可见、也只由它可 kill。无主作业仍对所有 caller 可见——这是残留暴露面，只发生在解析不到活 Agent 的时候 |
 | 取消链里不许抛 | 宿主事件处理器里抛出的错误会把整个宿主进程带下来，官方件也不替生产者兜——取消链在两层各兜一次，每层各有一条用例钉着 |
 
 ## <img src="https://api.iconify.design/lucide/lock.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 数据与隐私
@@ -209,7 +210,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 - **读版本要起一次进程**，页面渲染绝不触发；卡片只显示最近一次测量或什么都不显示——渲染一页装不了、更不了、也探不了任何东西。
 - **原子写的锁超时以英文出现。** 争用超过官方等待上限时抛的是官方件自己的超时文本——这是本包唯一一条绕过双语消息表的用户可见错误。
 - **`partial` 是终态里的成功档。** 部分文件失败但覆盖仍成立、评论仍有效；既不被抬成成功，也不被折进失败。
-- **未拥有的后台作业对所有会话可见**（见「后台运行与官方作业」）——随本次换装一并接受，收回它的唯一方式是回滚登记。
+- **无主的后台作业对所有会话可见**（见「后台运行与官方作业」）。解析不到活 Agent 的调用会起这种作业；有主作业则被围栏在自己的会话里。
 
 ## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 常见问题
 

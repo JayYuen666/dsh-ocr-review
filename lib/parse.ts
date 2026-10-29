@@ -35,6 +35,9 @@ import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { aggregateComments, severityRank } from "./severity.ts";
 import type { CommentAggregation } from "./severity.ts";
 
+/** 只认十进制整数的行号/计数文本。 */
+const DECIMAL_INTEGER = /^\d+$/u;
+
 /**
  * OCR 评审 JSON 的 status 枚举（判据在 CLI 侧 `cmd/opencodereview/output.go` 的 jsonOutput
  * 装配与 `internal/session/manifest.go` 的 TerminalState）。
@@ -215,7 +218,7 @@ function num(value: unknown): number {
     const trimmed = value.trim();
     // 只认十进制整数：`Number()` 还接受 "0x10"（=16）、"1e3"（=1000）、"0b11" 这类
     // 写法，OCR 一旦吐出十六进制行号，"0x10" 会被当成第 16 行报给模型。
-    if (!/^\d+$/u.test(trimmed)) {
+    if (!DECIMAL_INTEGER.test(trimmed)) {
       return 0;
     }
     return nonNegativeInt(Number(trimmed));
@@ -311,7 +314,7 @@ function isCount(value: unknown): boolean {
   if (typeof value === "number") {
     return Number.isSafeInteger(value) && value >= 0;
   }
-  return typeof value === "string" && /^\d+$/u.test(value.trim());
+  return typeof value === "string" && DECIMAL_INTEGER.test(value.trim());
 }
 
 /**

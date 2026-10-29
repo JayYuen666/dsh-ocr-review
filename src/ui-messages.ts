@@ -17,10 +17,12 @@ import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包设置卡产出的全部界面文案。 */
 export interface UiMessages {
-  /** 卡片标题（设置页插件列表里的那一行）。 */
-  readonly cardTitle: string;
-  /** 卡片副标题：一句话说明本包做什么。 */
-  readonly cardDescription: string;
+  /** 小节标题：「模型」「审查参数」；动作行的标签。 */
+  readonly modelSection: string;
+  readonly reviewSection: string;
+  readonly actionsLabel: string;
+  /** 数字输入越界时的就地提示。 */
+  readonly outOfRange: string;
   /** 作用域只读时的状态条文本。 */
   readonly statusReadOnly: string;
   /** 有未保存改动时的状态条文本。 */
@@ -111,10 +113,6 @@ export interface UiMessages {
   readonly autoVerifyLabel: string;
   /** 自动验证行说明。 */
   readonly autoVerifyHint: string;
-  /** 开关选项：开。 */
-  readonly onLabel: string;
-  /** 开关选项：关。 */
-  readonly offLabel: string;
   /** maxComments 行标题。 */
   readonly maxCommentsLabel: string;
   /** maxComments 行说明。 */
@@ -243,9 +241,10 @@ export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;
 
 export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
   zh: {
-    cardTitle: "open-code-review 代码审查",
-    cardDescription:
-      "ocr 工具配置：选择 provider/model 应用到 OCR（应用后 key 由 api_key_cmd 动态读取，不再写入明文）+ 审查参数设置",
+    modelSection: "模型",
+    reviewSection: "审查参数",
+    actionsLabel: "动作",
+    outOfRange: "超出允许范围，未保存",
     statusReadOnly: "当前作用域只读",
     statusDirty: "有未保存的修改，点「保存」生效",
     statusClean: "无未保存的修改",
@@ -295,8 +294,6 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     languageHint: "OCR 评论输出语言（写入 config.language）",
     autoVerifyLabel: "应用后自动验证",
     autoVerifyHint: "选择 provider/model 后自动跑 ocr llm test",
-    onLabel: "开启",
-    offLabel: "关闭",
     maxCommentsLabel: "摘要评论条数 (maxComments)",
     maxCommentsHint:
       "返回给模型的 top 评论条数；0 = 全部（含未锚定行，输出大）（默认见本行设置项的初值）",
@@ -352,9 +349,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     binaryGuideDismiss: "知道了",
   },
   en: {
-    cardTitle: "open-code-review code review",
-    cardDescription:
-      "ocr tool setup: pick a provider/model and apply it to OCR (once applied, keys are read dynamically via api_key_cmd and no longer written in plain text) + review parameters",
+    modelSection: "Model",
+    reviewSection: "Review parameters",
+    actionsLabel: "Actions",
+    outOfRange: "Out of the allowed range — not saved",
     statusReadOnly: "This scope is read-only",
     statusDirty: "Unsaved changes — press Save to apply",
     statusClean: "No unsaved changes",
@@ -407,8 +405,6 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     languageHint: "Output language of OCR comments (written into config.language)",
     autoVerifyLabel: "Verify after applying",
     autoVerifyHint: "Run `ocr llm test` automatically after picking a provider/model",
-    onLabel: "On",
-    offLabel: "Off",
     maxCommentsLabel: "Summary comment cap (maxComments)",
     maxCommentsHint:
       "Top comments returned to the model; 0 = all (including unanchored lines, large output) (default: the row's initial value)",

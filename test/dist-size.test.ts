@@ -23,7 +23,9 @@ const BUDGETS: readonly (readonly [string, number])[] = [
   // 1.13.3 工具面扩展（preview/compare/export/rules/llm/摘要字段与双语文案）后的正常演进。
   ["host.js", 311_500],
   // MCP/ChatGPT 管理区（编辑框、状态与双语按钮）后的正常演进。
-  ["client.js", 90_000],
+  // 设置卡迁到 @jayyuen66/dsh-plugin-shared/lib/card-ui 后，卡片样式与组件逻辑随包进
+  // client.js（实测增加约 3 KB），预算按迁移后的实量重定。
+  ["client.js", 116_000],
 ];
 
 describe("产物体积", () => {

@@ -28,6 +28,12 @@ import type { DshProvider } from "./provider-projection.ts";
 /** api_key_cmd 脚本名（pluginDir 兜底路径的唯一拼法来源）。 */
 const GET_CRED_SCRIPT = path.join("scripts", "get-cred.mjs");
 
+/** 尾部反斜杠 / 翻倍反斜杠 / env 键 / 行首 node 命令。 */
+const TRAILING_BACKSLASHES = /\\+$/u;
+const DOUBLED_BACKSLASHES = /(?:\\\\)+$/u;
+const ENV_KEY = /^[A-Z0-9_]+$/u;
+const LEADING_NODE_CMD = /^node[ \t]+/u;
+
 /** 未知值 → 安全字符串（非字符串给 ''）。 */
 function strOf(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -120,7 +126,7 @@ function shqDyn(value: string): string {
   if (process.platform === "win32") {
     const escaped = value
       .replaceAll('"', '""')
-      .replace(/\\+$/u, (backslashes: string) => backslashes + backslashes);
+      .replace(TRAILING_BACKSLASHES, (backslashes: string) => backslashes + backslashes);
     return `"${escaped}"`;
   }
   return `'${value.replaceAll("'", String.raw`'\''`)}'`;
@@ -139,7 +145,7 @@ export function buildApiKeyCmd(
   dshHome: string | undefined,
   messages: OcrReviewMessages,
 ): string {
-  if (!/^[A-Z0-9_]+$/u.test(envKey)) {
+  if (!ENV_KEY.test(envKey)) {
     throw new Error(format(messages.badEnvKey, { key: envKey }));
   }
   const parts = ["node", shqDyn(scriptPath), shqDyn(envKey)];
@@ -241,7 +247,7 @@ function readDqToken(body: string, start: number): { value: string; next: number
   }
   // 尾部翻倍的反斜杠还原（写侧只对收尾反斜杠翻倍）：2n 个 → n 个。折半对「值本来
   // 就以偶数个反斜杠结尾」的形态有歧义——写侧的信息不足以区分，接受这一点。
-  const doubled = value.replace(/(?:\\\\)+$/u, (backslashes: string) =>
+  const doubled = value.replace(DOUBLED_BACKSLASHES, (backslashes: string) =>
     "\\".repeat(backslashes.length / 2),
   );
   return { value: doubled, next: i };
@@ -294,7 +300,7 @@ function readDqTokens(body: string): string[] | null {
  * 把用户手写的凭据取用方式弄坏，而那正是本包明令不该插手的部分。
  */
 export function parseApiKeyCmd(command: string): ParsedApiKeyCmd | null {
-  const body = command.replace(/^node[ \t]+/u, "");
+  const body = command.replace(LEADING_NODE_CMD, "");
   if (body === command) {
     return null;
   }
@@ -304,7 +310,7 @@ export function parseApiKeyCmd(command: string): ParsedApiKeyCmd | null {
   }
   const script = tokens[0] ?? "";
   const envKey = tokens[1] ?? "";
-  if (script === "" || tokens.length < 2 || tokens.length > 3 || !/^[A-Z0-9_]+$/u.test(envKey)) {
+  if (script === "" || tokens.length < 2 || tokens.length > 3 || !ENV_KEY.test(envKey)) {
     return null;
   }
   return { script, envKey, dshHome: tokens[2] };

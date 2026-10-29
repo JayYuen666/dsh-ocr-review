@@ -97,7 +97,7 @@ describe("mcp / chatgpt 配置读写", () => {
     ["command 过长", { server: { command: "x".repeat(5000) } }],
     ["args 非数组", { server: { command: "x", args: "a" } }],
     ["args 元素非字符串", { server: { command: "x", args: [1] } }],
-    ["args 过多", { server: { command: "x", args: Array.from({ length: 101 }, () => "a") } }],
+    ["args 过多", { server: { command: "x", args: Array.from({ length: 101 }).fill("a") } }],
     ["args 元素过长", { server: { command: "x", args: ["a".repeat(5000)] } }],
     ["env 缺等号", { server: { command: "x", env: ["A"] } }],
     ["env 非数组", { server: { command: "x", env: "A=B" } }],
