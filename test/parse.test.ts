@@ -29,6 +29,9 @@ const parseOcr = (text: string): ParsedReview => parseReviewOutput(text, zh);
 const summarizeView = (parsed: ParsedReview, plan?: SummaryPlan): ReviewSummaryView =>
   plan === undefined ? summarizeReview(parsed, zh) : summarizeReview(parsed, zh, plan);
 const renderedComment = (comment: OcrComment): string => renderComment(comment, zh);
+// compare 回执里也有评论位置（坏条目 / 无 path 的桶内条目），文案同样由调用方注入。
+const compareOf = (text: string): ReturnType<typeof parseSessionCompare> =>
+  parseSessionCompare(text, zh);
 
 describe("parseReviewOutput — 真实评审（complete）", () => {
   const parsed = parseOcr(read("ocr-review-complete.json"));
@@ -48,8 +51,8 @@ describe("parseReviewOutput — 真实评审（complete）", () => {
     expect(c0?.path).toBe("app.js");
     expect(c0?.severity).toBe("critical");
     expect(c0?.category).toBe("bug");
-    expect(c0!.startLine).toBeGreaterThan(0);
-    expect(c0!.content.length).toBeGreaterThan(20);
+    expect(c0?.startLine).toBeGreaterThan(0);
+    expect(c0?.content.length).toBeGreaterThan(20);
   });
 
   it("聚合按严重度/类别计数", () => {
@@ -131,6 +134,12 @@ const severityCase = (severity: string): OcrComment => ({
   severity,
 });
 
+/** renderComment 用例的取字段入口：只覆盖本用例关心的字段，其余沿用最小评论。 */
+const sampleComment = (overrides: Partial<OcrComment> = {}): OcrComment => ({
+  ...mk("bug"),
+  ...overrides,
+});
+
 describe("aggregateComments 的 unknownSeverityCount 与 category 归一口径", () => {
   it("四种输入的 unknownSeverityCount 精确：自造/空白异形各按其判据计数", () => {
     // "blocker"：白名单外 ⇒ unknown。"CRITICAL"：小写归一后命中 ⇒ known。
@@ -151,7 +160,12 @@ describe("aggregateComments 的 unknownSeverityCount 与 category 归一口径",
     // trim 合并空白异形；大小写刻意保留（category 是自由标签，没有可对表的枚举，
     // 与 severity 的白名单归一不是同一条判据）。
     const agg = aggregateComments([mk(" Security"), mk("security"), mk("   "), mk("")]);
-    expect(agg.byCategory).toStrictEqual({ Security: 1, security: 1 });
+    // 用 entries 而不是 toStrictEqual(对象字面量)：后者比的是「可枚举键值」，读法更贴近
+    // 消费方（JSON 序列化），且不依赖对象原型——byCategory 现在是 null 原型，见下一条。
+    expect(Object.entries(agg.byCategory)).toStrictEqual([
+      ["Security", 1],
+      ["security", 1],
+    ]);
     expect(Object.values(agg.byCategory).reduce((sum, count) => sum + count, 0)).toBeLessThan(
       agg.total,
     );
@@ -181,6 +195,19 @@ describe("aggregateComments 的 category 计数不被原型链污染", () => {
     const agg = aggregateComments([mk(ctorKey), mk(toStringKey), mk(ctorKey)]);
     expect(agg.byCategory[ctorKey]).toBe(2);
     expect(agg.byCategory[toStringKey]).toBe(1);
+  });
+
+  it("读侧也不查原型链：没出现过的 category 动态读不到继承函数", () => {
+    // 写入端（Map）修好之后，Object.fromEntries 落出的对象原型仍指向 Object.prototype——
+    // 于是 byCategory["toString"] 会拿到继承函数，按真值判断的消费方会被误判成真有计数。
+    // null 原型让「没出现过」与 Map 的读取语义一致。
+    const agg = aggregateComments([mk("security")]);
+    expect(Object.getPrototypeOf(agg.byCategory)).toBeNull();
+    expect(Object.hasOwn(agg.byCategory, "toString")).toBe(false);
+    expect(Object.hasOwn(agg.byCategory, "constructor")).toBe(false);
+    expect(Object.hasOwn(agg.byCategory, "__proto__")).toBe(false);
+    // 序列化面（摘要真正进模型的那条路）仍如实输出。
+    expect(structuredClone(agg.byCategory)).toStrictEqual({ security: 1 });
   });
 
   it("__proto__ 是普通自有键：计数不消失，克隆后仍在", () => {
@@ -231,13 +258,15 @@ describe("delegate 解析", () => {
     expect(preview.excluded).toStrictEqual([{ path: "package-lock.json", reason: "default_path" }]);
     // 旧形态（只有 `reason`）仍读得出来：回退不是死分支。
     const legacy = parseDelegatePreview(
-      '{"mode":"workspace","excluded_files":[{"path":"a.ts","reason":"binary"}]}',
+      '{"mode":"workspace","reviewable_files":[],"excluded_files":[{"path":"a.ts","reason":"binary"}]}',
     );
     expect(legacy.excluded).toStrictEqual([{ path: "a.ts", reason: "binary" }]);
   });
 
   it("preview：total_files 缺失时用 reviewable_count；非对象/坏 JSON 一律 ok=false", () => {
-    const fallback = parseDelegatePreview('{"mode":"branch","reviewable_count":3}');
+    const fallback = parseDelegatePreview(
+      '{"mode":"branch","reviewable_count":3,"reviewable_files":[]}',
+    );
     expect(fallback.totalFiles).toBe(3);
     expect(parseDelegatePreview("nope").ok).toBe(false);
     expect(parseDelegatePreview("[1,2]").ok).toBe(false);
@@ -290,13 +319,12 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
     expect(view.droppedCount).toBe(0);
   });
 
-  it("非数字/Infinity/负数串等畸形值回 0（不抛错）", () => {
+  it("非数字 / JSON 非有限数 / 负数串等畸形值回 0（不抛错）", () => {
+    // 手写原始 JSON：JSON.stringify 会把 Infinity 写成 null，测不到非有限数分支；
+    // 1e999 在 JSON.parse 之后就是 Infinity，与 CLI 真会吐出的形态一致。
     const parsed = parseOcr(
-      JSON.stringify({
-        status: "success",
-        summary: { files_reviewed: "abc", comments: "", total_tokens: Infinity },
-        comments: [{ path: "a", content: "c", start_line: "  ", end_line: null }],
-      }),
+      '{"status":"success","summary":{"files_reviewed":"abc","comments":"","total_tokens":1e999},' +
+        '"comments":[{"path":"a","content":"c","start_line":"-5","end_line":null}]}',
     );
     expect(parsed.summary?.filesReviewed).toBe(0);
     expect(parsed.summary?.comments).toBe(0);
@@ -392,7 +420,7 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
     expect(view.totalCommentCount).toBe(2);
     expect(view.droppedCount).toBe(1);
     expect(view.topComments).toHaveLength(1);
-    // includeZeroLine=false 时未锚定条目计入 droppedCount（默认口径）
+    // maxComments<=0 时 unlimited 先于 includeZeroLine 生效，0 行条目仍被保留。
     const full = summarizeView(parsed, { maxComments: 0 }) as {
       droppedCount: number;
       topComments: unknown[];
@@ -428,40 +456,15 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
 
   it("renderComment：行号区间 / 0 行 / medium 标签省略", () => {
     expect(
-      renderedComment({
-        path: "a.ts",
-        content: "x",
-        startLine: 3,
-        endLine: 5,
-        category: "bug",
-        severity: "high",
-        existingCode: "",
-        suggestionCode: "",
-      }),
+      renderedComment(sampleComment({ path: "a.ts", startLine: 3, endLine: 5, severity: "high" })),
     ).toContain("a.ts:3-5 [high/bug]");
-    const single = renderedComment({
-      path: "",
-      content: "y",
-      startLine: 2,
-      endLine: 2,
-      category: "",
-      severity: "medium",
-      existingCode: "",
-      suggestionCode: "",
-    });
-    expect(single).toContain("(path unknown):2");
+    const single = renderedComment(
+      sampleComment({ path: "", startLine: 2, endLine: 2, category: "" }),
+    );
+    expect(single).toContain(`${zh.pathUnknown}:2`);
     expect(single).not.toContain("[");
     expect(
-      renderedComment({
-        path: "b.ts",
-        content: "z",
-        startLine: 0,
-        endLine: 0,
-        category: "",
-        severity: "medium",
-        existingCode: "",
-        suggestionCode: "",
-      }),
+      renderedComment(sampleComment({ path: "b.ts", startLine: 0, endLine: 0, category: "" })),
     ).toMatch(/line 0/u);
   });
 });
@@ -499,6 +502,26 @@ describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
     ]);
   });
 
+  it("warnings 明细节数有上限；限流条目落在上限之外也照样抬 limitReached", () => {
+    // warnings 条目带 file/message 全文，大会话里几百条能把摘要变成第二份原始输出。
+    // 但「这一场被限流」这条事实不能被截断吃掉：limitReached 必须扫完整数组。
+    const warnings = Array.from({ length: 10 }, (_unused, index) => ({
+      file: `f${index}.ts`,
+      message: "m",
+      type: index === 9 ? "review_limit_reached" : "subtask_error",
+    }));
+    const parsed = parseOcr(JSON.stringify({ status: "partial", warnings }));
+    expect(parsed.warnings).toHaveLength(9);
+    expect(parsed.warnings[8]).toBe(format(zh.diagnosticOmitted, { count: "2" }));
+    expect(parsed.limitReached).toBe(true);
+    // 不超上限时不加说明行。
+    const few = parseOcr(
+      JSON.stringify({ status: "complete", warnings: [{ file: "a.ts", message: "m" }] }),
+    );
+    expect(few.warnings).toHaveLength(1);
+    expect(few.warnings[0]).not.toContain("省略");
+  });
+
   it("无 warnings 字段 ⇒ 空数组；字段存在但不是数组 ⇒ 一条占位", () => {
     expect(parseOcr('{"status":"success"}').warnings).toStrictEqual([]);
     expect(parseOcr('{"status":"success","warnings":[42]}').warnings).toStrictEqual([
@@ -534,12 +557,12 @@ describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
     ]);
   });
 
-  it("缺 path 的评论在 top 位置里降级为 (path unknown)", () => {
+  it("缺 path 的评论在 top 位置里降级为 pathUnknown（占位文案来自消息表）", () => {
     const parsed = parseOcr(
       JSON.stringify({ status: "success", comments: [{ content: "无路径", start_line: 4 }] }),
     );
     const view = summarizeView(parsed, { maxComments: 1 });
-    expect(view.topComments[0]?.location).toBe("(path unknown):4");
+    expect(view.topComments[0]?.location).toBe(`${zh.pathUnknown}:4`);
     expect(view.sessionId).toBeNull();
     expect(view.summary).toBeNull();
   });
@@ -598,6 +621,51 @@ describe("诊断字段：tool_calls / manifest.coverage / summary.budget_exceede
     // 上限行 + 一条说明；说明里给出被省略的条数。
     expect(lines).toHaveLength(9);
     expect(lines[8]).toBe(format(zh.diagnosticOmitted, { count: "3" }));
+  });
+
+  it("计数字符串超出安全整数域也判读不出（与 num 落进同一道闸，不被折成 0）", () => {
+    // 只查 ^\\d+$ 时 "99999999999999999999" 判可读，而 num() 的 nonNegativeInt 把它
+    // 折成 0：tool_calls 于是以 {total:0,failure:0} 的形态报「零失败」，preview 的计数
+    // 也回退成本地长度。两条口径必须一起落到 Number.isSafeInteger 上。
+    const huge = "99999999999999999999";
+    const parsed = parseOcr(
+      JSON.stringify({ status: "complete", tool_calls: { total: huge, failure: "0" } }),
+    );
+    expect(parsed.toolCalls).toBeNull();
+    expect(parsed.warnings).toStrictEqual([
+      format(zh.diagnosticUnreadable, { field: "tool_calls" }),
+    ]);
+    // 安全整数域内的数字串照旧可读：这道闸不是把字符串整体否掉。
+    expect(
+      parseOcr(JSON.stringify({ status: "complete", tool_calls: { total: "12", failure: "3" } }))
+        .toolCalls,
+    ).toStrictEqual({ total: 12, failure: 3, failures: [] });
+    // preview 的同族计数：读不出时回退到本地数组长度，而不是 0。
+    const preview = parsePreviewOutput(
+      JSON.stringify({ files: [{ path: "a.ts" }], total_files: huge }),
+    );
+    expect(preview.view?.totalFiles).toBe(1);
+  });
+
+  it("坏的 failure_details 条目不算「已省略」：省略条数只数渲染得出来的行", () => {
+    // 原实现拿 rows.length 当总数：坏条目既没有渲染行，也不是「被上限截断的同类明细」，
+    // 却让摘要多出一条「另有 N 条已省略」——模型会去 ocr_session 找根本不存在的明细。
+    const parsed = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        tool_calls: {
+          total: 4,
+          failure: 4,
+          failure_details: [
+            { tool_name: "a", error: "e1" },
+            "bad",
+            42,
+            { tool_name: "b", error: "e2" },
+          ],
+        },
+      }),
+    );
+    expect(parsed.toolCalls?.failures).toStrictEqual(["a: e1", "b: e2"]);
   });
 
   it("字段缺失即 null（不拿 0 冒充「零失败」）；形态不合即 null 并补一条读不出的说明", () => {
@@ -718,7 +786,12 @@ describe("delegate 解析的失败与降级分支", () => {
     expect(parseDelegatePreview("{ broken").ok).toBe(false);
     expect(parseDelegatePreview('"just a string"').ok).toBe(false);
     expect(parseDelegatePreview('{"error":"repo is not a git worktree"}').ok).toBe(false);
-    expect(parseDelegatePreview('{"mode":"commit"}').reviewable).toStrictEqual([]);
+    // mode 是通用键：只有它不构成 preview 回执（否则错误对象会被报成「0 个文件可审」）。
+    expect(parseDelegatePreview('{"mode":"commit"}').ok).toBe(false);
+    expect(parseDelegatePreview('{"mode":"commit","error":"auth failed"}').ok).toBe(false);
+    expect(parseDelegatePreview('{"schema_version":"1.0","total_files":3,"error":"x"}').ok).toBe(
+      false,
+    );
   });
 
   it("preview：契约键在但类型不对（null / 字符串 / 对象）⇒ 判失败，不报「0 个文件可审」", () => {
@@ -726,7 +799,12 @@ describe("delegate 解析的失败与降级分支", () => {
     // 被当成合法文档 ⇒ ok:true + 空清单 = 假阴性的范围结论，比解析失败更难察觉。
     for (const value of ["null", '"oops"', "{}", "42"]) {
       expect(parseDelegatePreview(`{"mode":"commit","reviewable_files":${value}}`).ok).toBe(false);
-      expect(parseDelegatePreview(`{"mode":"commit","excluded_files":${value}}`).ok).toBe(false);
+      // 只带 excluded_files 的形态过不了契约闸（它不是结构性键），所以两个键都带上：
+      // 否则这一支永远走不到，覆盖率门会钝化。
+      expect(
+        parseDelegatePreview(`{"mode":"commit","reviewable_files":[],"excluded_files":${value}}`)
+          .ok,
+      ).toBe(false);
     }
     // 合法的空数组仍然放行
     expect(parseDelegatePreview('{"mode":"commit","reviewable_files":[]}').ok).toBe(true);
@@ -751,9 +829,16 @@ describe("delegate 解析的失败与降级分支", () => {
     ).toStrictEqual({ ok: false, groups: [] });
   });
 
-  it("rule：只有 schema_version、groups 缺失 ⇒ 空分组且 ok:true（不是破损）", () => {
-    // groups 缺失是「这个文件里没有规则」的正常形态，与「groups 在但形状坏了」要分得开。
-    expect(parseDelegateRules('{"schema_version":1}')).toStrictEqual({ ok: true, groups: [] });
+  it("rule：只有 schema_version、groups 缺失 ⇒ 判失败（schema_version 不是结构性键）", () => {
+    // CLI 的结构体标签 delegates 的 groups 没有 omitempty（delegate_cmd.go），
+    // 成功回执即使零规则也必带 "groups":[]；所以「没有 groups 这个键」只可能是
+    // 错误对象或半截产出。此前 schema_version 命中了通用键就过闸，于是
+    // {`schema_version`,"error":"auth failed"} 被报成「0 条规则」——假阴性范围结论。
+    expect(parseDelegateRules('{"schema_version":1}')).toStrictEqual({ ok: false, groups: [] });
+    expect(parseDelegateRules('{"schema_version":"1.0","error":"auth failed"}')).toStrictEqual({
+      ok: false,
+      groups: [],
+    });
   });
 
   it("rule：files 内非字符串项被丢弃，其余组照常返回", () => {
@@ -784,12 +869,23 @@ describe("delegate 解析的失败与降级分支", () => {
   it("preview：excluded_files 条目全废 ⇒ ok:false（不是「没有排除项」）", () => {
     // 与 reviewable_files 同款门：条目一个都没解析出来时，那是半截产出，不能以
     // ok:true 的形态报「排除项为空」。
-    expect(parseDelegatePreview('{"mode":"commit","excluded_files":[7]}').ok).toBe(false);
-    expect(parseDelegatePreview('{"mode":"commit","excluded_files":[{"reason":"x"}]}').ok).toBe(
-      false,
-    );
-    // 合法空数组仍然放行。
-    expect(parseDelegatePreview('{"mode":"commit","excluded_files":[]}').ok).toBe(true);
+    // 契约键（reviewable_files）必须跟着带上：只写 excluded_files 的文档在契约闸就被
+    // 拒了，这一支会永远测不到。
+    expect(
+      parseDelegatePreview('{"mode":"commit","reviewable_files":[],"excluded_files":[7]}').ok,
+    ).toBe(false);
+    expect(
+      parseDelegatePreview(
+        '{"mode":"commit","reviewable_files":[],"excluded_files":[{"reason":"x"}]}',
+      ).ok,
+    ).toBe(false);
+    // reviewable 一侧同款：条目一个都没解析出来时不是「没有可审文件」
+    expect(parseDelegatePreview('{"mode":"commit","reviewable_files":[7]}').ok).toBe(false);
+    // 合法空数组仍然放行（CLI 的 delegatePreviewJSON 两个数组字段都没有 omitempty，
+    // 真回执必带 reviewable_files 这个结构性键）。
+    expect(
+      parseDelegatePreview('{"mode":"commit","reviewable_files":[],"excluded_files":[]}').ok,
+    ).toBe(true);
   });
 });
 
@@ -817,6 +913,36 @@ describe("解析文案双语（消息表由调用方注入）", () => {
       en,
     );
     expect(zero).toContain("not anchored");
+  });
+
+  it("缺 path 的占位文案随语言走：摘要位置 / renderComment / compare 桶内位置同源", () => {
+    // 此前 lib/parse.ts 里 "(path unknown)" 硬编码两处（renderComment 与 locationOf），
+    // 中文界面因此冒出英文，且两处副本各改各的。占位现在来自 messages.pathUnknown。
+    const raw = JSON.stringify({
+      status: "success",
+      comments: [{ content: "无路径", start_line: 4 }],
+    });
+    for (const messages of [zh, MESSAGES.en]) {
+      const parsed = parseReviewOutput(raw, messages);
+      const view = summarizeReview(parsed, messages, { maxComments: 1 });
+      const comment = parsed.comments[0]!;
+      expect(view.topComments[0]?.location).toBe(`${messages.pathUnknown}:4`);
+      expect(renderComment(comment, messages).startsWith(`${messages.pathUnknown}:4`)).toBe(true);
+      const compared = parseSessionCompare(
+        JSON.stringify({
+          before: {},
+          after: {},
+          new: [{ content: "无路径", start_line: 4 }],
+          persisting: [],
+          resolved: [],
+          not_reviewed: [],
+        }),
+        messages,
+      );
+      expect(compared.view?.new[0]?.location).toBe(`${messages.pathUnknown}:4`);
+    }
+    // 两种语言的占位确实不同源（不是把英文那份抄进中文表）。
+    expect(zh.pathUnknown).not.toBe(MESSAGES.en.pathUnknown);
   });
 
   it("同一输入两语各自可读：中文那份与英文那份不同源、且都不为空", () => {
@@ -910,6 +1036,12 @@ describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume 
     expect(parsed.limitReached).toBe(false);
     expect(parsed.llm).toBeNull();
     expect(parsed.resume).toBeNull();
+    // 边界另一侧：恰好 4000 字符不截断，钉住判据是 `>` 而不是 `>=`。
+    const exact = parseOcr(
+      JSON.stringify({ status: "complete", project_summary: "x".repeat(4000), comments: [] }),
+    );
+    expect(exact.projectSummary).toHaveLength(4000);
+    expect(exact.projectSummaryTruncated).toBe(false);
   });
 
   it("空 llm/resume 对象不伪造身份；无 warnings 时 limitReached=false", () => {
@@ -1030,7 +1162,7 @@ const compareComment = (filePath: string): Record<string, unknown> => ({
 
 describe("parseSessionCompare — session compare --json", () => {
   it("四桶、两侧标识与计数一起给出；桶内按位置渲染", () => {
-    const parsed = parseSessionCompare(
+    const parsed = compareOf(
       JSON.stringify({
         before: { session_id: "b", review_mode: "range", range: "main..x" },
         after: { session_id: "a", review_mode: "range", range: "main..x" },
@@ -1053,14 +1185,12 @@ describe("parseSessionCompare — session compare --json", () => {
   });
 
   it("缺桶/桶非数组判失败；超过 20 条的桶截断并计入 droppedCount", () => {
-    expect(parseSessionCompare("{").ok).toBe(false);
-    expect(parseSessionCompare("[]").ok).toBe(false);
-    expect(parseSessionCompare('{"new":[]}').ok).toBe(false);
-    expect(
-      parseSessionCompare('{"new":[],"persisting":[],"resolved":[],"not_reviewed":{}}').ok,
-    ).toBe(false);
+    expect(compareOf("{").ok).toBe(false);
+    expect(compareOf("[]").ok).toBe(false);
+    expect(compareOf('{"new":[]}').ok).toBe(false);
+    expect(compareOf('{"new":[],"persisting":[],"resolved":[],"not_reviewed":{}}').ok).toBe(false);
     const many = Array.from({ length: 21 }, (_value, index) => compareComment(`f${index}.ts`));
-    const parsed = parseSessionCompare(
+    const parsed = compareOf(
       JSON.stringify({
         before: {},
         after: {},
@@ -1076,7 +1206,7 @@ describe("parseSessionCompare — session compare --json", () => {
   });
 
   it("坏评论条目只丢该条；before/after 非对象时两侧标识为空", () => {
-    const parsed = parseSessionCompare(
+    const parsed = compareOf(
       JSON.stringify({
         before: "nope",
         after: null,

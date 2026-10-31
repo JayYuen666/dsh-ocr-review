@@ -4,10 +4,37 @@
 [语义化版本](https://semver.org/lang/zh-CN/)，最新版本在最上。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.10
+
+一轮跨面审查修复：路径闸、MCP 配置写面与并发覆盖、provider 面与解析判据收口；设置卡与工具出口同步加固。对外工具与 Remote 方法名单不变。
+
+### Changed
+
+- **MCP 写面加 revision 基线**：`mcp()` 回执新增 `revision`，`saveMcp` 入参加可选 `revision`——带基线时锁内比对，过期整笔拒绝回 `mcpSaveConflict`；不带基线沿用旧的后写覆盖语义（旧客户端兼容）。双开卡片或手改 config.json 时后保存者不再静默抹掉他人更新。
+- **发布链加固**（`.github/workflows/publish.yml`）：发布步 `pnpm install --ignore-scripts`、构建移至无凭据步、`pnpm publish --ignore-scripts`，生命周期脚本不再能接触发布凭据；`prepack` 删除改 `prepare`（同为双构建）。
+- **依赖与元数据**：js-yaml 改精确钉 `5.4.3`；`@deepseek-ai/schemastery` peer 放宽为 `^3.18.6-alpha.1`；catalog 的 shared 抬到 0.2.2；author 改对象形（name+url）。
+
+### Fixed
+
+- **路径闸**（`lib/argv-guard.ts`）：归一后落在文件系统根（`/`、盘符根、UNC 根）一律拒绝，堵 `--rule /etc/passwd` 被当仓内文件读进 OCR；`statSync` 改 `throwIfNoEntry: false`；会话根判定改 `path.isAbsolute`（Windows `C:/…` 不再落相对分支）。
+- **Remote 拒绝判据**（`lib/remote-shape.ts`）：`isRemoteRefused` 收 `unknown`，须同时满足 `ok===false`、非空 `error`、整数 `status`，null/NaN/原始值不再误判；状态码集中为导出常量 `OCR_REFUSE_STATUS`。
+- **MCP 配置**（`lib/mcp-config.ts`）：写失败独立文案；输出容器改 null 原型（`__proto__` 键不再丢失/污染）；写侧把盘上同条目的未知字段接回；providers.chatgpt 非法改显式报错；读侧加 64 KiB 上限；URL 判据拒空主机。
+- **OCR config 迁移**（`lib/ocr-config.ts`）：不覆写已有非空 `api_key_cmd`；provider/model 入口一次 trim；空白 `language` 不落键；迁移写回统一走 `renderConfigDoc`。
+- **provider 面**（`lib/provider-projection.ts`、`lib/provider-source.ts`）：baseURL 禁内嵌 `user:pass@`、空白/控制字符与无主机；`apiKeyEnv` 按导出白名单收口，非法 ref 单独暴露；health 与探测异常收口，失败出口统一 `settingsFailed()`。
+- **解析与聚合**（`lib/parse.ts`、`lib/severity.ts`）：`isCount` 限安全整数域、`toolCallsOf` 总数口径、warnings 限流；`hitsContract` 只认 reviewable 文件/组，`{"error":…}` 载荷不再假报 0 文件；`byCategory` 落 null 原型。
+- **工具出口守卫**（`lib/output.ts`）：新增容器形状闸；违规收集改 `ViolationSink`，收集期截断 20 条/2000 字，不再先攒几十万条。
+- **host**（`host.ts`）：后台作业剪枝与取文案包 try 并先 killProc（不留无主 OCR 进程）；saveMcp/chatGpt 加外层 try 回可读回执；装载期 fire-and-forget 自检包 try（防未处理 rejection 终止宿主）；effort 未知值回落设置卡值。
+- **设置卡**（`src/client-entry.ts`）：channel 改逐值比对；MCP 未读成功时禁编辑/保存；llmTest 失败按失败着色；refresh 并发只认最后一次。
+- **CLI 与凭据脚本**（`lib/cli.ts`、`scripts/get-cred.mjs`）：pgrep 探针退出码 1（无匹配）不再算被拒；preview 也转发 `--max-tokens`；YAML 报错不再读 message/toString，防明文 snippet 外泄。
+
+### Added
+
+- **测试三层**：`test/e2e/stub-ocr.e2e.test.ts`（官方执行器真 spawn stub 全链路）、`test/e2e/real-cli.e2e.test.ts`（真 ocr 二进制对照，缺席显式跳过）、`test/platform/guards.platform.test.ts`、`test/property/parse-chain.property.test.ts`（fast-check）、`test/ref-syntax-parity.test.ts`、`test/write-surface.test.ts`；devDependencies 新增 fast-check 4.10.2 与 `@deepseek-ai/dsh-bash-local` / `@deepseek-ai/dsh-subprocess-local`。
+
 ## 0.1.9
 
 这一版把后台评审的作业归属钉到发起会话，并把设置卡与读面校验统一到 shared 组件和 zod；
-插件页展示面进包，宿主开发线抬到 0.2.2-alpha.2。对外工具与 Remote 方法面不变。
+插件页展示面进包，宿主开发线抬到 0.2.2-alpha.2。对外工具与 Remote 方法名单不变，后台作业的可见性按发起会话收紧。
 
 ### Changed
 
@@ -23,7 +50,7 @@
 - **插件页展示面进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、
   `docs/DETAIL.zh.md`；`exports` 增加 `./locale/*.json`，`files` 收进 locale 与 docs。
 - **宿主开发线抬到 `0.2.2-alpha.2`**：devDependencies 与 catalog/overrides 同值；`engines.dsh`
-  与 peer 仍写支持窗口 `^0.2.1-rc.3`，README 补滚动窗口说明。
+  与 peer 写支持窗口 `^0.2.1-rc.3`，README 补滚动窗口说明。
 - **正则常量提升**：argv-guard / config-store / mcp-config / output / parse / provider-projection
   的内联正则提取为命名常量，行为不变，满足 lint 的重复字面量门禁。
 

@@ -67,7 +67,10 @@ const SELECT_SCHEMA = z.object(
 
 const MCP_SAVE_MESSAGE = "mcp save request requires a string json";
 const MCP_SAVE_SCHEMA = z.object(
-  { json: z.string({ error: MCP_SAVE_MESSAGE }) },
+  {
+    json: z.string({ error: MCP_SAVE_MESSAGE }),
+    revision: z.string().optional(),
+  },
   { error: MCP_SAVE_MESSAGE },
 );
 
@@ -88,7 +91,7 @@ const SELECT_CODEC: TypertCodec<OcrSelectRequest> = {
   }),
 };
 
-/** MCP 保存请求：`json` 是必填串（原始 JSON 文本，由宿主校验）。 */
+/** MCP 保存请求：`json` 是必填串（原始 JSON 文本，由宿主校验），`revision` 是读侧交回的基线。 */
 const MCP_SAVE_CODEC: TypertCodec<OcrMcpSaveRequest> = {
   mode: "strict",
   typeSymbol: `${PACKAGE_NAME}#mcp-save-request`,
@@ -234,7 +237,7 @@ export interface OcrReader {
   test: () => Promise<OcrTestReply>;
   probe: () => Promise<OcrProbeReply>;
   mcp: () => Promise<OcrMcpReply>;
-  saveMcp: (json: string) => Promise<OcrMcpSaveReply>;
+  saveMcp: (json: string, revision?: string) => Promise<OcrMcpSaveReply>;
   auth: () => Promise<OcrAuthReply>;
   chatGpt: (model: string) => Promise<OcrChatGptReply>;
 }
@@ -256,10 +259,11 @@ const isOcrNamespace = (value: unknown): value is OcrNamespace =>
   typeof value["auth"] === "function" &&
   typeof value["chatGpt"] === "function";
 
-/** 网关回执 → 值；载体/网关失败抛（卡片那层按「请求失败」显示）。 */
+/** 网关回执 → 值；载体/网关失败抛（卡片那层按「请求失败」显示）。
+ *  机器码放 `cause`：卡片只展示 message，`REMOTE_...` 这类内部标识不是给用户看的。 */
 function unwrap<Value>(result: RemoteResult<Value>): Value {
   if (!result.ok) {
-    throw new Error(`${result.error.code}: ${result.error.message}`);
+    throw new Error(result.error.message, { cause: { code: result.error.code } });
   }
   return result.value;
 }
@@ -280,7 +284,7 @@ function buildOcrReader(ctx: RemoteHost): OcrReader {
     //（默认值变了，缺 remote 的部署就该在这里拿到 undefined 而不是抛错）。
     const remote = ctx.get?.("remote", false);
     if (!isRemoteMounter(remote)) {
-      throw new Error("remote 未提供：当前部署没有远程读面（每次读取都会重新解析）");
+      throw new Error("remote 未提供：当前部署没有远程读面");
     }
     return remote;
   };
@@ -297,6 +301,10 @@ function buildOcrReader(ctx: RemoteHost): OcrReader {
     }
     const namespace = ctx.get?.(OCR_SERVICE_KEY, false);
     if (!isOcrNamespace(namespace)) {
+      // 挂载已落定却读不到命名空间（贡献被撤、fiber 卸载、网关重挂）：缓存不清空的话，
+      // 后续读取会一直跳过 $mount 并以同一条错误失败，与文件头「晚到也能被下一次读取
+      // 接上」的承诺相反。清掉缓存，下一次读取重新挂载。
+      mounted = undefined;
       throw new Error(`${OCR_SERVICE_KEY} 未提供：宿主网关没有挂上这枚命名空间`);
     }
     return namespace;
@@ -326,9 +334,10 @@ function buildOcrReader(ctx: RemoteHost): OcrReader {
       const ns = await namespaceOf();
       return unwrap(await ns.mcp());
     },
-    async saveMcp(json: string): Promise<OcrMcpSaveReply> {
+    async saveMcp(json: string, revision?: string): Promise<OcrMcpSaveReply> {
       const ns = await namespaceOf();
-      return unwrap(await ns.saveMcp({ json }));
+      // 不带基线时不发这一位：旧宿主会按「请求体只认 json」的 schema 把多出来的键判掉。
+      return unwrap(await ns.saveMcp(revision === undefined ? { json } : { json, revision }));
     },
     async auth(): Promise<OcrAuthReply> {
       const ns = await namespaceOf();

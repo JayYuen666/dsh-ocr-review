@@ -11,11 +11,18 @@
 
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
-/** llm-pi-ai 命名空间里 provider 表的字段名。 */
-const PROVIDERS_FIELD = "providers";
+/** llm-pi-ai 命名空间里 provider 表的字段名。导出给 lib/provider-source.ts：读口判
+ *  「命名空间里有 providers 表吗」与投影取同一张表，两处各写一份字面量迟早漂。 */
+export const PROVIDERS_FIELD = "providers";
 
-/** provider 的 baseURL 只认 http(s)。 */
-const HTTP_URL = /^https?:\/\//iu;
+/** provider 的 baseURL 里出现空白或控制字符：URL 解析器会把换行/制表符直接吃掉、
+ *  把空格编码进路径，畸形串因此可能变形后通过，故先按原文拒绝。 */
+const RAW_SPACE_OR_CONTROL = /[\p{Cc} ]/u;
+
+/** 可写进 config.json `api_key_cmd` 的凭据 ref 名（config-store.ts 的构造与反解共用这一枚）。
+ *  收紧到「大写 + 数字 + 下划线」有两层理由：OCR 侧凭据惯例大写；把真实 key 误填进
+ *  `apiKeyEnv` 时它不会被当作 ref 送进凭据查询、也不会在失败文案里被原样回显。 */
+export const CREDENTIAL_ENV_KEY = /^[A-Z0-9_]+$/u;
 
 /** provider 的单个模型（settings 值里的形状，多余字段上游加了也不影响）。 */
 export interface DshModel {
@@ -29,6 +36,9 @@ export interface DshProvider {
   displayName: string;
   /** 该 provider 的 key 在凭据服务里的 ref 名（apiKeyEnv）；未声明为 null。 */
   apiKeyEnv: string | null;
+  /** 声明了但语法不过白名单的原始 ref（如小写 `myKey`）：select 时据此给出
+   *  「改成大写」的可读错误，而不是把「声明了但非法」谎报成「未声明」。 */
+  apiKeyEnvInvalid: string | null;
   /** OCR config 的 protocol 值（由下面的映射表从 llm-pi-ai 的 `api` 算出；表外
    *  值原样透传，由 apply 侧白名单拒绝——绝不静默降级成 openai）。 */
   protocol: string;
@@ -119,16 +129,41 @@ function modelFromRaw(modelRaw: unknown): DshModel | null {
   return { id, name: name === "" ? id : name };
 }
 
+/** baseURL 的可用形态：http(s)、有主机、无内嵌凭据。
+ *
+ *  只用前缀正则（此前的 `/^https?:\/\//`）放行了 `https://`（无主机）、内嵌
+ *  `user:pass@` 的地址与含换行/空白的串：内嵌凭据会把明文密码写进 OCR config.json，
+ *  其余形态把故障拖到 OCR 调用期才暴露。`new URL` 能拒掉无主机与空白主机，
+ *  但会**静默吃掉**换行/制表符并把空格编码进路径，所以原文里先禁空白与控制字符。 */
+function isAcceptableBaseUrl(value: string): boolean {
+  if (RAW_SPACE_OR_CONTROL.test(value)) {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return false;
+  }
+  // http(s) 解析成功即已带主机（`https://`、`https:///` 这类直接抛 Invalid URL），
+  // 故不再单判 hostname；内嵌 userinfo 才会把明文凭据带进 config.json。
+  return parsed.username === "" && parsed.password === "";
+}
+
 /** 原始 provider 对象 → DshProvider（缺 baseURL 或形状不合视为无效，返回 null）。 */
 function providerFromRaw(name: string, raw: unknown): DshProvider | null {
   if (!isRecord(raw)) {
     return null;
   }
   const entry = raw;
-  const apiKeyEnv =
-    typeof entry["apiKeyEnv"] === "string" && entry["apiKeyEnv"].trim()
-      ? entry["apiKeyEnv"].trim()
-      : null;
+  // 凭据 ref 名按写侧同一白名单收口：非法形态置 null，provider 仍保留供用户在 settings
+  // 修复；否则真实 key 误填进这个字段会被当作 ref 查询，并在失败文案里原样回显。
+  const rawApiKeyEnv = typeof entry["apiKeyEnv"] === "string" ? entry["apiKeyEnv"].trim() : "";
+  const apiKeyEnv = CREDENTIAL_ENV_KEY.test(rawApiKeyEnv) ? rawApiKeyEnv : null;
+  const apiKeyEnvInvalid = apiKeyEnv === null && rawApiKeyEnv !== "" ? rawApiKeyEnv : null;
   // `api` 的「未声明」与「类型就不对 / 显式空串」必须分开：前者按 llm-pi-ai 的
   // `request.api ?? 'openai-completions'`（discovery.ts:300）兜底成 openai；后两者
   // 字符串化后**原样透传**，让写侧白名单给出可读错误。此前空串也被兜成 ""→openai，
@@ -136,17 +171,21 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
   // 「select 成功、OCR 调不通」。
   const api = apiKeyOf(entry["api"]);
   const protocol = api === null ? "openai" : (OCR_PROTOCOL_BY_API.get(api) ?? api);
-  // baseURL 同样 trim，且必须是 http/https URL："not a url"、"ftp://…"、"javascript:…"
-  // 这类形态此前能一路写进 config.json，故障延到 OCR 调用期才暴露。读侧宽容的落法
-  // 是整条丢弃（卡片照常打开，用户去 settings 修），不是替用户猜一个修正值。
+  // baseURL 同样 trim，且必须是可用的 http(s) URL（判据见 isAcceptableBaseUrl）：
+  // 故障在读侧就暴露，不是延到 OCR 调用期。读侧宽容的落法是整条丢弃（卡片照常打开，
+  // 用户去 settings 修），不是替用户猜一个修正值。
   const baseURL = typeof entry["baseURL"] === "string" ? entry["baseURL"].trim() : "";
-  if (!baseURL || !HTTP_URL.test(baseURL)) {
+  if (!baseURL || !isAcceptableBaseUrl(baseURL)) {
     return null;
   }
-  // 「models 未声明」（缺省/非数组，含显式空数组）与「声明了但每条都无效」必须分开：
-  // 后者若也透传成 models=[]，写侧对空 models 是「任意 model 放行」，model 白名单
-  // 就被畸形声明绕开。读侧对后者整条丢弃。
-  const modelsRaw = Array.isArray(entry["models"]) ? entry["models"] : [];
+  // 「models 未声明（缺省/显式空数组）」与「声明了但形状不对/每条都无效」必须分开：
+  // 后两种若也透传成 models=[]，写侧对空 models 是「任意 model 放行」，model 白名单
+  // 就被畸形声明绕开。读侧对它们整条丢弃。
+  const modelsField = entry["models"];
+  if (modelsField !== undefined && modelsField !== null && !Array.isArray(modelsField)) {
+    return null;
+  }
+  const modelsRaw = Array.isArray(modelsField) ? modelsField : [];
   const models = modelsRaw
     .map((model) => modelFromRaw(model))
     .filter((model): model is DshModel => model !== null);
@@ -160,6 +199,7 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
     name,
     displayName: displayName === "" ? name : displayName,
     apiKeyEnv,
+    apiKeyEnvInvalid,
     protocol,
     baseURL,
     models,

@@ -16,9 +16,12 @@
 *.cmd  text eol=crlf
 *.ps1  text eol=crlf
 
-# 二进制资源显式声明，不依赖 text=auto 的 NUL 探测：它只看文件前若干字节，遇到没有扩展名
-# 的伪文本二进制仍可能误判并改写行尾，而那种改写是不可逆的内容损坏。
-*.svg  binary
+# SVG 随包分发（README 头部图标），内容是 UTF-8 编码的 XML：需要冻结字节、不做行尾归一化，
+# 但仍应参与行级 diff 与三方合并。binary 宏会连带关闭后两者，故这里只取消 text 属性。
+*.svg  -text
+
+# 位图图标显式声明为二进制，不依赖 text=auto 的 NUL 探测：它只看文件前若干字节，遇到没有
+# 扩展名的伪文本二进制仍可能误判并改写行尾，而那种改写是不可逆的内容损坏。
 *.png  binary
 *.jpg  binary
 *.ico  binary

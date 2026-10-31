@@ -13,12 +13,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const SCRIPT = path.join(path.dirname(import.meta.dirname), "scripts", "get-cred.mjs");
+const RUN_TIMEOUT_MS = 10_000;
 
 interface RunResult {
   stdout: string;
   stderr: string;
   code: number | null;
 }
+
+/** 用例会读的 ref 名：宿主的同名环境变量必须先剔掉，否则会盖住 .env/空值这几层，
+ *  让「从哪一层取到」的断言在开发机上偶发失真。 */
+const TEST_REFS = new Set(["OCR_TEST_KEY", "OCR_BLANK_KEY", "OCR_OTHER_KEY"]);
 
 /** 以当前环境为底，覆盖指定项（值为 undefined 即从结果里剔除该键）。 */
 function envFor(overrides: Record<string, string | undefined>): Record<string, string> {
@@ -30,7 +35,7 @@ function envFor(overrides: Record<string, string | undefined>): Record<string, s
   }
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(merged)) {
-    if (value !== undefined) {
+    if (value !== undefined && !(TEST_REFS.has(key) && !(key in overrides))) {
       result[key] = value;
     }
   }
@@ -55,10 +60,28 @@ async function runCred(
     stderr += chunk;
   });
   // events.once 在子进程发 error 事件时会 reject，等价于原先显式的 error 监听。
-  const closeArgs: unknown[] = await once(child, "close");
-  const [exitCode] = closeArgs;
-  const code: number | null = typeof exitCode === "number" ? exitCode : null;
-  return { stdout, stderr, code };
+  // 超时兜底：脚本挂起时由 signal 中止等待、杀掉子进程并点名卡住的参数，
+  // 否则要等 vitest 的整用例超时，且失败信息看不出是哪一组 args。
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, RUN_TIMEOUT_MS);
+  try {
+    const closeArgs: unknown[] = await once(child, "close", { signal: controller.signal });
+    const [exitCode] = closeArgs;
+    const code: number | null = typeof exitCode === "number" ? exitCode : null;
+    return { stdout, stderr, code };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      child.kill("SIGKILL");
+      throw new Error(`get-cred 超时（${String(RUN_TIMEOUT_MS)}ms）：${args.join(" ")}`, {
+        cause: error,
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const ROOT = mkdtempSync(path.join(tmpdir(), "ocr-get-cred-"));
@@ -125,9 +148,20 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     expect(res.stderr).toContain("必须是绝对路径");
   });
 
+  it("$DSH_HOME 是相对路径 ⇒ 同样非零退出（校验不只守在参数分支）", async () => {
+    const res = await runCred(["OCR_TEST_KEY"], {
+      HOME: ROOT,
+      DSH_HOME: "relative/.dsh",
+    });
+    expect(res.code).toBe(1);
+    expect(res.stdout).toBe("");
+    expect(res.stderr).toContain("必须是绝对路径");
+  });
+
   it("非法 ref 名直接拒绝，不读任何文件", async () => {
     const res = await runCred(["bad;rm -rf"], { HOME: ROOT, DSH_HOME: undefined });
     expect(res.code).toBe(1);
+    expect(res.stdout).toBe("");
     expect(res.stderr).toMatch(/非法 env key 名/u);
   });
 
@@ -141,6 +175,20 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
   it("无第三参数时按 $DSH_HOME 定位数据目录", async () => {
     const home = homeWith({ credentialsYaml: DOC });
     const res = await runCred(["OCR_TEST_KEY"], { HOME: ROOT, DSH_HOME: home });
+    expect(res.code).toBe(0);
+    expect(res.stdout).toBe(MANAGED_DOC_STDOUT);
+  });
+
+  it("参数目录优先于 $DSH_HOME：两层各有不同 key 时取参数目录那份", async () => {
+    const byArg = homeWith({ credentialsYaml: DOC });
+    const byEnv = homeWith({
+      credentialsYaml: "version: 1\nrefs:\n  OCR_TEST_KEY: sk-from-dsh-home\n",
+    });
+    const res = await runCred(["OCR_TEST_KEY", byArg], {
+      HOME: ROOT,
+      DSH_HOME: byEnv,
+    });
+    expect(res.code).toBe(0);
     expect(res.stdout).toBe(MANAGED_DOC_STDOUT);
   });
 
@@ -163,19 +211,24 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     expect(res.stdout).toBe(MANAGED_DOC_STDOUT);
   });
 
-  it("托管文档没有该 ref ⇒ 进程环境顶上（换的是先后，不是删档位）", async () => {
-    const home = homeWith({ credentialsYaml: DOC });
+  it("托管文档没有该 ref ⇒ 进程环境顶上，且优先于 .env 的同名值", async () => {
+    const home = homeWith({
+      credentialsYaml: DOC,
+      dotEnv: "OCR_OTHER_KEY=sk-from-dot-env\n",
+    });
     const res = await runCred(["OCR_OTHER_KEY", home], {
       HOME: ROOT,
       DSH_HOME: undefined,
       OCR_OTHER_KEY: PROCESS_ENV_KEY,
     });
+    expect(res.code).toBe(0);
     expect(res.stdout).toBe(`${PROCESS_ENV_KEY}\n`);
   });
 
   it("托管文档没有该 ref ⇒ 回退 $DSH_HOME/.env（含 export 前缀与引号）", async () => {
     const home = homeWith({ dotEnv: 'export OCR_TEST_KEY="sk-from-dot-env"\nOTHER=1\n' });
     const res = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.code).toBe(0);
     expect(res.stdout).toBe("sk-from-dot-env\n");
   });
 
@@ -183,6 +236,7 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     const home = homeWith({ credentialsYaml: DOC });
     const res = await runCred(["OCR_BLANK_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
     expect(res.code).toBe(1);
+    expect(res.stdout).toBe("");
     expect(res.stderr).toMatch(/取不到 OCR_BLANK_KEY/u);
     expect(res.stderr).toMatch(/\.credentials\.yaml/u);
   });
@@ -191,6 +245,7 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     const home = homeWith({ credentialsYaml: "version: 1\nrefs: [oops\n" });
     const missing = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
     expect(missing.code).toBe(1);
+    expect(missing.stdout).toBe("");
     expect(missing.stderr).toMatch(/不是合法 YAML/u);
     writeFileSync(path.join(home, ".env"), "OCR_TEST_KEY=sk-after-bad-doc\n");
     const rescued = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
@@ -198,7 +253,42 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     // 回退成功也要说话：用户必须知道生效的 key 不是最高优先级那层给的。
     expect(rescued.code).toBe(0);
     expect(rescued.stderr).toMatch(/不是合法 YAML/u);
-    expect(rescued.stderr).toMatch(/取自更低的一层/u);
+    expect(rescued.stderr).toMatch(/实际取自 .*\.env/u);
+    expect(rescued.stderr).not.toContain("sk-after-bad-doc");
+  });
+
+  it("凭证文档顶层不是映射 / refs 不是映射 ⇒ 记 problem 并说明回退到哪一层", async () => {
+    // 两种坏形状都解析得出、但取不到任何 ref：静默回退会让用户以为托管文档仍生效。
+    const brokenShapes = ["just-a-scalar\n", "- a\n- b\n", "version: 1\nrefs:\n  - OCR_TEST_KEY\n"];
+    const fallbacks = await Promise.all(
+      brokenShapes.map(async (broken) => {
+        const home = homeWith({
+          credentialsYaml: broken,
+          dotEnv: "OCR_TEST_KEY=sk-from-dot-env\n",
+        });
+        return runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
+      }),
+    );
+    for (const res of fallbacks) {
+      expect(res.code).toBe(0);
+      expect(res.stdout).toBe("sk-from-dot-env\n");
+      expect(res.stderr).toMatch(/\{ refs: \{ … \} \} 映射/u);
+      expect(res.stderr).toMatch(/实际取自 .*\.env/u);
+    }
+    // 只有 version、没有 refs：官方允许的可选键，不算坏形状，不该报警。
+    const versionOnly = homeWith({ credentialsYaml: "version: 1\n", dotEnv: "OCR_TEST_KEY=sk\n" });
+    const quiet = await runCred(["OCR_TEST_KEY", versionOnly], { HOME: ROOT, DSH_HOME: undefined });
+    expect(quiet.code).toBe(0);
+    expect(quiet.stderr).toBe("");
+  });
+
+  it("坏消息来自 .env 自身时，告警点名实际来源，不臆断「更低的一层」", async () => {
+    const home = homeWith({ dotEnv: 'OCR_TEST_KEY=sk-good\nOCR_TEST_KEY="broken\n' });
+    const res = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
+    expect(res.code).toBe(0);
+    expect(res.stdout).toBe("sk-good\n");
+    expect(res.stderr).toMatch(/实际取自 .*\.env/u);
+    expect(res.stderr).not.toMatch(/更低的一层/u);
   });
 
   it(".env 行内注释剥离：未加引号从「 #」剥离，# 前无空格视为值的一部分", async () => {

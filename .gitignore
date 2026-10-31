@@ -7,22 +7,27 @@
 /.toolchain/
 /coverage/
 
-# 构建被中断时原子落盘留下的临时文件（同目录 + rename，见 build-utils.mjs 的
-# writeArtifact）：名字带 pid 与 uuid，越积越多且每次都不重样。
-*.tmp
+# 构建被中断时原子落盘留下的草稿目录（见 shared 的 build-artifacts 切面 writeArtifact）：
+# 草稿先写进目标文件同目录的 .tmp/，再 rename 到目标，文件名带 pid 与 uuid。本仓的构建
+# 目标都在包根，故把 .tmp/ 锚定到根；未锚定的 *.tmp 会连子目录里的同名夹具一起忽略。
+/.tmp/
 
-# 排障时在仓根临时放的本地凭据与配置。本包运行期的 key 由 api_key_cmd 动态读，
-# 从不落仓库；这几条防的是复现问题时顺手抄进来的那份。
+# 排障时临时放的本地凭据与配置。本包运行期的 key 由 api_key_cmd 动态读，从不落仓库；
+# 这几条防的是复现问题时顺手抄进来的那份。通配刻意作用于任意层级而不止仓根：凭据文件
+# 不因放在子目录就被放过；确需入库的同名夹具应另加否定规则，而不是放宽这里的保护面。
 .env
 .env.*
 !.env.example
 *.credentials.yaml
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
 
 # 打包与系统产物。
 *.tgz
 .DS_Store
-
-# 统一构建件的原子落盘草稿目录（shared/lib/build-artifacts 的 writeArtifact）。
-/.tmp/

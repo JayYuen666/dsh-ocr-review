@@ -1,6 +1,7 @@
 // README 双语结构闸：README.md 与 README.zh-CN.md
 // 是同一份事实的两语投影——工具清单、Remote 方法名、部署级键、第三方声明引用与章节结构一旦
 // 单侧漂移，读另一侧的人拿到的是过时的契约。这里不比对措辞（翻译本来就不逐字），只比对结构。
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -13,7 +14,7 @@ const README_FILES = {
   zh: "README.zh-CN.md",
 } as const;
 
-/** 两侧都必须出现的工具名（模型面契约的五个入口）。 */
+/** 两侧都必须出现的工具名（模型面的全部入口）。 */
 const TOOL_NAMES = [
   "ocr_review",
   "ocr_scan",
@@ -25,9 +26,10 @@ const TOOL_NAMES = [
 ] as const;
 
 /** 两侧都必须点名的部署级键：导出 `Config` 上那些**不进设置卡**的非 volatile 字段
- *  （前三枚是调优值，第四枚是「一条运行能不能改动这台机器」的部署决策）。 */
+ *  （调优值，以及「一条运行能不能改动这台机器」的部署决策）。 */
 const DEPLOYMENT_KEYS = [
   "llmTestTimeoutMs",
+  "startupVerify",
   "ocrBackgroundMaxMs",
   "stdoutMaxBytes",
   "ocrNoAutoUpdate",
@@ -64,6 +66,20 @@ async function readReadme(which: keyof typeof README_FILES): Promise<string> {
   return readFile(path.join(pkgDir, README_FILES[which]), "utf8");
 }
 
+/**
+ * `##` 章节的语言无关标识：标题里那枚 lucide 图标名。两语标题文字不同，图标是同一份结构
+ * 标记——顺序、增删都在它上面看得到；只数条数时「删一章又加一章」正好相互抵消。
+ *
+ * @param text - README 全文
+ * @returns 每个 `##` 章节的图标名（无图标时为空串）
+ */
+function sectionIcons(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((line) => line.startsWith("## "))
+    .map((line) => /lucide\/(?<icon>[\w-]+)\.svg/u.exec(line)?.groups?.["icon"] ?? "");
+}
+
 describe("readme 双语结构", () => {
   it("两侧互链（英链中、中链英），且两个文件都在盘上", async () => {
     const en = await readReadme("en");
@@ -72,17 +88,12 @@ describe("readme 双语结构", () => {
     expect(zh).toContain("README.md");
   });
 
-  it("两侧 `##` 章节数一致（单侧加章节必须在另一侧补齐）", async () => {
-    const counts = await Promise.all(
-      (Object.keys(README_FILES) as (keyof typeof README_FILES)[]).map(async (which) => {
-        const text = await readReadme(which);
-        return text.split("\n").filter((line) => line.startsWith("## ")).length;
-      }),
-    );
-    expect(counts[0], `两侧章节数不一致：${counts.join(" vs ")}`).toBe(counts[1]);
+  it("两侧 `##` 章节的图标序列一致（单侧增删或换序都会红）", async () => {
+    const [en, zh] = await Promise.all([readReadme("en"), readReadme("zh")]);
+    expect(sectionIcons(en), "两侧章节图标序列不一致").toStrictEqual(sectionIcons(zh));
   });
 
-  it("五个工具名两侧都在（模型面契约不许单语失明）", async () => {
+  it("全部工具名两侧都在（模型面契约不许单语失明）", async () => {
     const texts = {
       en: await readReadme("en"),
       zh: await readReadme("zh"),
@@ -104,7 +115,7 @@ describe("readme 双语结构", () => {
     }
   });
 
-  it("五条 Remote 方法与命名空间两侧都在（对外契约面不许单语失明）", async () => {
+  it("全部 Remote 方法与命名空间两侧都在（对外契约面不许单语失明）", async () => {
     const texts = {
       en: await readReadme("en"),
       zh: await readReadme("zh"),
@@ -139,6 +150,10 @@ describe("readme 双语结构", () => {
     } as const;
     expect(texts.en, "README.md 没有指向第三方声明").toContain("THIRD_PARTY_NOTICES");
     expect(texts.zh, "README.zh-CN.md 没有指向第三方声明").toContain("THIRD_PARTY_NOTICES");
+    expect(
+      existsSync(path.join(pkgDir, "THIRD_PARTY_NOTICES.md")),
+      "THIRD_PARTY_NOTICES.md 不在盘上",
+    ).toBe(true);
     const manifest = JSON.parse(await readFile(path.join(pkgDir, "package.json"), "utf8")) as {
       files?: string[];
     };

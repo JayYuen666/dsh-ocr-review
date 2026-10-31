@@ -32,7 +32,7 @@ describe("产物体积", () => {
   // 用 it.each 而不是手写循环：两条预算断言形状完全相同，手写循环多一层缩进，且新增一条
   // 预算时容易忘了把它塞进某个数组的某个分支里。
   it.each(BUDGETS)("%s 不超过 %s 字节预算", (file, budget) => {
-    let bytes;
+    let bytes: number;
     try {
       bytes = readFileSync(path.join(pkgDir, file)).byteLength;
     } catch (error) {
@@ -43,7 +43,7 @@ describe("产物体积", () => {
     }
     assert.ok(
       bytes <= budget,
-      `${file} 实测 ${bytes} B，超出预算 ${budget} B：多半是某个切面塞进了大查表或字面量，` +
+      `${file} 实测 ${bytes} B，预算 ${budget} B，超支 ${bytes - budget} B：多半是某个切面塞进了大查表或字面量，` +
         "或者外部化清单漏了一枚包导致整包被内联。确属正常演进就改 test/dist-size.test.ts 里" +
         "对应的预算常量，并写明理由。",
     );

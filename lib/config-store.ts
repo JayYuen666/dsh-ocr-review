@@ -11,8 +11,8 @@
 // 完整理由记在 lib/ocr-config.ts 的头注释里，本模块逐字实现它：写盘一律交官方件，本地只
 // 管备份与目录。
 
-import { readFileSync, copyFileSync, chmodSync, existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { withFileLock, writeFileAtomic } from "@deepseek-ai/dsh-atomic-write";
 import { expandHomePath } from "@deepseek-ai/dsh-home-paths";
@@ -23,15 +23,15 @@ import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import { PI_AI_NAMESPACE } from "./provider-source.ts";
+import { CREDENTIAL_ENV_KEY } from "./provider-projection.ts";
 import type { DshProvider } from "./provider-projection.ts";
 
 /** api_key_cmd 脚本名（pluginDir 兜底路径的唯一拼法来源）。 */
 const GET_CRED_SCRIPT = path.join("scripts", "get-cred.mjs");
 
-/** 尾部反斜杠 / 翻倍反斜杠 / env 键 / 行首 node 命令。 */
+/** 尾部反斜杠 / 翻倍反斜杠 / 行首 node 命令。 */
 const TRAILING_BACKSLASHES = /\\+$/u;
 const DOUBLED_BACKSLASHES = /(?:\\\\)+$/u;
-const ENV_KEY = /^[A-Z0-9_]+$/u;
 const LEADING_NODE_CMD = /^node[ \t]+/u;
 
 /** 未知值 → 安全字符串（非字符串给 ''）。 */
@@ -137,15 +137,16 @@ function shqDyn(value: string): string {
  *  $DSH_HOME > homedir()/.dsh）：ocrConfigPath 重定向 ocr 子进程的 HOME 后，
  *  get-cred 的 homedir() 兜底会跟着跑偏，须在宿主侧把解析出的数据目录显式钉进
  *  命令。undefined（未重定向）时省略，沿用 env/默认档。
- *  env key 白名单维持 ^[A-Z0-9_]+$（刻意比宿主 CredentialRef 的语法紧：OCR 侧
- *  惯例大写，且这是写进 config.json 的可信输入）。 */
+ *  env key 白名单是 CREDENTIAL_ENV_KEY（定义在 lib/provider-projection.ts，投影与写侧
+ *  共用同一枚；刻意比宿主 CredentialRef 的语法紧：OCR 侧惯例大写，且这是写进
+ *  config.json 的可信输入）。 */
 export function buildApiKeyCmd(
   scriptPath: string,
   envKey: string,
   dshHome: string | undefined,
   messages: OcrReviewMessages,
 ): string {
-  if (!ENV_KEY.test(envKey)) {
+  if (!CREDENTIAL_ENV_KEY.test(envKey)) {
     throw new Error(format(messages.badEnvKey, { key: envKey }));
   }
   const parts = ["node", shqDyn(scriptPath), shqDyn(envKey)];
@@ -310,7 +311,7 @@ export function parseApiKeyCmd(command: string): ParsedApiKeyCmd | null {
   }
   const script = tokens[0] ?? "";
   const envKey = tokens[1] ?? "";
-  if (script === "" || tokens.length < 2 || tokens.length > 3 || !ENV_KEY.test(envKey)) {
+  if (script === "" || tokens.length < 2 || tokens.length > 3 || !CREDENTIAL_ENV_KEY.test(envKey)) {
     return null;
   }
   return { script, envKey, dshHome: tokens[2] };
@@ -380,6 +381,28 @@ export async function updateConfigLocked<TResult>(
 }
 
 /**
+ * 原子写回的落点：符号链接解到真身。
+ *
+ * ocr CLI 自己用 `os.WriteFile`（跟随链接）写这份配置，用户把 `config.json` 链到
+ * dotfiles 仓库是常见用法。官方 `writeFileAtomic` 以 rename 提交，它会**替换链接本身**
+ * （包内文档原文："replaces a symlinked target itself instead of writing through to its
+ * referent"），于是链接消失、真身停在旧内容，配置仓库从此与运行配置脱钩。
+ * `realpath` 对普通文件返回自身、对链接返回最终真身，一条判据就够；悬空链接解不出真身，
+ * 按链接文本定位它指向的位置（首写会创建该文件）；文件尚未存在时两者都失败，仍用原路径。
+ */
+async function writableTargetOf(targetPath: string): Promise<string> {
+  try {
+    return await realpath(targetPath);
+  } catch {
+    try {
+      return path.resolve(path.dirname(targetPath), await readlink(targetPath));
+    } catch {
+      return targetPath;
+    }
+  }
+}
+
+/**
  * 原子写回 config.json：先留 `.bak` 备份，再交官方 `writeFileAtomic` 落盘。
  * 此前是 `writeFileSync` 直写：进程/磁盘在写入中途出问题就会留下半截配置
  * （OCR 与用户都读不到），且没有任何回滚点。rename 在同目录内是原子的。
@@ -388,15 +411,21 @@ export async function updateConfigLocked<TResult>(
  * 创建（`dirMode`）与新 inode 携带 `mode` 全是官方件既有行为，本仓不再手抄
  * （实测）。本地只剩 `.bak`：官方写文件面无备份语义，且备份必须落在
  * rename **之前**——挪到之后备份到的就是新内容。
+ *
+ * 备份的权限必须**在创建那一刻**就是 0600：备份里可能仍有迁移前的明文 api_key，
+ * 而 `copyFileSync` 沿用源文件权限位，"先复制再 chmod"之间既有宽权限窗口，中途
+ * 崩溃/被杀还会把宽权限永久留下。因此先删旧备份、再按 0600 直接创建；删与写之间
+ * 崩溃只会少一份备份，目标文件尚未动过。
  */
 export async function writeConfigAtomic(targetPath: string, text: string): Promise<void> {
+  const target = await writableTargetOf(targetPath);
   const bakPath = `${targetPath}.bak`;
-  if (existsSync(targetPath)) {
-    copyFileSync(targetPath, bakPath);
-    // 备份里可能仍有迁移前的明文 key，权限按最严格收口。
-    chmodSync(bakPath, 0o600);
+  if (existsSync(target)) {
+    const previous = readFileSync(target);
+    rmSync(bakPath, { force: true });
+    writeFileSync(bakPath, previous, { mode: 0o600, flag: "wx" });
   }
-  await writeFileAtomic(targetPath, text, { mode: 0o600, dirMode: 0o700 });
+  await writeFileAtomic(target, text, { mode: 0o600, dirMode: 0o700 });
 }
 
 /** 本包允许写进 custom_providers.<name>.protocol 的白名单（OCR config_cmd.go:796
@@ -464,8 +493,11 @@ export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMess
   customs[input.provider] = entry;
   doc["provider"] = input.provider;
   doc["custom_providers"] = customs;
-  if (input.language !== undefined) {
-    doc["language"] = input.language;
+  // 空串/纯空白不覆写：语言框被清空再保存，不该把盘上已有的 language 抹成 ""。
+  // 与 lib/ocr-config.ts 的 selection 展开同一条判据（两处各写一遍会漂成两套语义）。
+  const language = input.language?.trim();
+  if (language !== undefined && language !== "") {
+    doc["language"] = language;
   }
   return `${JSON.stringify(doc, null, 2)}\n`;
 }

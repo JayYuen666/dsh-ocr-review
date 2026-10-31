@@ -56,8 +56,7 @@ export function aggregateComments(comments: OcrComment[]): CommentAggregation {
   // 挡不住它们（读到的不是 nullish），计数于是被写成 "function Object() { [native code] }1"
   // 这样的字符串；而 "__proto__" 是 setter，赋值被静默忽略、该条评论的计数凭空消失。
   // 两者都会被 summarizeReview 原样序列化进给模型的摘要。Map.get 不查原型链。
-  // 最后 Object.fromEntries 用 CreateDataProperty 落键（不是 Set），故 "__proto__" 是
-  // 一个普通自有键，能被 JSON.stringify 如实输出。
+  // 落键细节见下方 Object.create(null)：Map 解决的是「写」，读侧的原型链要另外断。
   const categoryCounts = new Map<string, number>();
   let unknownSeverityCount = 0;
   for (const comment of comments) {
@@ -66,8 +65,9 @@ export function aggregateComments(comments: OcrComment[]): CommentAggregation {
     if (!known) {
       unknownSeverityCount += 1;
     }
-    // category 与 severity 同一条归一口径（trim 后入键），" Security" 与 "security"
-    // 不拆成两类。空串/全空白刻意**不计数也不占键**：parse 的 str() 对缺失字段给 ""，
+    // category 只 trim、**不做大小写归一**：它是上游给的自由标签，没有可对表的枚举，
+    // 与 severity 的白名单归一是两套判据——" Security" 与 "security" 是两个键（保真展示，
+    // 消费方按原样取键）。空串/全空白刻意**不计数也不占键**：parse 的 str() 对缺失字段给 ""，
     // 「无 category」是上游合法的缺省而不是契约异常——所以它的可观测面是「byCategory
     // 各键之和允许小于 total」，差值即无 category 的条数，不给独立计数器。
     const category = comment.category.trim();
@@ -75,6 +75,14 @@ export function aggregateComments(comments: OcrComment[]): CommentAggregation {
       categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);
     }
   }
+  // 落键用 null 原型。Object.fromEntries 用 CreateDataProperty 落键（不是 Set），所以
+  // "__proto__" 会成为普通自有键、能被 JSON.stringify 如实输出——但它造出来的对象原型
+  // 仍指向 Object.prototype：于是 byCategory["toString"] / ["valueOf"] 这类**没出现过的**
+  // category 动态读到的是继承函数，读到非 nullish 值就被误判成真有计数。本模块防的
+  // 正是这类键，写入端修好而读取端仍泄漏等于只遮住表面症状。null 原型让「没出现过」
+  // 与 Map 的读取语义一致（undefined）；tool-schemas 只按 object 校验，JSON.stringify
+  // 与 structuredClone 都不依赖原型。
   const byCategory: Record<string, number> = Object.fromEntries(categoryCounts);
+  Object.setPrototypeOf(byCategory, null);
   return { total: comments.length, bySeverity, byCategory, unknownSeverityCount };
 }

@@ -53,7 +53,7 @@
 - **设置卡还承载两块管理面**：可校验的 MCP servers JSON 编辑器（保存只改 `mcp_servers`），以及报告 `ocr auth` 登录态并切换 OCR provider/model 的 ChatGPT 区。两块都由人操作，不是模型工具（stdio MCP server 会执行命令，OAuth 登录需要浏览器与本地回调）。
 - **把外部 `ocr`（open-code-review）CLI 封装成七个模型工具。** 宿主对工具入参零校验，形状、类型与枚举闸全在本包内：用户可控字符串一律单引号转义，枚举一律白名单钳制，错类型直接报错——绝不静默收窄或放宽审查范围。
 - **一张设置卡片**（client 半）从宿主自己的 `llm-pi-ai` 设置条目取 provider/model 清单、从宿主凭据服务取 key 状态。两个服务缺席时卡片显示降级原因，工具与设置照常可用。
-- **应用一次选择写的是 CLI 自己的 `~/.opencodereview/config.json`**——写进去的是 `api_key_cmd` 命令，OCR 运行期经它读宿主凭据 ref；任何地方都不落明文 key。
+- **应用一次选择写的是 CLI 自己的 `~/.opencodereview/config.json`**——写进去的是 `api_key_cmd` 命令，OCR 运行期经它读宿主凭据 ref；本包不把明文 key 写进 `config.json`，但首次改写前复制的 `.bak` 保留改写前的整份内容，其中可能有迁移前的明文 key（权限 0600），迁移后自行删除该备份。
 - **评审结果是一份结构化摘要，字段分两套口径**：OCR 审出了什么（`status`/`aggregation`/`topComments`/`warnings`），以及这一场有没有真把选中的文件审完（`coverage`/`budgetExceeded`/`toolCalls`）。CLI 以 `--audience agent` 被调用，进度输出被它压掉——后一套口径只能从这些字段里读。
 - **CLI 可得性只有一份判据**（`lib/cli.ts` 的 `resolveOcrAvailability`）：纯读文件系统、绝不起进程、每次调用现读。设置卡状态行、插件详情页徽标与启用指引渲染的都是这同一份答案，「用的是哪一份」不许有三套说法。
 - **后台运行（`wait: false`）是官方宿主作业**：`job_list` / `job_output` / `job_kill` 看得见、读得到、也停得掉一场超出工具调用生命周期的评审。
@@ -67,10 +67,10 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 卸载用 `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`。包在公共 npm 上，安装不需要凭据。
 
 - **升级已装的那一份要「先 remove 再 add」。** profile 跑着 HMR（出厂那几个都跑）时，`add` 一个 profile 已经依赖着的包会在 pnpm 动手之前就被拒（`already-installed`）——先 `remove` 再 `add` 目标版本，新版不必重启就起跑。没跑 HMR 时同一个 `add` 照样走 pnpm，报 `restart-required`。
-- **要求 Node.js `>= 22.12`，宿主 dsh 在 `0.2.1-rc.3` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.3`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `>= 22.12`，宿主 dsh 在 `0.2.1-rc.3` / `0.2.2-alpha.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.3`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 用 `nodeLinker: hoisted` 与 `autoInstallPeers: false` 安装，宿主包进了那张表就会落成真实目录，与宿主进程已加载的那份并存。`@deepseek-ai/dsh-tools` 的调度器键是普通 `Symbol`（不是 `Symbol.for`），符号身份按实例计算——那个 profile 里**每一次原生工具调用都抛**，而本包的构建、类型检查与覆盖率门在此前一路绿。
 - **`host.js` 以值导入的五枚宿主包是非 optional 的 peer**：`@deepseek-ai/schemastery`（宿主 fork——`.volatile()` 的解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`（Remote 的 Service 基类）。五枚同时以同一钉版另列进 `devDependencies`，本仓自己的类型检查才解析得到；构建对 manifest 三张表一律外部化，产物里保持裸说明符。
-- **发布面**：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepack` 重建两个 bundle，发出去的永远是当前源码的产物。
+- **发布面**（以 `package.json` 的 `files` 为准）：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`locale/*.json`、`docs/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepare` 重建两个 bundle，发出去的永远是当前源码的产物。
 
 ### <img src="https://api.iconify.design/lucide/arrow-down-to-line.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> shared 的版本下限
 
@@ -105,7 +105,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 - **它不安装、不升级 CLI。** brew/npm 命令只展示、不执行；没有更新动作，也不接剪贴板 API（非安全上下文会静默失败，看上去像按钮没反应）。
 - **没有自己的 HTTP 路由。** 数据面是一枚官方 Typert Remote 命名空间（`ocrReview`），经宿主 `/api` 网关到达；认证、Host / DNS 重绑定 / Origin 判据与请求体上限都是网关的。本包没有 CSRF token、没有 body 上限，也没有路由释放器。
 - **没有 CLI 子命令。** 不存在 `dsh ocr …`。
-- **不读以下范围之外的文件**：CLI 配置路径、自己创建的临时文件、以及宿主交给它的设置 / 凭据服务。
+- **本插件自己不读以下范围之外的文件**：CLI 配置路径、宿主凭据文档与 `$DSH_HOME/.env`（经 `scripts/get-cred.mjs`）、为找 `ocr` 二进制而探测的 PATH 目录、`ocr_session` 列出的会话存储、自己创建的临时文件，以及宿主交给它的设置 / 凭据服务。被审查仓库的内容由 `ocr` 子进程作为评审输入读取。
 - 它*确实*消费的：宿主 `settings` 与 `credentials` 服务（provider 清单、key 状态）、`shell`（每一条 `ocr` 子进程）、`jobs`（后台运行）与 `systemPrompt`（一段路由）。settings 或 credentials 缺席只降级卡片——工具照常可用。
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
@@ -128,7 +128,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 | `ocr_llm` | action providers/models：只读查询 LLM 清单；不评审、不测连通性 |
 | 清单上限 | exclude 与 path 各收 2000 条；超限直接拒绝整次调用。条目绝不静默丢弃——「比清单少审了几份」不许以成功的口径上报 |
 
-`wait: false` 起后台运行、不挂宿主 deadline（用 `ocr_session` 轮询；该子进程同时是一枚官方作业，见[后台运行与官方作业](#后台运行与官方作业)）；dsh 以任何方式退出时，收割守护把 OCR 进程树收走。取消工具调用即终止对应的后台进程。
+`wait: false` 起后台运行、不挂宿主 deadline（用 `ocr_session` 轮询；该子进程同时是一枚官方作业，见[后台运行与官方作业](#后台运行与官方作业)）；POSIX 上 dsh 以任何方式退出时，收割守护把 OCR 进程树收走（Windows 没有收割，见「已知边界」）。取消工具调用即终止对应的后台进程。
 
 ## <img src="https://api.iconify.design/lucide/sliders-horizontal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 设置项
 
@@ -165,8 +165,8 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 | `migrate()` | — | `{ok, migrated, skippedUnknown}` |
 | `test()` | — | `{ok, output}`——`ok` 是**测试结论**，不是这次调用成没成；output 先脱敏再截 8000 字符 |
 | `probe()` | — | `{ok, version, expectedVersion, consistent, output, reason, changeText}`——15 秒墙钟内跑一次 `ocr version`，恒定带 `OCR_NO_UPDATE=1`。`consistent` 是三态（`null` = 没量到，此时宣称「不一致」就是把没证据的事说成结论）；`reason` 点名失败那一档；`changeText` 只在真有一条该给的命令时非空 |
-| `mcp()` | — | `{ok, json}`——只回 `mcp_servers` 对象（pretty JSON），不含 providers/keys |
-| `saveMcp(request)` | `{json}`——原始 JSON 文本，上限 64 KiB；stdio/remote 条目逐字段校验 | `{ok, count}`——只写 `mcp_servers`，其他配置原样保留 |
+| `mcp()` | — | `{ok, json, revision}`——只回 `mcp_servers` 对象（pretty JSON），不含 providers/keys；`revision` 是这一支的摘要 |
+| `saveMcp(request)` | `{json, revision?}`——原始 JSON 文本，上限 64 KiB；stdio/remote 条目逐字段校验；`revision` 取 `mcp()` 交回的那一枚 | `{ok, count, revision}`——只写 `mcp_servers`，其他配置原样保留。基线过期时整笔拒绝（盘上不动）并回可读的「读取之后已被改动」；不带基线则沿用原来的后写覆盖 |
 | `auth()` | — | `{ok, output, loginCommand}`——只读 `ocr auth status --provider chatgpt`；登录本身要浏览器与本地回调，仍留在终端执行 |
 | `chatGpt(request)` | `{model}` | `{ok, model}`——写 `provider: "chatgpt"` 与 `providers.chatgpt.model`，不写 key |
 
@@ -201,7 +201,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 | --- | --- |
 | 进程边界 | 被审查仓库的路径与 diff 内容进 `ocr` 子进程，CLI 再把它们发给自己在 config.json 里配置的 LLM 端点——这条外发是审查功能本身，不经 dsh 宿主。明文 key 不进工具返回、也不进 Remote 应答；宿主侧解析到的值只用于确认「现在解析得到」，当场丢弃 |
 | 原始输出脱敏 | 本包出去的 CLI 原始 stdout/stderr（失败详情、llm test、解析失败回显、session 透传）统一过 `redactKeyMaterial()`：Bearer 与赋值形态从严抹除，独立 key 形态额外要求随机串特征，免得把要交给模型的文件路径一起抹掉 |
-| 写盘范围 | 只有两处：CLI 的 `config.json`（含临时文件、`.bak` 备份与短暂的锁）与系统临时目录下的 `ocr-review-*` / `ocr-scan-*`（读完即删）。迁移前的明文可能留在那次写入产生的 `.bak` 里（权限 0600）——要彻底清掉需自行删除该备份。这两处之外，`ocrNoAutoUpdate` 没置真时唯一的写者就是 CLI 自己那层 npm 包装 |
+| 写盘范围 | CLI 的 `config.json`（含临时文件、`.bak` 备份与短暂的锁）、系统临时目录下的 `ocr-review-*` / `ocr-scan-*`（读完即删），以及 `ocr-session-export-*` 目录——那是 `ocr_session` 的 `export` 返回的 HTML，留给调用方，不自动删除。迁移前的明文可能留在那次写入产生的 `.bak` 里（权限 0600）——要彻底清掉需自行删除该备份。这些之外，`ocrNoAutoUpdate` 没置真时唯一的写者就是 CLI 自己那层 npm 包装 |
 
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 已知边界
 
@@ -231,7 +231,7 @@ pnpm run check   # typecheck（两侧）→ lint → client 构建 → host 构�
 
 - 覆盖率阈值**四项 100%**，分母是 `vitest.config.ts` 里 `coverageInclude` 选定的那一面（`host.ts` + `lib/**`）；两块刻意在分母外：客户端半（`src/**`）经 bundle 与设置卡用例覆盖，`scripts/get-cred.mjs` 由进程级用例另起进程驱动（v8 覆盖率看不到子进程），它的行为门禁在 `test/get-cred.test.ts`。
 - 往 profile 加本包的**本地目录**（`pnpm add <路径>`）需要 pnpm ≥ 12.3.0：更早的 pnpm 12 把无别名的本地路径当 registry 包名解析（上游 #14437，12.3.0 修复）。从 registry 装不受影响。
-- 产物新鲜度由 `test/build-host.test.ts` 钉着：`host.js` / `client.js` 落后于源码就红。发布物不手改；`prepack` 重建。
+- 产物新鲜度由 `test/build-host.test.ts` 钉着：`host.js` / `client.js` 落后于源码就红。发布物不手改；`prepare` 重建。
 - 插件源码是 TypeScript，由宿主的 cordis Loader 直接加载（Node ≥ 22.18 类型剥离）；bundle 只为 npm 发布面存在。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可

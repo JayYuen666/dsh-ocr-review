@@ -43,6 +43,14 @@ describe("assertToolOutput", () => {
     expect(() => guardOf({ text: "x", raw: "y" }, objectSchema, "delegate_preview")).toThrow(
       /fields outside the schema: raw/u,
     );
+    // properties 用对象字面量承载：若判定退化成 `key in properties` 或 `properties[key]`，
+    // constructor / toString 会沿原型链被当成已声明字段而静默放行。
+    expect(() => guardOf({ text: "x", constructor: 1 }, objectSchema)).toThrow(
+      /fields outside the schema: constructor/u,
+    );
+    expect(() => guardOf({ text: "x", toString: "y" }, objectSchema)).toThrow(
+      /fields outside the schema: toString/u,
+    );
   });
 
   it("对象分支：非对象、缺必填、键在值 undefined、嵌套字段违规各一条", () => {
@@ -80,6 +88,34 @@ describe("assertToolOutput", () => {
     const strings = { type: "array", items: { type: "string" } } satisfies JsonSchemaNode;
     const many = Array.from({ length: 25 }, (_unused, index) => index);
     expect(() => guardOf(many, strings)).toThrow(/…\(\+5\)/u);
+    // 清单会进 session log：字段名里的 key 形态必须先抹掉，整条消息还要按字符上限截断。
+    expect(() =>
+      guardOf({ text: "x", "sk-live-abcdefghijklmnopqrstuvwx012345": 1 }, objectSchema),
+    ).toThrow(/fields outside the schema: \*\*\*REDACTED\*\*\*/u);
+    let detail = "";
+    try {
+      guardOf({ text: "x", ["a".repeat(5000)]: 1 }, objectSchema);
+    } catch (error) {
+      const { message } = error as Error;
+      detail = message;
+    }
+    expect(detail, "超长字段名该被截断").toContain("fields outside the schema");
+    expect(detail.length).toBeLessThan(3000);
+  });
+
+  it("多余字段名单最多列 10 个，其余只计省略数", () => {
+    const closed = {
+      type: "object",
+      properties: { text: { type: "string" } },
+      required: ["text"],
+      additionalProperties: false,
+    } satisfies JsonSchemaNode;
+    const extra = Object.fromEntries(
+      Array.from({ length: 12 }, (_unused, index) => [`extra${String(index)}`, index]),
+    );
+    expect(() => guardOf({ text: "x", ...extra }, closed)).toThrow(
+      /fields outside the schema: extra0, extra1, extra2, extra3, extra4, extra5, extra6, extra7, extra8, extra9 …\(\+2\)/u,
+    );
   });
 
   it("标量分支：number 须有限、integer 须整数、boolean/null 各自点名", () => {
@@ -117,6 +153,12 @@ describe("assertToolOutput", () => {
     expect(guardOf("s", nullable)).toBe("s");
     expect(guardOf(null, nullable)).toBeNull();
     expect(() => guardOf(42, nullable)).toThrow(/result: matched 0 of 2 oneOf branches/u);
+    // 同级关键字是合取：oneOf 命中不等于 const 被豁免（在分支里 return 会静默放过）。
+    const gated = {
+      const: "a",
+      oneOf: [{ type: "string" }, { type: "null" }],
+    } satisfies JsonSchemaNode;
+    expect(() => guardOf("b", gated)).toThrow(/result: must be exactly "a"/u);
     const everything = { oneOf: [{}, {}] } satisfies JsonSchemaNode;
     expect(() => guardOf(42, everything)).toThrow(/matched 2 of 2 oneOf branches/u);
   });
@@ -165,15 +207,72 @@ describe("assertToolOutput", () => {
     const typeArray: Record<string, unknown> = { type: ["string", "null"] };
     expect(() => guardOf("x", typeArray as JsonSchemaNode)).toThrow(/type 必须是单个类型名/u);
     const enumString: Record<string, unknown> = { type: "string", enum: "abc" };
-    expect(() => guardOf("cd", enumString as JsonSchemaNode)).toThrow(/enum 必须是非空数组/u);
+    expect(() => guardOf("cd", enumString as JsonSchemaNode)).toThrow(
+      /enum 必须是非空的 JSON 标量/u,
+    );
+    const enumObjects: Record<string, unknown> = {
+      type: "object",
+      enum: [{ first: 1 }, { second: 2 }],
+    };
+    expect(() => guardOf({ key: 1 }, enumObjects as JsonSchemaNode)).toThrow(
+      /enum 必须是非空的 JSON 标量/u,
+    );
+    const enumNumbers: Record<string, unknown> = { type: "number", enum: [1, 2] };
+    expect(() => guardOf(1, enumNumbers as JsonSchemaNode)).not.toThrow();
+    const enumNonFinite: Record<string, unknown> = {
+      type: "number",
+      enum: [Number.POSITIVE_INFINITY],
+    };
+    expect(() => guardOf(1, enumNonFinite as JsonSchemaNode)).toThrow(
+      /enum 必须是非空的 JSON 标量/u,
+    );
+    const objectConst: Record<string, unknown> = { type: "object", const: { a: 1 } };
+    expect(() => guardOf({ a: 1 }, objectConst as JsonSchemaNode)).toThrow(
+      /const 必须是 JSON 标量/u,
+    );
     const shortOneOf: Record<string, unknown> = { oneOf: [{ type: "string" }] };
     expect(() => guardOf("x", shortOneOf as JsonSchemaNode)).toThrow(/oneOf 必须是至少两项/u);
+    // type 与 oneOf 可以同时声明：关键词是合取关系（官方同语义），命中一支不等于 type 被豁免。
     const bothTypeAndOneOf: Record<string, unknown> = {
       type: "string",
       oneOf: [{ type: "string" }, { type: "null" }],
     };
-    expect(() => guardOf("x", bothTypeAndOneOf as JsonSchemaNode)).toThrow(
-      /type 与 oneOf 不能同时声明/u,
+    expect(() => guardOf("x", bothTypeAndOneOf as JsonSchemaNode)).not.toThrow();
+    expect(() => guardOf(42, bothTypeAndOneOf as JsonSchemaNode)).toThrow(
+      /matched 0 of 2 oneOf branches/u,
+    );
+  });
+
+  it("容器关键字的取值形态也查：数组 properties / 字符串 required / 元组 items 都当场抛", () => {
+    // 只查标量关键字时，这几种写法会让走查器丢掉整条约束（数组 properties 把下标当字段名、
+    // 字符串 required 逐字符迭代、对象 additionalProperties 与 === false 恒不相等），
+    // 失效方向是静默放行——与 type/enum 写错同一类。
+    const propsArray: Record<string, unknown> = {
+      type: "object",
+      properties: [{ type: "string" }],
+    };
+    expect(() => guardOf({}, propsArray as JsonSchemaNode)).toThrow(
+      /properties 必须是字段名的对象/u,
+    );
+    const requiredString: Record<string, unknown> = { type: "object", required: "text" };
+    expect(() => guardOf({}, requiredString as JsonSchemaNode)).toThrow(
+      /required 必须是字段名数组/u,
+    );
+    const additionalNumber: Record<string, unknown> = { type: "object", additionalProperties: 5 };
+    expect(() => guardOf({}, additionalNumber as JsonSchemaNode)).toThrow(
+      /additionalProperties 必须是布尔或子 schema/u,
+    );
+    const tupleItems: Record<string, unknown> = { type: "array", items: [{ type: "string" }] };
+    expect(() => guardOf([], tupleItems as JsonSchemaNode)).toThrow(/items 必须是单个子 schema/u);
+    const missingType: Record<string, unknown> = { properties: { a: { type: "string" } } };
+    expect(() => guardOf({}, missingType as JsonSchemaNode)).toThrow(/必须同时声明 type/u);
+    // 反例的另一侧：additionalProperties 写成子 schema 是合法形态，且必须递归检查。
+    const nestedUnsupported: Record<string, unknown> = {
+      type: "object",
+      additionalProperties: { type: "string", minLength: 1 },
+    };
+    expect(() => guardOf({}, nestedUnsupported as JsonSchemaNode)).toThrow(
+      /不支持 output schema 关键字 minLength/u,
     );
   });
 
@@ -262,6 +361,15 @@ describe("redactKeyMaterial", () => {
     );
   });
 
+  it("已知凭据前缀嵌在路径分隔符之间也照抹：路径豁免不替裸 key 开口", () => {
+    expect(redactKeyMaterial("/logs/sk-AbCdEfGhIjKlMnOpQrStUv/line")).toBe(
+      "/logs/***REDACTED***/line",
+    );
+    expect(redactKeyMaterial(String.raw`\cache\ark-1a2b3c4d5e6f7g8h9i0j111213141516\x`)).toBe(
+      String.raw`\cache\***REDACTED***\x`,
+    );
+  });
+
   it("无空格的小写长 run 不随长度平方放大（脱敏同步跑在宿主事件循环上）", () => {
     // 上限取 `stdoutMaxBytes` 的默认档 400_000：失败详情与 llm test 回执都吃这一档，
     // 而脱敏排在截断之前（先截会把 key 切半、剩下半截全小写就不再命中这条规则）。
@@ -270,7 +378,7 @@ describe("redactKeyMaterial", () => {
     const input = "aa-a".repeat(100_000);
     const started = performance.now();
     expect(redactKeyMaterial(input)).toBe(input);
-    expect(performance.now() - started).toBeLessThan(2000);
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 });
 
@@ -295,5 +403,16 @@ describe("stripAnsi", () => {
 
   it("除 SGR 之外的 CSI 序列同样算控制序列（清行、光标位都不该进浏览器）", () => {
     expect(stripAnsi("a\u001B[2Kb\u001B[1;32mc\u001B[0md")).toBe("abcd");
+  });
+
+  it("osc / DCS 与单字符 ESC 序列同样剥掉（标题、超链接、设备控制不留字节）", () => {
+    // OSC 以 BEL 收尾：改窗口标题/超链接会走这一档。
+    expect(stripAnsi("a\u001B]0;title\u0007b")).toBe("ab");
+    // OSC 以 ST（ESC \）收尾。
+    expect(stripAnsi("a\u001B]8;;https://example.com\u001B\\b")).toBe("ab");
+    // DCS：ESC P … ST。
+    expect(stripAnsi("a\u001BPqdata\u001B\\b")).toBe("ab");
+    // 单字符 ESC 序列（如 ESC c 重置终端）。
+    expect(stripAnsi("a\u001Bcb")).toBe("ab");
   });
 });

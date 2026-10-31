@@ -18,7 +18,7 @@
 // unicorn/max-nested-calls 与 max-statements/complexity）；状态/网络回调统一
 // async/await + try/catch。
 
-import { createElement, useCallback, useEffect, useState } from "react";
+import { createElement, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { z } from "zod";
 import type { Context } from "@deepseek-ai/cordis";
@@ -446,15 +446,17 @@ export function currentConfigText(t: Translate, current: ProvidersPayload["curre
   });
 }
 
-/** 装法枚举到文案键：查表而不是嵌套三元（本仓 lint 禁嵌套三元），查不到就是「未识别」那一档。 */
-const CHANNEL_KEYS: Record<string, "channelBrew" | "channelNpm" | "channelUnknown"> = {
-  brew: "channelBrew",
-  npm: "channelNpm",
-};
-
-/** 那份 CLI 是怎么装上的，翻成人话。判不出来源（含 host 没报这一档）不猜。 */
+/** 那份 CLI 是怎么装上的，翻成人话。判不出来源（含 host 没报这一档）不猜。
+ *  逐个比对已知值而不是查一张普通对象表：`channel` 来自 wire，只校验了「是字符串」，
+ *  用属性查表时 `"toString"`、`"constructor"` 一类会命中原型上的成员，把函数当文案键传下去。 */
 function channelText(t: Translate, channel: string | undefined): string {
-  return t(CHANNEL_KEYS[channel ?? ""] ?? "channelUnknown");
+  if (channel === "brew") {
+    return t("channelBrew");
+  }
+  if (channel === "npm") {
+    return t("channelNpm");
+  }
+  return t("channelUnknown");
 }
 
 /**
@@ -1079,6 +1081,8 @@ export interface AdminSectionProps {
   writable: boolean;
   available: boolean;
   mcpJson: string;
+  /** 当前配置已经成功读到。为 false 时编辑器与保存都禁用：里面的 "{}" 不是真实配置。 */
+  mcpReady: boolean;
   mcpBusy: boolean;
   mcpMsg: string | null;
   authOutput: string | null;
@@ -1098,7 +1102,7 @@ function buildMcpAdmin(props: AdminSectionProps): ReactNode {
   const textarea = createElement("textarea", {
     "data-field": "mcpJson",
     value: props.mcpJson,
-    disabled: !props.writable || props.mcpBusy || !props.available,
+    disabled: !props.writable || props.mcpBusy || !props.available || !props.mcpReady,
     "aria-label": t("mcpTitle"),
     className: "dsu-input dsu-textarea dsu-mono ocr-adminTextarea",
     onChange: (event: { target: { value: string } }) => {
@@ -1111,7 +1115,7 @@ function buildMcpAdmin(props: AdminSectionProps): ReactNode {
       type: "button",
       className: "dsu-btn",
       "data-field": "mcpSave",
-      disabled: !props.writable || props.mcpBusy || !props.available,
+      disabled: !props.writable || props.mcpBusy || !props.available || !props.mcpReady,
       onClick: props.onMcpSave,
     },
     props.mcpBusy ? t("mcpSaving") : t("mcpSave"),
@@ -1280,13 +1284,14 @@ interface CardActionDeps {
 export type CardActionKind = "apply" | "test" | "migrate" | "probe";
 
 /** apply 动作多要两位：本次渲染选中的 provider/model。 */
-interface ApplySelectionDeps extends CardActionDeps {
+export interface ApplySelectionDeps extends CardActionDeps {
   effectiveProvider: string;
   effectiveModel: string;
 }
 
-/** POST select：把选中的 provider/model 写进 OCR 配置，回执里按 autoVerify 决定是否带 llm test。 */
-async function runApplySelection(deps: ApplySelectionDeps): Promise<void> {
+/** POST select：把选中的 provider/model 写进 OCR 配置，回执里按 autoVerify 决定是否带 llm test。
+ *  导出与 `runProbe` 同因：卡片上的动作以纯函数形态可测（回执着色与文案都在这里定）。 */
+export async function runApplySelection(deps: ApplySelectionDeps): Promise<void> {
   const { t, effectiveProvider, effectiveModel } = deps;
   if (!effectiveProvider || !effectiveModel) {
     deps.setActionMsg({ ok: false, text: t("pickProviderModel") });
@@ -1300,13 +1305,15 @@ async function runApplySelection(deps: ApplySelectionDeps): Promise<void> {
     const ok = fieldOf(selJson, "ok") === true;
     if (ok) {
       let testText: string;
+      // 带 llmTest 但结论为 false 时，回执要按失败着色：文案里已经写明「未通过验证」，
+      // 再用成功样式渲染，等于让用户把「写进配置」与「连接可用」读成同一件事。
+      // 不带 llmTest（autoVerify 关闭）时没有验证结论，仍按成功渲染并注明「未验证」。
+      let verified = true;
       const llmTestRaw = fieldOf(selJson, "llmTest");
       if (isRecord(llmTestRaw)) {
         const testOutput = strOf(fieldOf(llmTestRaw, "output")).slice(0, 400);
-        testText =
-          fieldOf(llmTestRaw, "ok") === true
-            ? t("llmTestPassed")
-            : `${t("llmTestFailed")}${testOutput}`;
+        verified = fieldOf(llmTestRaw, "ok") === true;
+        testText = verified ? t("llmTestPassed") : `${t("llmTestFailed")}${testOutput}`;
       } else {
         testText = t("notVerified");
       }
@@ -1315,7 +1322,7 @@ async function runApplySelection(deps: ApplySelectionDeps): Promise<void> {
         model: effectiveModel,
         test: testText,
       });
-      deps.setActionMsg({ ok: true, text: appliedText });
+      deps.setActionMsg({ ok: verified, text: appliedText });
       void deps.refresh();
     } else {
       const failure = strOf(fieldOf(selJson, "error"));
@@ -1346,10 +1353,10 @@ async function runMigrateKeys(deps: CardActionDeps): Promise<void> {
       ? skippedVal.filter((item): item is string => typeof item === "string")
       : [];
     const ok = fieldOf(json, "ok") === true;
-    const head = ok
-      ? (migrated.length > 0 ? t("migratedPrefix") + migrated.join(", ") : t("noPlainKey")) +
-        (skipped.length > 0 ? t("skippedPrefix") + skipped.join(", ") : "")
-      : t("migrateFailed");
+    const migratedText =
+      migrated.length > 0 ? t("migratedPrefix") + migrated.join(", ") : t("noPlainKey");
+    const skippedText = skipped.length > 0 ? t("skippedPrefix") + skipped.join(", ") : "";
+    const head = ok ? migratedText + skippedText : t("migrateFailed");
     deps.setActionMsg({ ok, text: head });
     void deps.refresh();
   } catch (error: unknown) {
@@ -1550,17 +1557,24 @@ function buildProviderPanel(deps: OcrCardDeps): ReactNode[] {
 
 type AdminState = Omit<AdminSectionProps, "t" | "writable">;
 
-/** 管理区的状态与动作（MCP 配置 + ChatGPT 登录态/切换）；OcrCard 只负责摆位置。 */
-function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState {
-  // 管理区：MCP 配置与 ChatGPT 登录态/切换。两者都直接写 OCR 自己的 config。
+/** MCP 配置编辑器的状态与动作：读、写，以及「没读成功不许写」的判据。 */
+function useMcpPanel(
+  reader: OcrReader | undefined,
+  t: Translate,
+): Pick<
+  AdminSectionProps,
+  "mcpJson" | "mcpReady" | "mcpBusy" | "mcpMsg" | "onMcpChange" | "onMcpSave"
+> {
   const [mcpJson, setMcpJson] = useState("{}");
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpMsg, setMcpMsg] = useState<string | null>(null);
-  const [authOutput, setAuthOutput] = useState<string | null>(null);
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authMsg, setAuthMsg] = useState<string | null>(null);
-  const [authModel, setAuthModel] = useState("");
-  const [loginCommand, setLoginCommand] = useState("ocr auth login --provider chatgpt");
+  const [mcpReady, setMcpReady] = useState(false);
+  // 用户改过就不让重读覆盖；用 ref 而不是 state，避免 loadMcp 的身份随每次键入变化、
+  // 把 effect 变成「每敲一个字就重读一次配置」。
+  const mcpDirtyRef = useRef(false);
+  // 读侧交回的基线摘要：保存时原样发回，宿主据此发现「读-改-写」之间有别人插队。
+  // 只在成功保存/成功读取时刷新，冲突后仍保留旧值——下一次重读会拿到新基线。
+  const mcpRevisionRef = useRef<string | undefined>(undefined);
 
   const loadMcp = useCallback(async (): Promise<void> => {
     if (reader === undefined) {
@@ -1571,11 +1585,20 @@ function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState 
       const reply = await reader.mcp();
       if ("status" in reply) {
         setMcpMsg(reply.error);
+        setMcpReady(false);
       } else {
-        setMcpJson(reply.json);
+        // 读成功但用户已经在编辑器里改过：保留用户文本，不拿磁盘内容覆盖草稿。
+        if (!mcpDirtyRef.current) {
+          setMcpJson(reply.json);
+        }
+        // 基线随本次读取更新：即便草稿被保留，下次保存也应当对着「现在盘上的那一版」比较，
+        // 由宿主在基线不一致时拒绝，而不是拿旧摘要让每次保存都判冲突。
+        mcpRevisionRef.current = reply.revision;
+        setMcpReady(true);
       }
     } catch (error) {
       setMcpMsg(`${t("mcpLoadFailed")}${String(error)}`);
+      setMcpReady(false);
     }
   }, [reader, t]);
   useEffect(() => {
@@ -1587,17 +1610,52 @@ function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState 
       setMcpMsg(t("adminUnavailable"));
       return;
     }
+    // 没读到当前配置时编辑器里只有初始的 "{}"，保存会把真实配置整个覆盖掉。
+    if (!mcpReady) {
+      setMcpMsg(t("mcpNotLoaded"));
+      return;
+    }
     setMcpBusy(true);
     setMcpMsg(null);
     try {
-      const reply = await reader.saveMcp(mcpJson);
-      setMcpMsg("status" in reply ? reply.error : t("mcpSaved"));
+      const reply = await reader.saveMcp(mcpJson, mcpRevisionRef.current);
+      if ("status" in reply) {
+        setMcpMsg(reply.error);
+      } else {
+        mcpDirtyRef.current = false;
+        mcpRevisionRef.current = reply.revision;
+        setMcpMsg(t("mcpSaved"));
+      }
     } catch (error) {
       setMcpMsg(String(error));
     } finally {
       setMcpBusy(false);
     }
   }
+
+  return {
+    mcpJson,
+    mcpReady,
+    mcpBusy,
+    mcpMsg,
+    onMcpChange: (value: string) => {
+      mcpDirtyRef.current = true;
+      setMcpJson(value);
+    },
+    onMcpSave: () => {
+      void saveMcp();
+    },
+  };
+}
+
+/** 管理区的状态与动作（MCP 配置 + ChatGPT 登录态/切换）；OcrCard 只负责摆位置。 */
+function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState {
+  const mcp = useMcpPanel(reader, t);
+  const [authOutput, setAuthOutput] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMsg, setAuthMsg] = useState<string | null>(null);
+  const [authModel, setAuthModel] = useState("");
+  const [loginCommand, setLoginCommand] = useState("ocr auth login --provider chatgpt");
 
   async function checkAuth(): Promise<void> {
     if (reader === undefined) {
@@ -1640,18 +1698,12 @@ function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState 
   }
   return {
     available: reader !== undefined,
-    mcpJson,
-    mcpBusy,
-    mcpMsg,
+    ...mcp,
     authOutput,
     authBusy,
     authMsg,
     authModel,
     loginCommand,
-    onMcpChange: setMcpJson,
-    onMcpSave: () => {
-      void saveMcp();
-    },
     onAuthModelChange: setAuthModel,
     onCheckAuth: () => {
       void checkAuth();
@@ -1676,11 +1728,25 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const [busy, setBusy] = useState<CardActionKind | null>(null);
   const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [probeMsg, setProbeMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const refresh = useCallback(
-    async (): Promise<ProvidersPayload | null> =>
-      refreshProviders(props.reader, t, { setData, setFetchError }),
-    [props.reader, t],
-  );
+  // 并发刷新只认最后一次：初始 refresh 与 apply/migrate 之后的 refresh 可能并行，
+  // 早发的旧载荷晚到时会覆盖新数据。
+  const refreshSeq = useRef(0);
+  const refresh = useCallback(async (): Promise<ProvidersPayload | null> => {
+    refreshSeq.current += 1;
+    const seq = refreshSeq.current;
+    return refreshProviders(props.reader, t, {
+      setData: (payload) => {
+        if (seq === refreshSeq.current) {
+          setData(payload);
+        }
+      },
+      setFetchError: (message) => {
+        if (seq === refreshSeq.current) {
+          setFetchError(message);
+        }
+      },
+    });
+  }, [props.reader, t]);
   useEffect(() => {
     void refresh();
   }, [refresh]);

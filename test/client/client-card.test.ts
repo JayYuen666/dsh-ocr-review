@@ -33,6 +33,7 @@ import {
   isOwnSubject,
   loadCliStatus,
   runProbe,
+  runApplySelection,
   currentConfigText,
   providerOptionLabel,
 } from "../../src/client-entry.ts";
@@ -630,7 +631,7 @@ const busy = (t: Translate): string => saveBarOf(t, { busy: true });
 const clean = (t: Translate): string => saveBarOf(t, { dirty: false });
 
 describe("卡片双语（换 translator 即换语言，同一条渲染路径）", () => {
-  it("SaveBar：zh 中文状态条，en 全英文且不残留汉字", () => {
+  it("状态条（SaveBar）：zh 中文状态条，en 全英文且不残留汉字", () => {
     const zh = saveBarOf(tZh);
     expect(zh).toContain("有未保存的修改，点「保存」生效");
     expect(zh).toContain("撤销");
@@ -649,7 +650,7 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(clean(tEn)).toContain("No unsaved changes");
   });
 
-  it("Provider 区 ready 分支：按钮/说明/未配置 key 后缀整体换语言", () => {
+  it("provider 区 ready 分支：按钮/说明/未配置 key 后缀整体换语言", () => {
     // 插值过的 keyHint 先取成变量：嵌进 depsWith 再进 buildProviderSection 会
     // 顶到 unicorn/max-nested-calls 上限（3）。
     const enHint = tEn("keyDynamicHint");
@@ -683,7 +684,7 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(withVerify(null)).not.toContain("装载期端点自检");
   });
 
-  it("Provider 区三条降级路径按语言（含宿主没给原因时的兜底）", () => {
+  it("provider 区三条降级路径按语言（含宿主没给原因时的兜底）", () => {
     const loading = (t: Translate): string => textOf(buildProviderSection(depsWith(t)));
     expect(loading(tZh)).toContain("加载 providers…");
     expect(loading(tEn)).toContain("loading providers…");
@@ -806,6 +807,7 @@ describe("admin section", () => {
       writable: true,
       available: true,
       mcpJson: '{"docs":{"command":"npx"}}',
+      mcpReady: true,
       mcpBusy: false,
       mcpMsg: null,
       authOutput: "Logged in as a@b",
@@ -832,11 +834,16 @@ describe("admin section", () => {
     expect(zh).toContain("ocr auth login --provider chatgpt");
     expect(zh).toContain("Logged in as a@b");
     expect(fieldProps(node, "mcpJson")?.value).toBe(base.mcpJson);
+    expect(fieldProps(node, "mcpJson")?.disabled).toBe(false);
     expect(fieldProps(node, "chatGptModel")?.value).toBe("gpt-6");
     fieldProps(node, "mcpSave")?.onClick?.();
     fieldProps(node, "authCheck")?.onClick?.();
     fieldProps(node, "chatGptUse")?.onClick?.();
     expect([saved, checked, used]).toStrictEqual([1, 1, 1]);
+    // 还没读到当前配置：编辑器与保存都禁用——里面的 "{}" 不是真实配置，保存会整段覆盖。
+    const unloaded = buildAdminSection({ ...base, mcpReady: false });
+    expect(fieldProps(unloaded, "mcpJson")?.disabled).toBe(true);
+    expect(fieldProps(unloaded, "mcpSave")?.disabled).toBe(true);
     const disabled = textOf(buildAdminSection({ ...base, available: false }));
     expect(disabled).toContain("不可用");
     const en = textOf(buildAdminSection({ ...base, t: tEn }));
@@ -1208,6 +1215,63 @@ interface ProbeMsg {
   ok: boolean;
   text: string;
 }
+
+/**
+ * 跑一次 runApplySelection。回执的着色（`ok`）与文案都在这个函数里定，故两个分支都要过一遍：
+ * 带 llmTest 且结论为 false 时回执必须按失败着色，不带 llmTest 时仍算成功并注明未验证。
+ */
+async function applyOnce(json: unknown): Promise<ProbeRun> {
+  const run: ProbeRun = { actions: [], busy: [], messages: [], refreshes: 0 };
+  await runApplySelection({
+    t: tZh,
+    effectiveProvider: "amd",
+    effectiveModel: "m",
+    post: async (action: string): Promise<Response> => {
+      run.actions.push(action);
+      return { json: async () => json } as unknown as Response;
+    },
+    refresh: async (): Promise<null> => {
+      run.refreshes += 1;
+      return null;
+    },
+    setBusy: (next: CardActionKind | null): void => {
+      run.busy.push(next);
+    },
+    setActionMsg: (message: ProbeMsg | null): void => {
+      run.messages.push(message);
+    },
+  });
+  return run;
+}
+
+describe("应用这条动作：写入成功与验证结论分开判", () => {
+  it("select 成功、autoVerify 关着 ⇒ 回执成功，文案注明未验证", async () => {
+    const run = await applyOnce({ ok: true });
+    expect(run.actions).toStrictEqual(["select"]);
+    expect(run.messages).toStrictEqual([
+      null,
+      { ok: true, text: "已应用：amd / m\n（未自动验证，可点「测试连接」手动验证）" },
+    ]);
+    expect(run.busy).toStrictEqual(["apply", null]);
+    expect(run.refreshes).toBe(1);
+  });
+
+  it("select 成功但 llmTest 失败 ⇒ 回执按失败着色，文案保留失败输出", async () => {
+    const run = await applyOnce({ ok: true, llmTest: { ok: false, output: "401 unauthorized" } });
+    expect(run.messages).toStrictEqual([
+      null,
+      { ok: false, text: "已应用：amd / m\n✗ ocr llm test 失败：401 unauthorized" },
+    ]);
+  });
+
+  it("select 成功且 llmTest 通过 ⇒ 回执成功", async () => {
+    const run = await applyOnce({ ok: true, llmTest: { ok: true, output: "" } });
+    expect(run.messages).toStrictEqual([
+      null,
+      { ok: true, text: "已应用：amd / m\n✓ ocr llm test 通过" },
+    ]);
+  });
+});
 
 /** runProbe 的落态记录：忙位依次经过哪些值、回执依次写出哪些内容、调的是哪条动作、
  *  载荷被重读了几次。 */

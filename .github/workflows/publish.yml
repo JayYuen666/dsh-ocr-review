@@ -234,7 +234,11 @@ jobs:
       # 只装依赖，不再跑 check：完整门禁已经在上游 check job 里跑过一遍，
       # 在这里重跑等于把 install/check 的执行面又搬回持 id-token 的 job。
       # 这一行本身留着的理由只有一个——pnpm publish 的 prepack 要重建产物。
-      - run: pnpm install --frozen-lockfile
+      # `--ignore-scripts`：本 job 持 id-token，依赖的生命周期脚本能拿它换 npm 受众的
+      # OIDC token；这些脚本对构建不是必需的。实测：在 /tmp 的全新检出里用
+      # `pnpm install --ignore-scripts --frozen-lockfile` 装完再 `pnpm run build`，
+      # 退出码 0 且产物正常写出（rolldown/esbuild 的平台二进制来自可选依赖包，不靠 postinstall）。
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       # prepack 会重建 host.js/client.js，产物不入库也发得出去。
       # 凭据优先级是本文件最容易读反的地方：不是「配了 NPM_TOKEN 就用它、没配才 OIDC」，
       # 而是 OIDC 在前、token 在后（pnpm 的 publish_options.rs 原话 "OIDC takes precedence over
@@ -257,6 +261,10 @@ jobs:
       # approve 两条入口，都要 2FA，走哪条由人决定：
       #   本机  `pnpm stage approve <stage-id> [--otp <码>]`（多个 id 一批共用一枚 OTP）
       #   网页  npmjs.com → 该包 → Staged Packages → Approve
+      # 构建放在不带凭据的 step：publish 的 prepack/prepare 会在同一环境里重跑构建，
+      # 而那时 NODE_AUTH_TOKEN 已经导出——构建链上的任何环节都能读到它。先构建、发布时
+      # 用 --ignore-scripts 跳过生命周期脚本，产物与 tarball 内容不受影响。
+      - run: pnpm run build:client && pnpm run build
       - name: 发布
         env:
           TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -274,4 +282,4 @@ jobs:
           else
             echo "凭据：OIDC trusted publishing"
           fi
-          pnpm publish --no-git-checks --access public --provenance
+          pnpm publish --no-git-checks --access public --provenance --ignore-scripts

@@ -24,7 +24,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -53,6 +53,26 @@ const SECTION_SLOT = "plugins.detail.section";
 const ACTIVATION_SLOT = "plugins.bundle.activation";
 
 /**
+ * 那条 link 是不是指向本检出：`link:` 说明符按 profile 所在目录归一（pnpm 写的是
+ * `link:../..` 这类相对值），再比 realpath。用 `includes(PKG_DIR)` 判会把
+ * `dsh-ocr-review-old`、`dsh-ocr-review-copy` 这类以本目录名开头的残留副本认成本份，
+ * 而拦住的正是这种副本；registry 版本号（非 link）与指向别处同样按「不适用」跳过。
+ */
+function linksThisCheckout(declared: unknown, profileDir: string): boolean {
+  const target =
+    typeof declared === "string"
+      ? /^link:(?<path>.+)$/u.exec(declared)?.groups?.["path"]
+      : undefined;
+  if (target === undefined) {
+    return false;
+  }
+  try {
+    return realpathSync(path.resolve(profileDir, target)) === realpathSync(PKG_DIR);
+  } catch {
+    return false;
+  }
+}
+/**
  * profile 的 bundle 清单（`~/.dsh/profiles/web/package.json` → `dsh.profile.bundles`）里
  * 本包那一条，即 `plugins.bundle.config` 唯一可命中的 key。顺带钉住两件事：清单里确有
  * 这一条（否则改名的漂移没人拦）、profile 的 link 目标就是本目录。
@@ -67,28 +87,26 @@ function profileBundleName(): string {
   if (!existsSync(profilePath)) {
     return PKG_NAME;
   }
-  const profile = JSON.parse(readFileSync(profilePath, "utf8")) as {
+  let profile: {
     dependencies?: Record<string, unknown>;
     dsh?: { profile?: { bundles?: unknown } };
   };
+  try {
+    profile = JSON.parse(readFileSync(profilePath, "utf8")) as typeof profile;
+  } catch (error) {
+    throw new Error(`${profilePath} 不是可解析的 profile JSON：${String(error)}`, { cause: error });
+  }
   const bundles: unknown = profile.dsh?.profile?.bundles;
   assert.ok(Array.isArray(bundles), `${profilePath} 的 dsh.profile.bundles 应是数组`);
   // link 指向的是"哪一份检出"：本机 profile 装的就是这一份时，才顺手钉"清单里恰有一条、
   // 且只指向本目录"这两道机器侧针（改名/残留副本没人拦就是真缺陷）。指向别处时（单包仓的
   // 暂存副本、消费者自己的检出）这条针不适用 —— 拿别的机器的安装状态判红等于把开发机
   // 状态写进包测试，故跳过而不是失败。
-  const installedHere: unknown = profile.dependencies?.[PKG_NAME];
-  if (!(typeof installedHere === "string" && installedHere.includes(PKG_DIR))) {
+  if (!linksThisCheckout(profile.dependencies?.[PKG_NAME], path.dirname(profilePath))) {
     return PKG_NAME;
   }
   const listed = (bundles as unknown[]).filter((item) => item === PKG_NAME);
   assert.deepEqual(listed, [PKG_NAME], "本包在 profile 的 bundles 清单里，且只列一次");
-  const link: unknown = profile.dependencies?.[PKG_NAME];
-  assert.equal(typeof link, "string", "profile 的 dependencies 指向本包");
-  assert.ok(
-    typeof link === "string" && link.includes(PKG_DIR),
-    `profile 的 link 目标应是本目录（实得 ${String(link)}）`,
-  );
   return PKG_NAME;
 }
 
@@ -134,6 +152,7 @@ interface SlotRecord {
 
 /** apply 一次所需的最小宿主替身（槽位、表单取用 id、locale 注册都留痕）。 */
 interface HostTrace {
+  /** `ctx.effect` 的逐条 label：工厂体不执行（样式注入要 document），只验装配面确实登记了它们。 */
   effects: { label?: string }[];
   entryIds: string[];
   /** `ctx.slots.inject` 的目标槽名，按注入顺序。 */
@@ -322,6 +341,14 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     const { ctx, trace } = makeHost(fakeForm(formTrace));
     apply(ctx);
 
+    // 样式注入与 locale 字典各一条：少了前者卡片无样式，少了后者提示回落成 key。
+    // 按 label 点名而不用总数：共享库的 claimApply 也会登记一条，总数会跟着它变。
+    const effectLabels = new Set(trace.effects.map((one) => one.label));
+    assert.ok(effectLabels.has("ocr-review-card: styles"), "注册了样式注入 effect");
+    assert.ok(
+      effectLabels.has("ocr-review-card: locale dictionaries"),
+      "注册了 locale 字典 effect",
+    );
     const bareIds = patchEntryIds();
     assert.deepEqual(bareIds, ["ocr-review"], "cordis.patch.yml 只声明一行裸条目 id");
     // name 行与 package.json 的 name 同源：它是 client 半加载的隐含开关，漏改的症状

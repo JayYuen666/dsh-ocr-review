@@ -16,12 +16,29 @@ export const OCR_REMOTE_NAMESPACE = "ocrReview";
  */
 export const OCR_BUNDLE_PACKAGE = "@jayyuen66/dsh-ocr-review";
 
-/** 请求被本包拒绝时的回执。`status` 是本包保留的拒绝种类码（不是 HTTP 状态：本包已无 HTTP 面），
- *  卡片只读 `error`；两侧线上形状与 test/remote.test.ts 都按这一枚钉住，删它等于改契约。 */
+/**
+ * 拒绝回执的**种类码**（`status` 位）的唯一出处。
+ *
+ * 不是 HTTP 状态：本包已无 HTTP 面，卡片只读 `error`。集中定义的理由是它此前只是裸
+ * `number`：宿主实现在十几处各写一次字面量、类型收不到任何提示，调用方也分不清
+ * 「本包自定的种类码」与顺手塞进来的 HTTP 状态码。测试仍**独立写死**数字（不从这份表
+ * 派生），否则两边一起错时判据会跟着错。
+ *
+ * · `invalid`：入参/配置不合法，卡片改完就能重试。
+ * · `internal`：宿主侧读取或执行失败（读不到配置、子进程起不来），不是改参数能解决的。
+ */
+export const OCR_REFUSE_STATUS = {
+  invalid: 400,
+  internal: 500,
+} as const;
+
+/** 请求被本包拒绝时的回执。`status` 是本包保留的拒绝种类码（见 {@link OCR_REFUSE_STATUS}，
+ *  不是 HTTP 状态：本包已无 HTTP 面），卡片只读 `error`；两侧线上形状与
+ *  test/remote.test.ts 都按这一枚钉住，删它等于改契约。 */
 export interface OcrRemoteRefused {
   readonly ok: false;
   readonly error: string;
-  readonly status: number;
+  readonly status: (typeof OCR_REFUSE_STATUS)[keyof typeof OCR_REFUSE_STATUS];
 }
 
 /** 选择 provider/model 的入参（源码模式下网关按宿主方法签名的参数名取 `request`）。 */
@@ -90,23 +107,29 @@ export interface OcrProbeOk {
 
 export type OcrProbeReply = OcrProbeOk | OcrRemoteRefused;
 
-/** MCP 配置读面：`json` 是 `mcp_servers` 的 pretty JSON（不含其他配置/keys）。 */
+/** MCP 配置读面：`json` 是 `mcp_servers` 的 pretty JSON（不含其他配置/keys）；
+ *  `revision` 是这一支的摘要，保存时原样交回，作为「读-改-写」之间没人插队的基线。 */
 export interface OcrMcpOk {
   readonly ok: true;
   readonly json: string;
+  readonly revision: string;
 }
 
 export type OcrMcpReply = OcrMcpOk | OcrRemoteRefused;
 
-/** MCP 配置写面入参：原始 JSON 文本，由宿主校验后写入。 */
+/** MCP 配置写面入参：原始 JSON 文本，由宿主校验后写入；`revision` 是读侧交回的基线，
+ *  缺省表示不带基线（旧客户端），宿主跳过冲突比较。`exactOptionalPropertyTypes` 下显式
+ *  `revision: undefined` 与「没带这一位」同义，两者都按「没有基线」处理。 */
 export interface OcrMcpSaveRequest {
   readonly json: string;
+  readonly revision?: string | undefined;
 }
 
-/** MCP 配置写面回执：`count` 是保存后的 server 条数。 */
+/** MCP 配置写面回执：`count` 是保存后的 server 条数，`revision` 是该版内容的新摘要。 */
 export interface OcrMcpSaved {
   readonly ok: true;
   readonly count: number;
+  readonly revision: string;
 }
 
 export type OcrMcpSaveReply = OcrMcpSaved | OcrRemoteRefused;
@@ -149,8 +172,25 @@ export type OcrAnyReply =
  * 为什么需要它：`ok` 在 `OcrTestOk` 里是业务结论（可以是 false），与
  * `OcrRemoteRefused.ok`（恒 false）重叠，所以 `if (!reply.ok)` 在 TypeScript 里
  * 收窄不到拒绝分支，运行时也会把「LLM 测试没过」当成「请求被拒」——
- * 两者的用户可见文案完全不同。判据用拒绝回执独有的 `status`。
+ * 两者的用户可见文案完全不同。
+ *
+ * 入参刻意是 `unknown`：回执来自远端 JSON，本仓不保证它一定是对象。判据是拒绝回执
+ * **同时**独有的三件——`ok === false`、`error` 是非空串、`status` 是整数：
+ * · 只凭 `"status" in reply`：null/原始值会直接抛 TypeError，把「解析异常」升级成
+ *   「客户端崩」，正好与这个函数存在的意义相反；
+ * · 只凭 `typeof status === "number"`：NaN 会通过；业务回执将来带一个数字字段
+ *   （HTTP/作业状态码）也会被误判成拒绝，用户看到的文案与接下来该做什么完全不同；
+ * · 少了 `ok === false`：同上，判别式落在一个与业务结论重叠的位上。
  */
-export function isRemoteRefused(reply: OcrAnyReply): reply is OcrRemoteRefused {
-  return "status" in reply && typeof reply.status === "number";
+export function isRemoteRefused(reply: unknown): reply is OcrRemoteRefused {
+  if (typeof reply !== "object" || reply === null) {
+    return false;
+  }
+  const candidate = reply as { ok?: unknown; error?: unknown; status?: unknown };
+  return (
+    candidate.ok === false &&
+    typeof candidate.error === "string" &&
+    typeof candidate.status === "number" &&
+    Number.isInteger(candidate.status)
+  );
 }

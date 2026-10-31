@@ -86,6 +86,8 @@ export interface OcrReviewMessages {
   readonly repoRequiredUnknownWorkspace: string;
   /** repo 不是绝对路径（点名收到的值）。 */
   readonly repoMustBeAbsolute: string;
+  /** repo 归一后落在文件系统根（"/"、盘符根、UNC 共享根）：根下任意外部文件都会被当成仓内文件。 */
+  readonly repoMustNotBeFilesystemRoot: string;
   /** 任意字符串参数里出现 NUL 字节。 */
   readonly noNulBytes: string;
   /** 布尔参数收到非布尔值。 */
@@ -159,6 +161,8 @@ export interface OcrReviewMessages {
   readonly warningSeparator: string;
   readonly reviewSummaryHint: string;
   readonly lineZeroNote: string;
+  /** 评论缺 path 时的位置占位（`pathUnknown` 之前这个英文串硬编码在 lib/parse.ts 里）。 */
+  readonly pathUnknown: string;
   /** 工具回显：解析失败（带解析器给出的原因）。 */
   readonly parseFailedWithReason: string;
   /** 工具回显：解析失败（delegate 两工具，无原因）。 */
@@ -183,12 +187,18 @@ export interface OcrReviewMessages {
   readonly mcpServerInvalid: string;
   /** MCP 保存成功。 */
   readonly mcpSaved: string;
+  /** MCP 配置写入失败：写盘/加锁/读回失败，与读侧的 mcpReadFailed 分开（否则用户被提示去查一个没坏的东西）。 */
+  readonly mcpSaveFailed: string;
+  /** MCP 保存的基线已过期：盘上的 mcp_servers 在读过之后被别人改过。 */
+  readonly mcpSaveConflict: string;
   /** ChatGPT 模型必填。 */
   readonly chatGptModelRequired: string;
   /** ChatGPT 配置写入成功。 */
   readonly chatGptSaved: string;
   /** ChatGPT 配置写入失败。 */
   readonly chatGptSaveFailed: string;
+  /** config.json 的 providers / providers.chatgpt 不是对象：宁可报错，也不静默重置成 {} 抹掉既有键。 */
+  readonly chatGptProvidersInvalid: string;
   /** compare 需要 before 与 after 两个会话 id。 */
   readonly compareNeedsBoth: string;
   /** compare 不接受 id/limit。 */
@@ -362,7 +372,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "先 job_output(job_id=<本回执的 jobId>) 读这条后台评审的实时输出与最终结局——按 id 走，" +
       "启动即可读，一定有结果；要停它就 job_kill(job_id=<同一 id>)。会话落盘后再走 ocr_session：" +
       "ocr_session(action=list) 找本仓库最新会话（启动几秒后出现，按 scanPaths/时间匹配）；" +
-      "completed_files == selected_files 即已完成；再 ocr_session(action=comments, id) 取全部评论、" +
+      "completed_files + reused_files + waived_files == selected_files 即已完成" +
+      "（failed_files 是没审成的部分，reused 是续扫复用的文件）；再 ocr_session(action=comments, id) 取全部评论、" +
       "ocr_session(action=show, id) 看元数据与逐文件检查点。后台评审不随工具调用结束而停止，" +
       "默认也不设时限（ocrBackgroundMaxMs=0 表示无兜底窗口）；只有 dsh 宿主退出、本会话被停止、" +
       "插件卸载或显式 job_kill 才会结束。",
@@ -386,6 +397,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     repoRequired: "repo 必填，且为 Git 仓库绝对路径",
     repoRequiredUnknownWorkspace: "repo 必填：当前会话工作区未知，请显式传入 Git 仓库绝对路径",
     repoMustBeAbsolute: "repo 必须是绝对路径：{root}",
+    repoMustNotBeFilesystemRoot:
+      "repo 不能是文件系统根（{root}）：根下任何文件都会被当成仓内文件，" +
+      "--rule / --background-file 会把仓库外的内容送进模型；请给出具体仓库目录",
     noNulBytes: "{name} 不能包含 NUL 字节",
     boolMustBeBoolean: "{name} 必须是布尔值（true/false），收到 {received}",
     repoRootUnreadable: "repo 根目录不可读：{path}",
@@ -427,7 +441,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     ocrNotObject: "OCR JSON 输出不是对象",
     ocrStatusInvalid:
       "OCR 输出 status 非法或缺失：{status}（期望 {expected}）；" +
-      "exit 0 不代表评审完成，请查 stderr 与 ~/.opencodereview/sessions/",
+      "exit 0 不代表评审完成，请查 stderr 与 OCR 会话目录" +
+      "（默认 ~/.opencodereview/sessions/，自定义 ocrConfigPath 时随 HOME 重定向）",
     statusNone: "（无）",
     ocrStatusFailed: "OCR 回执自报 status=failed（这一场评审没有成功完成）",
     ocrCommentsNotArray: "OCR 输出 comments 字段不是数组，无法确认评论完整性",
@@ -442,6 +457,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "partial，看不出这一层）。toolCalls.failure 大于 0 说明当前模型的工具调用没跑通，换模型比重试同一个更省 token。" +
       "切勿把「本摘要无 critical」当作「代码干净」。",
     lineZeroNote: "(line 0: 定位失败，按 existing_code 手动定位)",
+    pathUnknown: "(路径未知)",
     parseFailedWithReason:
       "{tool} 输出解析失败：{message}\n原始内容前 {limit} 码元（已脱敏）：\n{raw}",
     parseFailedPlain: "{tool} 输出解析失败\n原始内容前 {limit} 码元（已脱敏）：\n{raw}",
@@ -451,13 +467,18 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     mcpReadFailed: "读取 MCP 配置失败（{where}）：{cause}",
     mcpJsonInvalid: "MCP 配置不是合法 JSON：{cause}",
     mcpJsonTooLarge: "MCP 配置超过 {limit} 字节上限",
-    mcpShapeInvalid: "MCP 配置必须是 {{name: entry}} 形式的对象",
+    mcpShapeInvalid: "MCP 配置必须是 {name: entry} 形式的对象",
     mcpTooManyServers: "MCP servers 最多 {limit} 个",
     mcpServerInvalid: "MCP server「{name}」的 {field} 不合法：{reason}",
     mcpSaved: "MCP servers 已保存（{count} 个）",
+    mcpSaveFailed: "写入 MCP 配置失败（{where}）：{cause}",
+    mcpSaveConflict:
+      "MCP 配置在读取之后已被改动（另一张设置卡或手工编辑），本次保存未写入。请重新载入后再保存。",
     chatGptModelRequired: "ChatGPT 模型名必填",
     chatGptSaved: "已切换到 ChatGPT provider，模型：{model}",
     chatGptSaveFailed: "写入 ChatGPT 配置失败：{cause}",
+    chatGptProvidersInvalid:
+      "config.json 里的 providers 或 providers.chatgpt 不是对象，无法安全写入（先手工修正再保存）",
     compareNeedsBoth: "action=compare 需要同时给出 before 与 after 两个会话 id",
     compareRejectsArgs: "action=compare 不接受 id/limit/severity/category",
     exportRejectsArgs: "action=export 不接受 before/after/limit/severity/category",
@@ -609,7 +630,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     ruleHint:
       "按分组规则逐个审查对应文件，输出评论建议格式：{path, content, start_line, end_line, category, severity}。",
     sessionEmpty: "（暂无历史评审会话：先跑一次 ocr_review/ocr_scan 再查询）",
-    sessionTruncated: "…[截断] 完整内容见 ~/.opencodereview/sessions/",
+    sessionTruncated:
+      "…[截断] 完整内容见 OCR 会话目录（默认 ~/.opencodereview/sessions/，自定义 ocrConfigPath 时随 HOME 重定向）",
     sessionResumeHint:
       "要恢复中断的区间/commit 评审：ocr_review ... --resume <session_id>（工作区评审不支持恢复）；scan 会话用 ocr_scan ... --resume <session_id>。",
     rulesCheckHint:
@@ -687,7 +709,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "immediately after start and always has a result; job_kill(job_id=<the same id>) stops it. " +
       "Once the session has landed, use ocr_session: ocr_session(action=list) finds this " +
       "repository's newest session (it appears a few seconds after start; match by scanPaths/time); " +
-      "completed_files == selected_files means it is done. Then ocr_session(action=comments, id) for " +
+      "completed_files + reused_files + waived_files == selected_files means it is done " +
+      "(failed_files is the part that did not complete, and reused means files carried over by a " +
+      "resumed run). Then ocr_session(action=comments, id) for " +
       "all comments and ocr_session(action=show, id) for metadata " +
       "and per-file checkpoints. A background run does not stop when the tool call ends and has no " +
       "time limit by default (ocrBackgroundMaxMs=0 means no backstop window); it ends only when the " +
@@ -720,6 +744,10 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     repoRequiredUnknownWorkspace:
       "repo is required: the current session workspace is unknown, pass the absolute path of a Git repository explicitly",
     repoMustBeAbsolute: "repo must be an absolute path: {root}",
+    repoMustNotBeFilesystemRoot:
+      "repo must not be a filesystem root ({root}): every file under it would count as inside the " +
+      "repo, so --rule / --background-file could feed files from outside it to the model; pass a " +
+      "concrete repository directory",
     boolMustBeBoolean: "{name} must be a boolean (true/false), got {received}",
     repoRootUnreadable: "the repo root is not readable: {path}",
     repoFileMissing: "{name} points at a file that does not exist: {path}",
@@ -767,7 +795,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     ocrNotObject: "the OCR JSON output is not an object",
     ocrStatusInvalid:
       "OCR output has an invalid or missing status: {status} (expected {expected}); " +
-      "exit 0 does not mean the review completed — check stderr and ~/.opencodereview/sessions/",
+      "exit 0 does not mean the review completed — check stderr and the OCR session directory " +
+      "(default ~/.opencodereview/sessions/, relocated with HOME when ocrConfigPath is customized)",
     statusNone: "(none)",
     ocrStatusFailed: "the OCR receipt reports status=failed (this review run did not complete)",
     ocrCommentsNotArray:
@@ -784,6 +813,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "only says partial). A toolCalls.failure above 0 means the current model's tool calls did not work: switch " +
       'models instead of retrying the same one. Never treat "no critical in this summary" as "the code is clean".',
     lineZeroNote: "(line 0: not anchored, locate it via existing_code)",
+    pathUnknown: "(path unknown)",
     parseFailedWithReason:
       "{tool} output parsing failed: {message}\nfirst {limit} UTF-16 code units of the raw output (redacted):\n{raw}",
     parseFailedPlain:
@@ -799,9 +829,14 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     mcpTooManyServers: "at most {limit} MCP servers are allowed",
     mcpServerInvalid: 'MCP server "{name}" has an invalid {field}: {reason}',
     mcpSaved: "MCP servers saved ({count})",
+    mcpSaveFailed: "failed to write the MCP config ({where}): {cause}",
+    mcpSaveConflict:
+      "the MCP config changed after it was read (another settings card or a manual edit); nothing was written. Reload and save again.",
     chatGptModelRequired: "a ChatGPT model slug is required",
     chatGptSaved: "switched to the ChatGPT provider, model: {model}",
     chatGptSaveFailed: "failed to write the ChatGPT config: {cause}",
+    chatGptProvidersInvalid:
+      "providers or providers.chatgpt in config.json is not an object; fix it by hand before saving",
     compareNeedsBoth: "action=compare requires both before and after session ids",
     compareRejectsArgs: "action=compare does not take id/limit/severity/category",
     exportRejectsArgs: "action=export does not take before/after/limit/severity/category",
@@ -1001,7 +1036,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "Review the files of each group against its rule and emit comment suggestions in the shape " +
       "{path, content, start_line, end_line, category, severity}.",
     sessionEmpty: "(no review sessions yet: run ocr_review/ocr_scan once before querying)",
-    sessionTruncated: "…[truncated] full content in ~/.opencodereview/sessions/",
+    sessionTruncated:
+      "…[truncated] full content in the OCR session directory (default ~/.opencodereview/sessions/, " +
+      "relocated with HOME when ocrConfigPath is customized)",
     sessionResumeHint:
       "To resume an interrupted range/commit review: ocr_review ... --resume <session_id> (workspace reviews cannot be resumed); scan sessions use ocr_scan ... --resume <session_id>.",
     rulesCheckHint:

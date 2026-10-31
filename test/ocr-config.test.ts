@@ -10,15 +10,16 @@
 import { describe, expect, it, afterEach, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import {
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
-  writeFileSync,
   rmSync,
-  mkdirSync,
   statSync,
-  existsSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { lstat, symlink } from "node:fs/promises";
 import path from "node:path";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
 import { makeGateway, NonErrorFault } from "./fixtures/gateway-fixture.ts";
@@ -26,6 +27,7 @@ import type { GatewayFixture } from "./fixtures/gateway-fixture.ts";
 import {
   applyProviderSelection,
   ensureKeyScriptPointer,
+  keyReachableAtOcrRuntime,
   migratePlaintextKeys,
   ocrHomeOverride,
   providersForCard,
@@ -42,12 +44,16 @@ import {
   parseApiKeyCmd,
   renderSelectedConfig,
   repointDanglingKeyScripts,
+  writeConfigAtomic,
 } from "../lib/config-store.ts";
 import type { AppliedConfig, CardPayload } from "../lib/ocr-config.ts";
 import type { DshProvider } from "../lib/provider-projection.ts";
 import type { ProviderDescriptor, ProviderSource } from "../lib/provider-source.ts";
 import type { OcrPaths, SelectInput } from "../lib/config-store.ts";
 import { MESSAGES } from "../lib/messages.ts";
+// #59 的守卫用例：净化判据的真源在宿主（dsh-subprocess），本包只能本地复刻（这条包不
+// 依赖任何 @deepseek-ai/*），所以把官方导出当**独立期望值**逐格比对，上游改判据这里红。
+import { DSH_ENV_PREFIX, SENSITIVE_ENV_PATTERN } from "@deepseek-ai/dsh-subprocess";
 
 /** 全部 ref 都能解析出值的替身（apply 走 resolve 这一问）。 */
 const ALL_REFS = ["SENSENOVA_API_KEY", "XKIRO_API_KEY", "AMD_API_KEY", "ANTDIGITAL_API_KEY"];
@@ -128,11 +134,14 @@ const selectOf = (
 const migrateOf = (gateway: GatewayFixture, paths: OcrPaths): Promise<MigrateResult> =>
   migratePlaintextKeys(gateway, paths, zh);
 
-let tmp: string;
+/** 造过的沙箱全部留着：同一个用例里 makePaths() 可能被调用多次（形状闸就是一次造四个），
+ *  只记最后一个会把前几个留在 /tmp。 */
+const sandboxes: string[] = [];
 
 /** 造一个只剩 ocr config 与插件目录的沙箱（没有任何 dsh 侧文件）。 */
 function makePaths(): OcrPaths {
-  tmp = mkdtempSync(path.join(tmpdir(), "ocr-config-test-"));
+  const tmp = mkdtempSync(path.join(tmpdir(), "ocr-config-test-"));
+  sandboxes.push(tmp);
   const pluginDir = path.join(tmp, "plugin");
   mkdirSync(path.join(pluginDir, "scripts"), { recursive: true });
   writeFileSync(path.join(pluginDir, "scripts", GET_CRED_FILE), "#!/usr/bin/env node\n");
@@ -144,10 +153,10 @@ function makePaths(): OcrPaths {
   };
 }
 
-/** 删掉 makePaths() 留下的沙箱：由真正用到它的那四组 suite 各自登记 afterEach。 */
+/** 删掉 makePaths() 留下的全部沙箱：由真正用到它的那四组 suite 各自登记 afterEach。 */
 function removeTmpSandbox(): void {
-  if (tmp) {
-    rmSync(tmp, { recursive: true, force: true });
+  for (const dir of sandboxes.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 describe("providersFromSettingsValue", () => {
@@ -174,6 +183,7 @@ describe("providersFromSettingsValue", () => {
       providers: {
         relay: {
           apiKeyEnv: "RELAY_API_KEY",
+          apiKeyEnvInvalid: null,
           api: "anthropic-messages",
           baseURL: "https://relay.example.com",
           models: [{ id: "claude-x" }],
@@ -228,7 +238,7 @@ describe("providersFromSettingsValue", () => {
     ).toThrow(/无法映射到 OCR 支持的 protocol/u);
   });
 
-  it("baseURL 不是 http/https ⇒ 整条丢弃（读侧宽容，不替用户猜修正值）", () => {
+  it("baseURL 不是可用的 http(s) URL ⇒ 整条丢弃（读侧宽容，不替用户猜修正值）", () => {
     const parsed = providersFromSettingsValue({
       providers: {
         notUrl: { apiKeyEnv: "K", baseURL: "not a url", models: [] },
@@ -236,25 +246,46 @@ describe("providersFromSettingsValue", () => {
         // 该字面量是投影层的测试数据：验证的正是这个形态的 baseURL 被整条丢弃。
         // oxlint-disable-next-line eslint/no-script-url -- 不是可执行的脚本地址，是负向样本
         js: { apiKeyEnv: "K", baseURL: "javascript:alert(1)", models: [] },
+        noHost: { apiKeyEnv: "K", baseURL: "https://", models: [] },
+        userinfo: { apiKeyEnv: "K", baseURL: "https://user:pass@host.example/v1", models: [] },
+        space: { apiKeyEnv: "K", baseURL: "https://exa mple.com", models: [] },
+        newline: { apiKeyEnv: "K", baseURL: "https://exa\nmple.com", models: [] },
         upper: { apiKeyEnv: "K", baseURL: "HTTP://upper.example", models: [] },
       },
     });
     expect(parsed.map((provider) => provider.name)).toStrictEqual(["upper"]);
   });
 
-  it("models「声明了但每条都无效」整条丢弃；未声明与显式空数组保留为空列表", () => {
-    // 「每条都无效」若也透传成 models=[]，写侧对空 models 放行任意 model，白名单被绕开。
+  it("apiKeyEnv 不符合写侧白名单 ⇒ 置 null（不进入凭据查询与回显文案）", () => {
+    // 把真实 key 误填进这个字段时，旧实现会把它当 ref 送进凭据查询，失败文案再原样回显；
+    // 小写 ref 同侧也构造不出 api_key_cmd（buildApiKeyCmd 的 badEnvKey），故一并置 null。
+    const parsed = providersFromSettingsValue({
+      providers: {
+        leaked: { apiKeyEnv: "sk-live-abc_really", baseURL: "https://l", models: [] },
+        lowercase: { apiKeyEnv: "lower_ref", baseURL: "https://lc", models: [] },
+        good: { apiKeyEnv: "GOOD_KEY", baseURL: "https://g", models: [] },
+      },
+    });
+    expect(parsed.map((provider) => provider.name)).toStrictEqual(["leaked", "lowercase", "good"]);
+    expect(parsed[0]?.apiKeyEnv).toBeNull();
+    expect(parsed[1]?.apiKeyEnv).toBeNull();
+    expect(parsed[2]?.apiKeyEnv).toBe("GOOD_KEY");
+  });
+
+  it("models 声明了但形状不对整条丢弃；未声明与显式空数组保留为空列表", () => {
+    // 非数组的 models 若也透传成 models=[]，写侧对空 models 放行任意 model，白名单被绕开。
     const parsed = providersFromSettingsValue({
       providers: {
         allJunk: { baseURL: "https://j", models: [{ id: 7 }, "scalar", { name: "无 id" }] },
         explicitEmpty: { baseURL: "https://e", models: [] },
         notArray: { baseURL: "https://n", models: "nope" },
+        nullModels: { baseURL: "https://m", models: null },
         absent: { baseURL: "https://a" },
       },
     });
     expect(parsed.map((provider) => provider.name)).toStrictEqual([
       "explicitEmpty",
-      "notArray",
+      "nullModels",
       "absent",
     ]);
     for (const provider of parsed) {
@@ -308,6 +339,7 @@ describe("describe() 命名空间值里的防御分支", () => {
       stringy: "nope",
       noBaseUrl: {
         apiKeyEnv: "   ",
+        apiKeyEnvInvalid: null,
         api: RESPONSES_API,
         models: "not-an-array",
       },
@@ -499,6 +531,7 @@ describe("markKeyFlags", () => {
         name: "nokey",
         displayName: "nokey",
         apiKeyEnv: null,
+        apiKeyEnvInvalid: null,
         protocol: "openai",
         baseURL: "https://n",
         models: [],
@@ -517,6 +550,7 @@ describe("markKeyFlags", () => {
         name: "blank",
         displayName: "blank",
         apiKeyEnv: "",
+        apiKeyEnvInvalid: null,
         protocol: "openai",
         baseURL: "https://n",
         models: [],
@@ -586,6 +620,10 @@ describe("buildApiKeyCmd", () => {
     expect(cmd).toContain("node '/Users/me/my dir/scripts/get-cred.mjs'");
     expect(cmd).toContain("'SENSENOVA_API_KEY'");
     expect(cmd).not.toContain("$");
+    // 单引号路径按 POSIX 的 '"'"' 形态转义，不能把引号原样嵌进单引号串。
+    expect(buildApiKeyCmdOf("/Users/me/o'brien/get-cred.mjs", "K")).toContain(
+      String.raw`'/Users/me/o'\''brien/get-cred.mjs'`,
+    );
   });
 
   it("非法 env key 名拒绝", () => {
@@ -790,7 +828,7 @@ describe("resolveOcrConfigPath（外部 ocr CLI 配置的位置）", () => {
   });
 
   it.skipIf(runsOnWindows)(
-    "pOSIX 分隔符下 `~\\x` 不是家目录形态：仍按相对路径报错（不静默造出家目录里的怪文件）",
+    "平台为 posix 时 `~\\x` 不是家目录形态：仍按相对路径报错（不静默造出家目录里的怪文件）",
     () => {
       // 官方 expandHomePath 吃 `~\` 前缀，在 POSIX 上会折出 `<home>/\notes.txt`——
       // 一枚合法的反斜杠文件名，把用户打错的相对路径变成家目录里的怪文件，
@@ -919,6 +957,56 @@ describe("applyProviderSelection", () => {
     expect(wrote, "形状不合时不得留下半份配置").not.toContain(true);
   });
 
+  it("provider / model 在入口一次 trim：带首尾空白也能命中白名单并写成干净值", async () => {
+    // 下游三处判据都是**逐字相等**：providers.find(name === …)、renderSelectedConfig
+    // 的 models 白名单、写盘与回执。只判 trim 非空却继续用未归一的原值，得到的是
+    // 「名字明明在清单里却报 providerNotInList」——用户没法自救的错形状。
+    const paths = makePaths();
+    const applied = await selectOf(
+      makeGateway(),
+      paths,
+      "  sensenova  ",
+      ` ${SENSENOVA_LITE_MODEL}\t`,
+    );
+    expect(applied).toStrictEqual({
+      provider: "sensenova",
+      model: SENSENOVA_LITE_MODEL,
+      url: SENSENOVA_BASE_URL,
+      protocol: "openai",
+    });
+    const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as {
+      custom_providers: Record<string, Record<string, unknown>>;
+    };
+    expect(doc.custom_providers["sensenova"]?.["model"]).toBe(SENSENOVA_LITE_MODEL);
+  });
+
+  it("空白 language 不落键：既不新增空串，也不抹掉盘上已有的语言", async () => {
+    // 语言框被清空再保存，是「这次没选」而不是「改成空语言」。落成 "" 会让 OCR 侧
+    // 用它去查一份不存在的语言表；抹掉盘上值则是无声丢配置。
+    const paths = makePaths();
+    writeFileSync(
+      paths.ocrConfigJson,
+      JSON.stringify({
+        language: "English",
+        custom_providers: {
+          sensenova: { url: "u", protocol: "openai", model: SENSENOVA_LITE_MODEL },
+        },
+      }),
+    );
+    await selectOf(makeGateway(), paths, "sensenova", SENSENOVA_LITE_MODEL, "   ");
+    const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as Record<string, unknown>;
+    expect(doc["language"]).toBe("English");
+
+    // 盘上没有 language 时同样不许写进一个空串键。
+    const fresh = makePaths();
+    await selectOf(makeGateway(), fresh, "sensenova", SENSENOVA_LITE_MODEL, "");
+    const freshDoc = JSON.parse(readFileSync(fresh.ocrConfigJson, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.hasOwn(freshDoc, "language")).toBe(false);
+  });
+
   it("应用成功：生成配置 + chmod 0600 + 只走 resolve 这一问", async () => {
     const gateway = makeGateway();
     const paths = makePaths();
@@ -1014,6 +1102,7 @@ describe("applyProviderSelection", () => {
           custom: {
             baseURL: "https://c",
             apiKeyEnv: "MY_UNSCRUBBED_REF",
+            apiKeyEnvInvalid: null,
             models: [{ id: "m", name: "m" }],
           },
         },
@@ -1072,7 +1161,7 @@ describe("loadOcrConfig", () => {
     expect(withPlain.current.url).toBe("");
   });
 
-  it("config 顶层非对象 / 坏 JSON / custom_providers 非对象 ⇒ 读侧一律给空 current", () => {
+  it("config 顶层非对象 / 坏 JSON ⇒ 空 current；custom_providers 非对象 ⇒ 条目字段清空但顶层 provider 保留", () => {
     expect(loadOcrConfig("[1,2]").current.provider).toBe("");
     expect(loadOcrConfig('"str"').raw).toStrictEqual({});
     expect(loadOcrConfig("{ broken").current.provider).toBe("");
@@ -1099,7 +1188,7 @@ describe("renderSelectedConfig 的写侧闸门（坏 JSON 绝不覆盖用户配�
     expect(renderOf({ ...base, existingText: "   " })).toContain('"provider"');
   });
 
-  it("目标条目已有键合并写回（extra_headers/temperature/timeout_seconds 不被抹掉）", () => {
+  it("目标条目非对象时按新建处理，其它 provider 与顶层键保留", () => {
     const rendered = renderOf({
       ...base,
       existingText: JSON.stringify({
@@ -1184,10 +1273,70 @@ describe("migratePlaintextKeys", () => {
     expect(doc.custom_providers["unknown"]!["api_key"]).toBe("sk-other");
   });
 
-  it("apiKeyEnv 形状不合法（解得出值也构造不出命令）⇒ 记 unknown，明文原样留着", async () => {
-    // 两道闸是独立的：ref 名在可达层（reachableEnvKeys 放行），但不符合
-    // ^[A-Z0-9_]+$ 时命令根本构造不出来。此时绝不能删明文——删了就只剩一条取不到
-    // 东西的命令，等于把能用的凭据换成不能用的。
+  it("已有非空 api_key_cmd 的条目不覆写（那条命令此刻正在生效），记 skippedUnknown", async () => {
+    // odr 侧 api_key_cmd 优先于 api_key：用户手写的命令可能带额外参数、走 vault、包一层
+    // sh。本函数的职责是「补一条动态读凭据的命令」，不是「把用户的命令换成我们的」——
+    // 静默替换等于在没有回执的情况下改掉一个正在工作的配置。
+    const paths = makePaths();
+    const userCmd = "/usr/local/bin/vault-get OPENCODEGO_API_KEY --field key";
+    writeFileSync(
+      paths.ocrConfigJson,
+      JSON.stringify({
+        provider: "sensenova",
+        custom_providers: {
+          sensenova: {
+            url: "u",
+            protocol: "openai",
+            model: "m",
+            api_key: PLAINTEXT_KEY,
+            api_key_cmd: userCmd,
+          },
+        },
+      }),
+    );
+    const { migrated, skippedUnknown } = await migrateOf(makeGateway(), paths);
+    expect(migrated).toStrictEqual([]);
+    expect(skippedUnknown).toStrictEqual(["sensenova"]);
+    const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as {
+      custom_providers: Record<string, Record<string, unknown>>;
+    };
+    expect(doc.custom_providers["sensenova"]!["api_key_cmd"]).toBe(userCmd);
+  });
+
+  it("空白的 api_key_cmd 视同没有：照常补命令（不算用户资产）", async () => {
+    // 反向的一侧：空白/空串不是一条能跑的命令，把它当成「用户已有命令」会让条目永远
+    // 停在明文 key 上，且回执里挂一个好听的 skippedUnknown。
+    const paths = makePaths();
+    writeFileSync(
+      paths.ocrConfigJson,
+      JSON.stringify({
+        provider: "sensenova",
+        custom_providers: {
+          sensenova: {
+            url: "u",
+            protocol: "openai",
+            model: "m",
+            api_key: "sk-secret",
+            api_key_cmd: "   ",
+          },
+        },
+      }),
+    );
+    const { migrated, skippedUnknown } = await migrateOf(makeGateway(), paths);
+    expect(migrated).toStrictEqual(["sensenova"]);
+    expect(skippedUnknown).toStrictEqual([]);
+    const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as {
+      custom_providers: Record<string, Record<string, unknown>>;
+    };
+    const cmd = doc.custom_providers["sensenova"]!["api_key_cmd"];
+    expect(cmd).toBeTypeOf("string");
+    expect(String(cmd)).toContain("SENSENOVA_API_KEY");
+    expect(doc.custom_providers["sensenova"]!["api_key"]).toBeUndefined();
+  });
+
+  it("apiKeyEnv 形状不合法 ⇒ 投影层置 null，迁移记 unknown、明文原样留着", async () => {
+    // 投影层按 CREDENTIAL_ENV_KEY 收口后，非法 ref 不会进入迁移映射；这里验证的是
+    // 「映射里没有它 ⇒ 不删明文」这条后果，与「命令构造失败」那条旧路径同义。
     const paths = makePaths();
     writeFileSync(
       paths.ocrConfigJson,
@@ -1203,6 +1352,7 @@ describe("migratePlaintextKeys", () => {
         providers: {
           weird: {
             apiKeyEnv: "bad-name",
+            apiKeyEnvInvalid: null,
             api: "openai-completions",
             baseURL: "https://weird.example",
             models: [],
@@ -1280,7 +1430,7 @@ describe("migratePlaintextKeys", () => {
     expect(readFileSync(paths.ocrConfigJson, "utf8")).toContain(PLAINTEXT_KEY);
   });
 
-  it("非对象条目与无明文条目跳过，明文非法 envKey 记 unknown，全部无进展时不写盘", async () => {
+  it("非对象条目与无明文条目跳过，非法 apiKeyEnv 的明文记 unknown，全部无进展时不写盘", async () => {
     const paths = makePaths();
     const gateway = makeGateway({
       descriptors: descriptorsWithValue({
@@ -1966,5 +2116,128 @@ describe("ensureKeyScriptPointer", () => {
       repointed: [],
       checked: false,
     });
+  });
+});
+
+// ── #59 上游净化判据的等价守卫 ───────────────────────────────────────────────
+// 本包不能运行期 import 宿主常量（"@deepseek-ai/* 一律不进 dependencies" 由
+// test/publish-manifest.test.ts 强制），本地只能复刻一份判据。复刻漂了的症状是
+// 「key 在 OCR 运行时其实取不到，却被判可达」→ 卡片报 select 成功、OCR 侧 401。
+// 这条用例把官方导出当**独立期望值**：上游改判据而本地没跟，这里就红。
+/** 官方判据的独立复述：大小写不敏感命中敏感词，或以 DSH_ 开头（大小写不敏感）。 */
+const officialReachable = (ref: string): boolean =>
+  !SENSITIVE_ENV_PATTERN.test(ref) && !ref.toUpperCase().startsWith(DSH_ENV_PREFIX);
+
+describe("净化模式与宿主 dsh-subprocess 等价（上游改判据这里必须红）", () => {
+  // 语料两侧都要有：只有一侧的话，「恒 true」或「恒 false」的退化实现也能一起绿。
+  const CORPUS = [
+    "SENSENOVA_API_KEY",
+    "OPENCODEGO_API_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "MY_PASSWORD",
+    "GITHUB_TOKEN",
+    "monkey",
+    "ds_home_but_not_prefix",
+    "XDsh_foo",
+    "DSH_HOME",
+    "dsh_token",
+    "PATH",
+    "HOME",
+    "PLAIN_NAME",
+    "LC_ALL",
+  ];
+
+  it("逐格与官方两式一致，且语料两侧都覆盖到", () => {
+    const expected = CORPUS.map((ref) => officialReachable(ref));
+    expect(expected).toContain(true);
+    expect(expected).toContain(false);
+    for (const ref of CORPUS) {
+      expect(keyReachableAtOcrRuntime("env", ref)).toBe(officialReachable(ref));
+    }
+    // 非 env 层不看名字：file / user-env 恒可达、其余层恒不可达，与净化模式无关。
+    expect(keyReachableAtOcrRuntime("file", "SENSENOVA_API_KEY")).toBe(true);
+    expect(keyReachableAtOcrRuntime(undefined, "PATH")).toBe(false);
+  });
+});
+
+/** 每个用例独立的沙箱目录；返回值兼作清理入口。 */
+function atomicSandbox(): { dir: string; cleanup: () => void } {
+  const dir = mkdtempSync(path.join(tmpdir(), "ocr-config-atomic-"));
+  return {
+    dir,
+    cleanup: () => {
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+describe("writeConfigAtomic：备份权限与符号链接落点", () => {
+  it("备份按 0600 创建（源文件是 0644 时也不留宽权限窗口）", async () => {
+    if (runsOnWindows) {
+      // Windows 没有 POSIX 权限位；本用例的判据不成立，显式跳过而不是假装通过。
+      return;
+    }
+    const box = atomicSandbox();
+    try {
+      const target = path.join(box.dir, OCR_CONFIG_FILE);
+      writeFileSync(target, "old", { mode: 0o644 });
+      await writeConfigAtomic(target, "new");
+      const backup = `${target}.bak`;
+      expect(readFileSync(backup, "utf8")).toBe("old");
+      // 判据是创建那一刻的权限位：copyFileSync + chmod 会先落一份 0644 的备份。
+      // 权限位是 mode 的低 9 位；取模等价于按 0o777 掩码。
+      expect(statSync(backup).mode % 0o1000).toBe(0o600);
+      expect(statSync(target).mode % 0o1000).toBe(0o600);
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it("目标是指向 dotfiles 的符号链接：写穿链接，链接本身不被替换", async () => {
+    if (runsOnWindows) {
+      return;
+    }
+    const box = atomicSandbox();
+    const realDir = mkdtempSync(path.join(tmpdir(), "ocr-config-real-"));
+    try {
+      const real = path.join(realDir, OCR_CONFIG_FILE);
+      writeFileSync(real, "old");
+      const link = path.join(box.dir, OCR_CONFIG_FILE);
+      await symlink(real, link);
+      await writeConfigAtomic(link, "new");
+      // 官方 writeFileAtomic 以 rename 提交；不解链接就会把链接换成普通文件。
+      const linkStats = await lstat(link);
+      expect(linkStats.isSymbolicLink()).toBe(true);
+      expect(readFileSync(real, "utf8")).toBe("new");
+    } finally {
+      box.cleanup();
+      rmSync(realDir, { recursive: true, force: true });
+    }
+  });
+
+  it("悬空链接按链接指向的位置创建目标；文件不存在时没有 .bak", async () => {
+    if (runsOnWindows) {
+      return;
+    }
+    const box = atomicSandbox();
+    const realDir = mkdtempSync(path.join(tmpdir(), "ocr-config-dangling-"));
+    try {
+      const real = path.join(realDir, OCR_CONFIG_FILE);
+      const link = path.join(box.dir, OCR_CONFIG_FILE);
+      await symlink(real, link);
+      await writeConfigAtomic(link, "new");
+      const linkStats = await lstat(link);
+      expect(linkStats.isSymbolicLink()).toBe(true);
+      expect(readFileSync(real, "utf8")).toBe("new");
+      expect(existsSync(`${link}.bak`)).toBe(false);
+      // 文件从未存在：没有可备份的旧内容，直接创建。
+      const fresh = path.join(box.dir, "fresh.json");
+      await writeConfigAtomic(fresh, "first");
+      expect(readFileSync(fresh, "utf8")).toBe("first");
+      expect(existsSync(`${fresh}.bak`)).toBe(false);
+    } finally {
+      box.cleanup();
+      rmSync(realDir, { recursive: true, force: true });
+    }
   });
 });

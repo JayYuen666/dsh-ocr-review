@@ -260,9 +260,14 @@ describe("assertAbsoluteRoot / resolveRoot", () => {
     try {
       const winSep = path.win32.sep;
       expect(rootOf(String.raw`C:\repo\sub${winSep}`)).toBe(String.raw`C:\repo\sub`);
-      expect(rootOf(String.raw`C:${winSep}`)).toBe(String.raw`C:${winSep}`);
-      expect(rootOf(String.raw`\\server\share${winSep}`)).toBe(String.raw`\\server\share`);
+      expect(rootOf(String.raw`\\server\share\repo${winSep}`)).toBe(
+        String.raw`\\server\share\repo`,
+      );
       expect(() => rootOf("C:relative")).toThrow(/绝对路径/u);
+      // 盘符根与 UNC 共享根同样拒绝：根形态不止 "/" 一种，比较必须用 win32.parse 解出的根，
+      // 只比字面量会放过这两种（C:\ 与 \\server\share\ 都不是 "/"）。
+      expect(() => rootOf(String.raw`C:${winSep}`)).toThrow(/不能是文件系统根/u);
+      expect(() => rootOf(String.raw`\\server\share${winSep}`)).toThrow(/不能是文件系统根/u);
     } finally {
       if (real === undefined) {
         Reflect.deleteProperty(process, "platform");
@@ -280,8 +285,20 @@ describe("assertAbsoluteRoot / resolveRoot", () => {
     // 「..」段按 posix.normalize 的词法折叠落到实际目标（"/repo/../.." 即根），
     // 不存在解析后仍含「..」的形态。
     expect(rootOf("/repo/../other")).toBe("/other");
-    expect(rootOf("/repo/../..")).toBe("/");
-    expect(rootOf("/")).toBe("/");
+  });
+
+  it("归一后落在文件系统根一律拒绝：根下任何文件都会被当成仓内文件（--rule 越界读）", () => {
+    // 判据不是「能不能归一」，而是**归一结果不能是根**：resolveRepoFile 的边界判据是
+    // path.relative(rootReal, real) 不以 .. 开头，根为 / 时它对 /etc/passwd 给出
+    // etc/passwd、恒成立，于是 --rule /etc/passwd 会被当成仓内文件读进 OCR 并送给 LLM。
+    expect(() => rootOf("/repo/../..")).toThrow(/不能是文件系统根/u);
+    expect(() => rootOf("/")).toThrow(/不能是文件系统根/u);
+    expect(() => rootOf("//")).toThrow(/不能是文件系统根/u);
+    expect(() => rootOf("/repo/..")).toThrow(/不能是文件系统根/u);
+    // 报错点名收到的那一串（用户要能看出是哪次调用给的），而不是归一后的结果
+    expect(() => rootOf("/repo/../..")).toThrow(/\/repo\/\.\.\/\.\./u);
+    // 反例：根下的具体目录仍然接受，别把整条路径族误伤
+    expect(rootOf("/repo/../other")).toBe("/other");
   });
 
   it("显式值优先，空串回退 fallback，都没有时报错", () => {
@@ -489,9 +506,11 @@ describe("wrapWithHostReaper", () => {
     const inner = unwrapReaper(wrapWithHostReaper(REVIEW_CMD, zh));
     // ps 探测：恒真的 ppid 比对会把「硬退出看护没生效」伪装成在位
     expect(inner).toContain("HAVEPS");
-    // pgrep 探测：它只出现在后代快照 desc() 里，漏探时 cs 恒空 ⇒ 真 ocr 进程全部泄漏
+    // pgrep 探测：它只出现在后代快照 desc() 里，漏探时 cs 恒空 ⇒ 真 ocr 进程全部泄漏。
+    // 退出码 1 是「没有匹配」（PID 1 在单进程命名空间里没有子进程），不是不可用。
     expect(inner).toContain("HAVEPG");
     expect(inner).toContain("pgrep -P 1");
+    expect(inner).toContain("[ $? -lt 2 ]");
     // 降级分支在两个探针之后、启动子进程之前，不可用时直接原样跑并退出
     expect(inner).toContain("exit $?");
     expect(inner.indexOf("HAVEPG")).toBeLessThan(inner.indexOf("ocr=$!"));
@@ -758,6 +777,9 @@ describe("delegate 命令", () => {
     const { command } = ruleCmd({ repo: "/r", paths: ["-weird.ts", "src/a.ts"] });
     expect(command).toContain(`${OCR} delegate rule --format json -- '-weird.ts' 'src/a.ts'`);
     expect(() => ruleCmd({ repo: "/r", paths: [] })).toThrow(/至少传一个/u);
+    // 位置参数逐个进 argv，上限与 scan 的 --path（逗号串）分开一枚常量；超限整条拒绝。
+    const tooMany = Array.from({ length: 201 }, (_unused, index) => `src/f${index}.ts`);
+    expect(() => ruleCmd({ repo: "/r", paths: tooMany })).toThrow(/超过 200 条上限/u);
   });
 });
 
@@ -1367,6 +1389,22 @@ describe("1.13.3 新增参数：preview / noFilter / scan 开关 / max-git-procs
     expect(reviewCmd({ repo: root, preview: true }, undefined).command).not.toContain("--output");
   });
 
+  it("preview 转发 --max-tokens：预览的 will_review 集合同样受每文件 prompt 上限影响", () => {
+    // OCR 的 agent.Preview 用模板 MaxTokens 把超限文件标成不审（scan 的 selectScanItems
+    // 同口径）；不转发会让预览与同参数实跑给出两份不同的清单。
+    const review = reviewCmd({ repo: root, preview: true, maxTokens: 3000 }, "/o").command;
+    expect(review).toContain("--max-tokens 3000");
+    const scan = scanCmd({ repo: root, preview: true, maxTokens: 5000 }, "/o").command;
+    expect(scan).toContain("--max-tokens 5000");
+    // 错类型仍按数值槽位同一口径抛错，不能因为 preview 就静默吞掉。
+    expect(() => reviewCmd({ repo: root, preview: true, maxTokens: "abc" }, "/o")).toThrow(
+      /--max-tokens 需要为 ≥0 的整数/u,
+    );
+    expect(() => scanCmd({ repo: root, preview: true, maxTokens: -1 }, "/o")).toThrow(
+      /--max-tokens 需要为 ≥0 的整数/u,
+    );
+  });
+
   it("review noFilter / maxGitProcs / rule / backgroundFile 透传", () => {
     const { command } = reviewCmd(
       {
@@ -1534,6 +1572,18 @@ describe("1.13.3 新增参数：preview / noFilter / scan 开关 / max-git-procs
     expect(comments).toContain("--severity 'high'");
     expect(comments).toContain("--category 'bug,security'");
     expect(comments).toContain("-- 's1'");
+    // 重复值在合法输入里很常见：上限按「防失控输入」取值，不拿枚举个数当上限，归一后去重。
+    // 拿 4 当上限时 `critical,high,medium,low,low` 会误报超限。
+    const repeated = sessionCmd({
+      repo: root,
+      action: "comments",
+      id: "s1",
+      severity: "critical,high,medium,low,low",
+    }).command;
+    expect(repeated).toContain("--severity 'critical,high,medium,low'");
+    expect(
+      sessionCmd({ repo: root, action: "comments", id: "s1", severity: ["HIGH", "high"] }).command,
+    ).toContain("--severity 'high'");
     expect(() => sessionCmd({ repo: root, action: "comments", severity: ["high"] })).toThrow(
       /需要同时给出会话 id/u,
     );

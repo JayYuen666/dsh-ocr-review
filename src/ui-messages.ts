@@ -6,8 +6,7 @@
 // 宿主驱动、无需重载页面（见 client-entry.ts 的 apply）。键集之所以能由官方表达式给出，
 // 靠的是本文件把 `ocr-review` merge 进了官方 `LocaleNamespaceMap`（见下面）。
 // 插值留在字典里：官方字典是扁平字符串表，`t(key, params)` 的 `{name}` 语法是官方
-// 能力，所以带变量的整行（currentConfig / applied / loadProvidersFailed /
-// readProvidersFailed / saveRefused）直接在本表留占位符，由调用点传 params，不在调用点拼模板。
+// 能力，所以带变量的整行直接在本表留占位符，由调用点传 params，不在调用点拼模板。
 //
 // 不在此列的中文：`{ value: "中文", label: "中文" }` 那一行——value 是写进
 // config.language 并透传给外部 ocr CLI 的枚举值，label 是语言的自称（任何界面语言
@@ -35,8 +34,6 @@ export interface UiMessages {
   readonly saving: string;
   /** 撤销按钮。 */
   readonly revert: string;
-  /** 保存失败前缀（后接错误摘要）。 */
-  readonly saveFailed: string;
   /** 宿主拒收/跳过的字段整行（{fields} 为逗号分隔的字段名）。 */
   readonly saveRefused: string;
   /** providers 端点请求失败整行（含原因与自救提示）。 */
@@ -132,6 +129,8 @@ export interface UiMessages {
   readonly mcpSaving: string;
   readonly mcpSaved: string;
   readonly mcpLoadFailed: string;
+  /** 还没成功读到 MCP 配置时按保存会被拒：编辑器里只有 "{}"，保存会覆盖真实配置。 */
+  readonly mcpNotLoaded: string;
   /** ChatGPT 管理区标题。 */
   readonly chatGptTitle: string;
   readonly chatGptHint: string;
@@ -251,7 +250,6 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     save: "保存",
     saving: "保存中…",
     revert: "撤销",
-    saveFailed: "保存失败：",
     saveRefused: "未写入（宿主拒收或跳过）：{fields}",
     loadProvidersFailed: "加载 providers 失败：{error}（远程面未就绪？重启 dsh 后重试）",
     remoteUnavailable: "远程服务不可用：宿主没有挂上本插件的设置通道。",
@@ -310,6 +308,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     mcpSaving: "保存中…",
     mcpSaved: "MCP servers 已保存",
     mcpLoadFailed: "读取 MCP 配置失败：",
+    mcpNotLoaded: "还没读到当前 MCP 配置，先等读取完成（失败时先修好读取）再保存",
     chatGptTitle: "ChatGPT（OCR auth）",
     chatGptHint: "登录态由 ocr auth 管理；本卡片只读查询状态，并在登录后把 provider 切到 chatgpt。",
     chatGptCheck: "检查登录态",
@@ -327,8 +326,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     binaryUnknown: "状态未取到：刷新本页，或确认 dsh 的 web 服务已起来",
     binaryBundled: "随本插件分发的兜底入口已就位：{path}（{channel}）",
     binaryPath: "用 PATH 上的全局安装：{path}（{channel}）",
-    binaryNone:
-      "未找到 ocr：PATH 与随包兜底两条路都没有可执行候选。装法与版本看下一行（由插件按核对版本给出）",
+    binaryNone: "未找到 ocr：PATH 与随包兜底两条路都没有可执行候选",
     channelBrew: "brew formula",
     channelNpm: "npm 全局包",
     channelUnknown: "装法未识别",
@@ -359,7 +357,6 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     save: "Save",
     saving: "Saving…",
     revert: "Revert",
-    saveFailed: "save failed: ",
     saveRefused: "not written (host refused or skipped): {fields}",
     loadProvidersFailed:
       "failed to load providers: {error} (remote face not ready? restart dsh and retry)",
@@ -421,6 +418,8 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     mcpSaving: "Saving…",
     mcpSaved: "MCP servers saved",
     mcpLoadFailed: "Failed to read the MCP config: ",
+    mcpNotLoaded:
+      "The current MCP config has not loaded yet; wait for the read (or fix it) before saving",
     chatGptTitle: "ChatGPT (OCR auth)",
     chatGptHint:
       "Sign-in is managed by ocr auth; this card only reports the status and switches OCR's provider to chatgpt after you sign in.",
@@ -440,8 +439,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     binaryUnknown: "status not reported: reload this page, or check that the dsh web server is up",
     binaryBundled: "bundled fallback entry in place: {path} ({channel})",
     binaryPath: "using the global install on PATH: {path} ({channel})",
-    binaryNone:
-      "ocr not found: neither PATH nor the bundled fallback has an executable candidate. The install command and version are on the next line (this plugin states the version its contract was verified against)",
+    binaryNone: "ocr not found: neither PATH nor the bundled fallback has an executable candidate",
     channelBrew: "brew formula",
     channelNpm: "npm global package",
     channelUnknown: "install method unrecognised",
@@ -451,7 +449,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "this machine reports {actual}, which is not the verified {expected}: comment wording and severity may drift between versions",
     badgeDiverged: "ocr version differs",
     detectCli: "Detect version",
-    detecting: "Detecting...",
+    detecting: "Detecting…",
     probeVersion: "ocr version: {version}",
     probeReason: "no version read: {reason}",
     badgeBundled: "ocr from bundled fallback",

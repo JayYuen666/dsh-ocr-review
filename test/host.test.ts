@@ -320,6 +320,29 @@ function registryWithThrowingKill(real: LocalJobRegistry): LocalJobRegistry {
 }
 
 /**
+ * 「剪枝时注册表已经不认这批记录」那一档：除 `list` 抛错外全部转给真件
+ * （重载/换枚实例之后，startBackground 会在剪枝那一步就撞上）。
+ * @param real 真件（除 list 外六个方法原样转给它）
+ * @returns 只坏掉 `list` 的注册表面
+ */
+function registryWithThrowingList(real: LocalJobRegistry): LocalJobRegistry {
+  return {
+    start: (...args: Parameters<LocalJobRegistry["start"]>) => real.start(...args),
+    list: () => {
+      throw new Error("registry reloaded");
+    },
+    get: (...args: Parameters<LocalJobRegistry["get"]>) => real.get(...args),
+    kill: (...args: Parameters<LocalJobRegistry["kill"]>) => real.kill(...args),
+    remove: (...args: Parameters<LocalJobRegistry["remove"]>) => {
+      real.remove(...args);
+    },
+    wait: (...args: Parameters<LocalJobRegistry["wait"]>) => real.wait(...args),
+    attachController: (...args: Parameters<LocalJobRegistry["attachController"]>) =>
+      real.attachController(...args),
+  } as unknown as LocalJobRegistry;
+}
+
+/**
  * 只抄 `wait` 的入参、其余读侧原样转给真件的那一枚注册表面：enforceOcrDeadline
  * 的兜底窗口现来自行 config，测试需要一个不复刻注册表行为就能看到「递了几毫秒」的位置。
  * @param real 真件
@@ -397,6 +420,29 @@ async function collectUncaught(body: () => Promise<void> | void): Promise<unknow
     await settledTick();
   } finally {
     process.removeListener("uncaughtException", capture);
+  }
+  return seen;
+}
+
+/**
+ * 同 collectUncaught，但收的是**未处理 rejection**：fire-and-forget 的 Promise 漏了
+ * catch 时，Node ≥22 默认把它升成未捕获异常并终止宿主进程。这里把它变成一条可断言的
+ * 事实，而不是让整个测试进程跟着宿主一起没。
+ * @param body 要在监视下跑完的段落
+ * @returns 该段落期间落到 unhandledRejection 上的理由
+ */
+async function collectUnhandledRejections(body: () => Promise<void> | void): Promise<unknown[]> {
+  const seen: unknown[] = [];
+  const capture = (reason: unknown): void => {
+    seen.push(reason);
+  };
+  process.on("unhandledRejection", capture);
+  try {
+    await body();
+    // 未处理 rejection 在微任务排空后的那一轮才上报，一次 setImmediate 足够。
+    await settledTick();
+  } finally {
+    process.removeListener("unhandledRejection", capture);
   }
   return seen;
 }
@@ -605,18 +651,10 @@ interface FakeHost {
 /** 宿主替身的可选项：两个官方通道的装配状态与回答。 */
 interface FakeHostOptions {
   webServer?: boolean;
-  /** webServer 服务替身的 `host` 成员（具体 IP 字面量，config 层拒绝通配）。
-   *  缺省 = `"127.0.0.1"`（回环，`servingNonLoopback` 断开）；给 LAN IP 才让
-   *  `isLoopbackBindAddress` 判成非回环、trust 闸放行局域网 Host 头。 */
-  webServerHost?: string;
   /** false ⇒ get("settings") 拿不到服务（未装配 settings 的 profile）。 */
   settingsService?: boolean;
-  /** true ⇒ get("settings") 首次可用、之后消失（探测后被卸载的竞态）。 */
-  settingsVanishes?: boolean;
   /** false ⇒ get("credentials") 缺席（非 web profile / 精简 bundle）。 */
   credentialsService?: boolean;
-  /** true ⇒ 凭据服务只有 describe、没有 resolve（界面不完整的半装配）。 */
-  partialCredentials?: boolean;
   /** describe() 的命名空间清单。 */
   descriptors?: FakeDescriptor[];
   /** 视为已配置 key 的 ref 名单。 */
@@ -669,7 +707,6 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
         : undefined;
     },
   };
-  let settingsLookups = 0;
   const agents = new Map<string, Context>();
   const host: FakeHost = {
     registeredTools: [],
@@ -788,15 +825,11 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
             };
           },
           // 官方 `Config['host']` 是**必有**的具体 IP 字面量（config 层拒绝通配与
-          // 非字面量），替身缺省给回环 127.0.0.1 与现实一致；要测非回环面就用
-          // `webServerHost` 显式给 LAN IP（isLoopbackBindAddress 据此放行局域网 Host）。
-          host: options.webServerHost ?? "127.0.0.1",
+          // 非字面量），替身给回环 127.0.0.1 与默认部署一致。
+          host: "127.0.0.1",
         };
       } else if (name === "settings" && options.settingsService !== false) {
-        settingsLookups += 1;
-        // 探测通过后服务被卸载（health 与真正读取之间）：门面必须报错而非回空表。
-        service =
-          options.settingsVanishes === true && settingsLookups > 1 ? undefined : host.settings;
+        service = host.settings;
       } else if (name === "jobs" && options.jobs !== false) {
         service = host.jobs;
       } else if (name === "agents") {
@@ -809,8 +842,7 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
           },
         };
       } else if (name === "credentials" && options.credentialsService !== false) {
-        service =
-          options.partialCredentials === true ? { describe: credentials.describe } : credentials;
+        service = credentials;
       }
       return service;
     },
@@ -1291,7 +1323,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(patchEntryId()).toBe(PLUGIN_ENTRY_ID);
     });
 
-    it("Config schema 逐字段默认 = 0.1.6 交给 register 的内置底座", () => {
+    it("schema 逐字段默认 = 0.1.6 交给 register 的内置底座", () => {
       // 0.1.7 删了 settings.register(ns, schema, { base })：默认值改由 schema 自己带
       // （cordis 装载期用同一份 schema 填默认，fiber.ts resolveConfig）。少一个默认就会
       // 在真实宿主上变样，故逐字段对齐旧 BUILTIN_BASE。
@@ -1523,12 +1555,17 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     it("非 git 目录 + 符号链接前缀 ⇒ 回退 realpath（缺陷 1 的触发条件②）", async () => {
       const real = mkdtempSync(path.join(tmpdir(), "ocr-real-"));
       const linkParent = mkdtempSync(path.join(tmpdir(), "ocr-link-"));
-      const link = path.join(linkParent, "repo-link");
-      await symlink(real, link);
-      host.shell.gitTopLevel = null;
-      host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: link }, makeExec());
-      expect(host.shell.resolveCalls.at(-1)?.workdir).toBe(realpathSync(real));
+      try {
+        const link = path.join(linkParent, "repo-link");
+        await symlink(real, link);
+        host.shell.gitTopLevel = null;
+        host.shell.scripts.push({ output: REVIEW_JSON });
+        await toolOf(host, "ocr_review").execute({ repo: link }, makeExec());
+        expect(host.shell.resolveCalls.at(-1)?.workdir).toBe(realpathSync(real));
+      } finally {
+        rmSync(linkParent, { recursive: true, force: true });
+        rmSync(real, { recursive: true, force: true });
+      }
     });
 
     it("路径不存在 ⇒ 原样返回，不因 realpath 失败而让评审失败", async () => {
@@ -1823,19 +1860,39 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       ).rejects.toThrow(/--output 文件过大/u);
     });
 
-    it("maxComments 0（不截断）与非法值（回退 12）都能跑通", async () => {
+    it("maxComments 0（不截断）与非法值（回退 12）都按条数兑现", async () => {
+      // 评论数必须超过回退值 12，否则 0 与 12 两种截断口径会输出同一份清单，
+      // 「回退 12」这条标题就只剩恒绿。所有评论都锚定到行号，避免 includeZeroLine
+      // 的默认口径先把它们滤掉。
+      const many = JSON.stringify({
+        status: "success",
+        session_id: "sess-many",
+        summary: { files_reviewed: 2, comments: 15, total_tokens: 900, elapsed: "12s" },
+        comments: Array.from({ length: 15 }, (_item, index) => ({
+          path: "src/a.ts",
+          content: `问题 ${index + 1}`,
+          start_line: index + 1,
+          end_line: index + 1,
+          category: "bug",
+          severity: "low",
+        })),
+      });
       host.settingsValue["maxComments"] = 0;
-      host.shell.scripts.push({ output: REVIEW_JSON });
-      await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
-      host.settingsValue["maxComments"] = "many";
-      host.shell.scripts.push({ output: REVIEW_JSON });
-      const result = (await toolOf(host, "ocr_review").execute(
+      host.shell.scripts.push({ output: many });
+      const unlimited = (await toolOf(host, "ocr_review").execute(
         { repo: "/repo", wait: true },
         makeExec(),
-      )) as {
-        status: string;
-      };
-      expect(result.status).toBe("success");
+      )) as { topComments: unknown[]; droppedCount: number };
+      expect(unlimited.topComments).toHaveLength(15);
+      expect(unlimited.droppedCount).toBe(0);
+      host.settingsValue["maxComments"] = "many";
+      host.shell.scripts.push({ output: many });
+      const fallback = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as { topComments: unknown[]; droppedCount: number };
+      expect(fallback.topComments).toHaveLength(12);
+      expect(fallback.droppedCount).toBe(3);
     });
 
     it("effort 缺省取设置卡值（auto 不传，low/high 直通，其它归 medium）", async () => {
@@ -1855,6 +1912,25 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
       expect(String(host.shell.resolveCalls[3]?.command)).toContain("--effort medium");
+    });
+
+    it("模型传了认不出的 effort ⇒ 按「未指定」处理，回落设置卡值（不静默改成 medium）", async () => {
+      host.settingsValue["effort"] = "high";
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", effort: "deeper", wait: true },
+        makeExec(),
+      );
+      expect(String(host.shell.resolveCalls[0]?.command)).toContain("--effort high");
+      host.settingsValue["effort"] = "auto";
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", effort: "ultra", wait: true },
+        makeExec(),
+      );
+      // auto = 跟随 OCR 自己的配置 ⇒ 不传 --effort；旧实现会在这里下发 --effort medium，
+      // 等于模型打错一个字就把用户的 auto 深度改成了 medium。
+      expect(String(host.shell.resolveCalls[1]?.command)).not.toContain("--effort");
     });
 
     it("effort/wait 错类型一律抛错（静默回落会改变审查深度或等待语义），null 仍按缺省", async () => {
@@ -1936,6 +2012,21 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(host.jobs.list()[0]?.status).toBe("running");
       proc?.settle();
       await settledTick();
+    });
+
+    it("剪枝抛错（注册表被重载换掉）⇒ 已起的进程先被收掉，不留无主 OCR", async () => {
+      const host = makeHost();
+      const real = host.jobs;
+      host.jobs = registryWithThrowingList(real);
+      applyPlugin(host);
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec()),
+      ).rejects.toThrow(/registry reloaded/u);
+      const [proc] = host.shell.procs;
+      // 进程已经在 execute 那时起来了：剪枝/取文案抛错若不先 killProc，留下的是一条
+      // 谁也看不见、谁也停不掉的 OCR 在烧 token。
+      expect(proc?.killCount, "execute 之后的抛错必须先收进程").toBe(1);
+      expect(real.list()).toStrictEqual([]);
     });
 
     it("默认无兜底窗口（0）⇒ 不向注册表登记 jobs.wait", async () => {
@@ -2672,13 +2763,18 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     });
 
     it("失败详情里的明文 key 先脱敏再截断", async () => {
+      // key 摆在头部截断边界上：截断后头部只剩 key 的前 20 个码元，碎片不满足
+      // STANDALONE_KEY 的 20 字符下限，先截断再脱敏时会原样留下；先脱敏时留下的是
+      // 完整的 ***REDACTED*** 标记。
       host.shell.scripts.push({
         exitCode: 1,
-        stderrText: `HEAD ${"y".repeat(900)} ${PLAIN_KEY} tail`,
+        stderrText: `HEAD ${"y".repeat(374)} ${PLAIN_KEY} ${"z".repeat(500)} tail`,
       });
-      await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
-        /REDACTED/u,
-      );
+      const error = (await preview
+        .execute({ repo: "/repo", wait: true }, makeExec())
+        .catch((error_: unknown) => error_ as Error)) as Error;
+      expect(error.message).toMatch(/REDACTED/u);
+      expect(error.message).not.toContain("sk-");
     });
 
     it("stdout 截断 ⇒ 追加截断说明，有落盘路径时一并给出", async () => {
@@ -3085,6 +3181,32 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(host.shell.resolveCalls).toHaveLength(1);
     });
 
+    it("装载期自检的 shell 基础设施故障不产生未处理 rejection（自检失败不许杀宿主）", async () => {
+      const host = makeHost();
+      host.settingsValue["startupVerify"] = true;
+      // 端点自检先、版本探测后：两条探测各消费一条脚本，都在 result() 上抛。
+      host.shell.scripts.push(
+        { throws: new Error("shell down") },
+        { throws: new Error("shell down") },
+      );
+      const rejections = await collectUnhandledRejections(async () => {
+        applyPlugin(host);
+        await settledTick();
+      });
+      expect(
+        rejections,
+        "fire-and-forget 自检漏 catch 会把未处理 rejection 交给 Node",
+      ).toStrictEqual([]);
+      // 两次探测都真发起了：否则上面的空数组只是「没跑」而不是「跑过且没漏」。
+      expect(host.shell.resolveCalls).toHaveLength(2);
+      const service = host.provided.get(OCR_REMOTE_NAMESPACE) as
+        | { providers: () => Promise<Record<string, unknown>> }
+        | undefined;
+      const body = await service?.providers();
+      // 结论留空 = 卡片显示「未检测」：失败不许被写成成功，也不许把装载拖挂。
+      expect(body?.["endpointVerify"]).toBeNull();
+    });
+
     it("ocr_scan 走同一句：两个自驱 LLM 的工具都吃同一份实测值", async () => {
       const host = await hostWithMeasuredVersion("open-code-review 0.0.1 linux/amd64\n");
       host.shell.scripts.push({ output: REVIEW_JSON });
@@ -3258,93 +3380,92 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       }
     });
   });
-});
+  describe("外部 CLI 可用性前置：两条路都没有候选时不起进程", () => {
+    /** 七个工具各自的必填形态（与它们各自的入参闸一致，只为了让 run 走到前置这一行）。 */
+    const TOOL_ARGS: Record<string, Record<string, unknown>> = {
+      ocr_review: { repo: "/repo" },
+      ocr_scan: { repo: "/repo" },
+      ocr_delegate_preview: { repo: "/repo" },
+      ocr_delegate_rule: { repo: "/repo", paths: ["src/a.ts"] },
+      ocr_session: { repo: "/repo", action: "list" },
+      ocr_rules_check: { repo: "/repo", path: "src/a.ts" },
+      ocr_llm: { action: "providers" },
+    };
 
-describe("外部 CLI 可用性前置：两条路都没有候选时不起进程", () => {
-  /** 七个工具各自的必填形态（与它们各自的入参闸一致，只为了让 run 走到前置这一行）。 */
-  const TOOL_ARGS: Record<string, Record<string, unknown>> = {
-    ocr_review: { repo: "/repo" },
-    ocr_scan: { repo: "/repo" },
-    ocr_delegate_preview: { repo: "/repo" },
-    ocr_delegate_rule: { repo: "/repo", paths: ["src/a.ts"] },
-    ocr_session: { repo: "/repo", action: "list" },
-    ocr_rules_check: { repo: "/repo", path: "src/a.ts" },
-    ocr_llm: { action: "providers" },
-  };
+    it("none ⇒ 七个工具一律拒绝，且连一次 resolve 都没发生", async () => {
+      const host = makeHost();
+      applyPlugin(host, noneProbe);
+      // 七个调用并发跑（用例面的 no-await-in-loop：串行 await 只是把同一批断言排成
+      // 一条更慢的链），失败原因逐个收成消息串再整体比对，免掉逐条 try/catch 留下的分支。
+      const reasons = await Promise.all(
+        Object.entries(TOOL_ARGS).map(([name, args]) =>
+          toolOf(host, name)
+            .execute(args, makeExec())
+            .catch((error: unknown): string => (error as Error).message),
+        ),
+      );
+      expect(
+        reasons.every((message) => message === reasons[0]),
+        "七处拒绝理由该是同一句",
+      ).toBe(true);
+      // 拒绝里必须带着**能照着敲**的装法，而且 npm 那条带版本：用户（或模型）拿到这句话
+      // 就能装对，不必再去翻文档核对「哪个版本才是插件按着写的」。
+      const npm = `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`;
+      expect(reasons[0]).toContain(npm);
+      expect(reasons[0]).toContain(BREW_INSTALL);
+      // 钉的是这条短路自己的契约：没找到候选就不该有 shell 请求。
+      expect(host.shell.resolveCalls).toStrictEqual([]);
+    });
 
-  it("none ⇒ 七个工具一律拒绝，且连一次 resolve 都没发生", async () => {
-    const host = makeHost();
-    applyPlugin(host, noneProbe);
-    // 七个调用并发跑（用例面的 no-await-in-loop：串行 await 只是把同一批断言排成
-    // 一条更慢的链），失败原因逐个收成消息串再整体比对，免掉逐条 try/catch 留下的分支。
-    const reasons = await Promise.all(
-      Object.entries(TOOL_ARGS).map(([name, args]) =>
-        toolOf(host, name)
-          .execute(args, makeExec())
-          .catch((error: unknown): string => (error as Error).message),
-      ),
-    );
-    expect(
-      reasons.every((message) => message === reasons[0]),
-      "七处拒绝理由该是同一句",
-    ).toBe(true);
-    // 拒绝里必须带着**能照着敲**的装法，而且 npm 那条带版本：用户（或模型）拿到这句话
-    // 就能装对，不必再去翻文档核对「哪个版本才是插件按着写的」。
-    const npm = `npm i -g @alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`;
-    expect(reasons[0]).toContain(npm);
-    expect(reasons[0]).toContain(BREW_INSTALL);
-    // 钉的是这条短路自己的契约：没找到候选就不该有 shell 请求。
-    expect(host.shell.resolveCalls).toStrictEqual([]);
-  });
+    it("path 命中那一档照常执行（短路只认 none）", async () => {
+      const host = makeHost();
+      applyPlugin(host, pathProbe);
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const result = await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      );
+      expect(result).toBeTypeOf("object");
+      expect(host.shell.resolveCalls).toHaveLength(1);
+    });
 
-  it("path 命中那一档照常执行（短路只认 none）", async () => {
-    const host = makeHost();
-    applyPlugin(host, pathProbe);
-    host.shell.scripts.push({ output: REVIEW_JSON });
-    const result = await toolOf(host, "ocr_review").execute(
-      { repo: "/repo", wait: true },
-      makeExec(),
-    );
-    expect(result).toBeTypeOf("object");
-    expect(host.shell.resolveCalls).toHaveLength(1);
-  });
+    it("assertOcrPresent：bundled 与 path 放行，none 抛并把装法原文带进消息", () => {
+      const install = BREW_INSTALL;
+      expect(() => {
+        assertOcrPresent({ source: "bundled", path: "/x", channel: "npm" }, zh, install);
+      }).not.toThrow();
+      expect(() => {
+        assertOcrPresent({ source: "path", path: "/x", channel: "brew" }, zh, install);
+      }).not.toThrow();
+      expect(() => {
+        assertOcrPresent({ source: "none" }, zh, install);
+      }).toThrow(format(zh.ocrBinaryMissing, { install }));
+    });
 
-  it("assertOcrPresent：bundled 与 path 放行，none 抛并把装法原文带进消息", () => {
-    const install = BREW_INSTALL;
-    expect(() => {
-      assertOcrPresent({ source: "bundled", path: "/x", channel: "npm" }, zh, install);
-    }).not.toThrow();
-    expect(() => {
-      assertOcrPresent({ source: "path", path: "/x", channel: "brew" }, zh, install);
-    }).not.toThrow();
-    expect(() => {
-      assertOcrPresent({ source: "none" }, zh, install);
-    }).toThrow(format(zh.ocrBinaryMissing, { install }));
-  });
+    it("生产现读口逐字等于 lib/cli.ts 那份 fs 判据", () => {
+      // 两次独立调用在同一进程里必须给出同一个判定：这条既把「默认口用的是那份判据」
+      // 钉住，又不需要用例去分支这台机器恰好装没装 ocr。
+      expect(productionProbe()).toStrictEqual(resolveOcrAvailability());
+    });
 
-  it("生产现读口逐字等于 lib/cli.ts 那份 fs 判据", () => {
-    // 两次独立调用在同一进程里必须给出同一个判定：这条既把「默认口用的是那份判据」
-    // 钉住，又不需要用例去分支这台机器恰好装没装 ocr。
-    expect(productionProbe()).toStrictEqual(resolveOcrAvailability());
-  });
-
-  it("入口形状：cordis 交两参，现读口在入口这一层接上", () => {
-    const host = makeHost();
-    expect(plugin.apply).toHaveLength(2);
-    (plugin as unknown as { apply: (ctx: unknown, config: unknown) => void }).apply(
-      host,
-      liveConfig(host),
-    );
-    // 注册期不问可用性（装载不该被一个外部 CLI 拖下线），所以到这里仍没有任何 shell 请求。
-    expect(host.registeredTools.map((tool) => tool.name)).toStrictEqual([
-      "ocr_review",
-      "ocr_scan",
-      "ocr_delegate_preview",
-      "ocr_delegate_rule",
-      "ocr_session",
-      "ocr_rules_check",
-      "ocr_llm",
-    ]);
-    expect(host.shell.resolveCalls).toStrictEqual([]);
+    it("入口形状：cordis 交两参，现读口在入口这一层接上", () => {
+      const host = makeHost();
+      expect(plugin.apply).toHaveLength(2);
+      (plugin as unknown as { apply: (ctx: unknown, config: unknown) => void }).apply(
+        host,
+        liveConfig(host),
+      );
+      // 注册期不问可用性（装载不该被一个外部 CLI 拖下线），所以到这里仍没有任何 shell 请求。
+      expect(host.registeredTools.map((tool) => tool.name)).toStrictEqual([
+        "ocr_review",
+        "ocr_scan",
+        "ocr_delegate_preview",
+        "ocr_delegate_rule",
+        "ocr_session",
+        "ocr_rules_check",
+        "ocr_llm",
+      ]);
+      expect(host.shell.resolveCalls).toStrictEqual([]);
+    });
   });
 });

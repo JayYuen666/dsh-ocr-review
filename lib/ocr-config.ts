@@ -230,18 +230,25 @@ export async function applyProviderSelection(
   selection: SelectionRequest,
   messages: OcrReviewMessages,
 ): Promise<AppliedConfig> {
-  const { provider, model } = selection;
   // 包内自带形状闸：宿主对 HTTP body 与模型入参都不做校验，全靠调用点逐个挑一遍迟早
   // 漏一条新路径。model 为空串时下游 `target.models.length === 0` 会无条件放行，
   // 把空 model 写进 config.json——正是「错形状必须抛错」要防的静默写入。
   if (
-    typeof provider !== "string" ||
-    typeof model !== "string" ||
-    provider.trim() === "" ||
-    model.trim() === ""
+    typeof selection.provider !== "string" ||
+    typeof selection.model !== "string" ||
+    selection.provider.trim() === "" ||
+    selection.model.trim() === ""
   ) {
     throw new Error(format(messages.providerModelRequired, {}));
   }
+  // 归一在**入口一次做完**：下游 providers.find 是逐字相等、renderSelectedConfig 的
+  // models 白名单也是逐字相等、回执与写盘都读这个名字。只判 trim 非空却继续用原值，
+  // 会得到「模型带一个尾空格 → 先按带空格的名字报 modelNotInList」这类用户没法自救的
+  // 错形状（空白 provider 则更早掉进 providerNotInList）。
+  // 上面那条判据已经覆盖「trim 后为空」，这里不再重复判一次：trim 过还是空的字符串在前面
+  // 就被拒了，多写一个分支只会是一条永远不执行的死语句（本包覆盖率是四项 100%）。
+  const provider = selection.provider.trim();
+  const model = selection.model.trim();
   const { providers, source } = readProviders(gateway, messages);
   if (source.status !== "ready") {
     throw new Error(source.message);
@@ -250,7 +257,13 @@ export async function applyProviderSelection(
   if (!target) {
     throw new Error(format(messages.providerNotInList, { ns: PI_AI_NAMESPACE, provider }));
   }
-  if (target.apiKeyEnv === null || target.apiKeyEnv === "") {
+  if (target.apiKeyEnv === null) {
+    // 「声明了但语法不过白名单」必须与「未声明」分开报：前者是用户写了个小写 ref
+    // （官方凭据语法接受它、卡片也能显示），报「未声明」会把人引去重写一遍根本没写错的字段。
+    const invalid = target.apiKeyEnvInvalid;
+    if (invalid !== null) {
+      throw new Error(format(messages.badEnvKey, { key: invalid }));
+    }
     throw new Error(format(messages.noApiKeyEnv, { provider }));
   }
   // resolve 只用于判定「key 在 OCR 运行时取不取得到」；值当场丢弃，绝不进配置/回执/日志。
@@ -289,7 +302,11 @@ export async function applyProviderSelection(
         provider,
         model,
         apiKeyCmd,
-        ...(selection.language === undefined ? {} : { language: selection.language }),
+        // 空白不是「用户想清空语言」的合法值：renderSelectedConfig 只在非空白时落键
+        //（同一判据在 lib/config-store.ts，两边各写一遍会漂）。
+        ...(selection.language === undefined || selection.language.trim() === ""
+          ? {}
+          : { language: selection.language.trim() }),
       },
       messages,
     );
@@ -323,22 +340,28 @@ function migrateEntry(
   if (typeof entry["api_key"] !== "string" || entry["api_key"].length === 0) {
     return "noPlain";
   }
+  // 已有**非空** api_key_cmd 的条目一个字节都不动，记 unknown 让回执点名它：
+  // odr 侧 api_key_cmd 优先于 api_key，那条命令此刻正在生效，可能是用户手写的多步
+  // 逻辑（带额外参数、走 vault、包一层 sh）。本函数的职责是「补一条动态读凭据的
+  // 命令」，不是「把用户的命令换成我们的」——静默替换等于在没有回执的情况下改掉
+  // 一个正在工作的配置。
+  const existingCmd = entry["api_key_cmd"];
+  if (typeof existingCmd === "string" && existingCmd.trim() !== "") {
+    return "unknown";
+  }
   // 解析不到可达层就整条记 unknown，绝不删明文：换过去的命令在 OCR 运行时取不到
   // 值，等于把一条本来能用的凭据换成一条不能用的，而原文只剩 .bak 里的副本。
   if (envKey === undefined || envKey === "" || !context.reachableEnvKeys.has(envKey)) {
     return "unknown";
   }
-  try {
-    entry["api_key_cmd"] = buildApiKeyCmd(
-      context.scriptPath,
-      envKey,
-      context.dshHome,
-      context.messages,
-    );
-  } catch {
-    // 非法 env key 无法构造命令 → 记入 unknown。
-    return "unknown";
-  }
+  // 投影层（lib/provider-projection.ts）已按 CREDENTIAL_ENV_KEY 收口：能走到这里的
+  // env 名一定构造得出命令，故不再包 try/catch 留一条测不到的分支。
+  entry["api_key_cmd"] = buildApiKeyCmd(
+    context.scriptPath,
+    envKey,
+    context.dshHome,
+    context.messages,
+  );
   delete entry["api_key"];
   return "migrated";
 }
@@ -346,8 +369,9 @@ function migrateEntry(
 /**
  * 迁移：把自定义 provider 条目里的明文 api_key 改为 api_key_cmd（动态读凭据）。
  * api_key_cmd 优先于 api_key，因此清除明文即可。
- * 对「明文 api_key + 无 api_key_cmd」的条目，依据 settings 里该 provider 的
- * apiKeyEnv 补充命令；settings 里找不到的 provider 不动（不破坏既有配置），
+ * 只对「明文 api_key + 无 api_key_cmd」的条目动手，依据 settings 里该 provider 的
+ * apiKeyEnv 补充命令；**已有非空 api_key_cmd 的条目不覆写**（那条命令可能正在生效，
+ * 换掉它等于无声改配置），与 settings 里找不到的 provider 一起记进 skippedUnknown，
  * 在返回信息里说明。credentials 缺席不阻断本操作（它只要 name→apiKeyEnv 映射），
  * settings 侧读不到则抛错——那正是「不知道该写哪条命令」的状态，静默跳过会让用户
  * 以为迁移过了。
@@ -443,7 +467,9 @@ export async function migratePlaintextKeys(
     if (migrated.length === 0) {
       return { migrated, skippedUnknown };
     }
-    await writeConfigAtomic(paths.ocrConfigJson, `${JSON.stringify(doc, null, 2)}\n`);
+    // 渲染形态只有一处真源（lib/config-store.ts 的 renderConfigDoc）：本文件其余
+    // 写回点已经用它，这里再手写一份缩进/结尾换行就等于留一条会漂的第二实现。
+    await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc));
     return { migrated, skippedUnknown };
   });
   // 等的是那把文件锁与锁内的一次写：回执必须落定后才报迁移了哪几条
@@ -469,8 +495,10 @@ export interface KeyScriptPointerResult {
  * 为什么永不抛错：这是锦上添花的修复，不能因为它把工具拖死。坏 JSON、锁抢不到、权限
  * 不足、设置项写坏——一律放过，让 ocr 报它自己的原始错误，那才是诊断价值最高的形态。
  *
- * 常态零锁开销：先无锁读一次做判据，确实要改写才进 withFileLock（锁内按新快照重判，
- * 避免把并发写入的 provider 选择覆盖掉）。
+ * 锁外那一次读只用于区分两种**不需要动锁**的状态：文件不存在/空白（连配置目录都不该
+ * 被凭空造出来）与读不动（报 checked: false）。其余一律进 withFileLock，并在锁内按
+ * 新快照重判——不拿锁外快照决定「要不要改」，那份快照随时可能过期，为省一次锁而多留
+ * 一个只能靠并发触发的分支不值。
  */
 export async function ensureKeyScriptPointer(
   paths: OcrPaths,

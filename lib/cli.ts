@@ -50,10 +50,22 @@ const EXCLUDE_LIST_LIMIT = 2000;
 /** `--path` 的路径条数上限（同 EXCLUDE_LIST_LIMIT 的取向：够大 + 超限告警）。 */
 const PATH_LIST_LIMIT = 2000;
 
+/** `ocr delegate rule` 的位置参数条数上限。与 PATH_LIST_LIMIT 分列，是因为两者的投放
+ *  方式不同：这些路径逐个作为位置参数进 argv，而 `--path` 把同量级的路径压进一个逗号串；
+ *  上限仍只用于拦住失控输入，合法清单以 OCR 侧实际处理能力为准。 */
+const DELEGATE_PATHS_LIMIT = 200;
+
+/** 会话过滤列表（severity/category）的条数上限。它拦的是失控输入的长度，不是取值域：
+ *  severity 的合法取值另由白名单收口，拿枚举个数当上限会把「合法取值 + 一个重复值」误报成
+ *  超限。 */
+const SESSION_FILTER_LIST_LIMIT = 50;
+
 /** `--rule` / `--background-file` 的文件大小上限：规则是检查清单，背景是需求文档。 */
 const RULE_FILE_MAX_BYTES = 256 * 1024;
 const BACKGROUND_FILE_MAX_BYTES = 1024 * 1024;
 const MAX_GIT_PROCS_FLAG = "--max-git-procs";
+/** `review` / `scan` / `delegate preview` 共用：四类命令构造各自转发同一枚上限。 */
+const MAX_TOKENS_FLAG = "--max-tokens";
 
 /** `ocr review|scan|delegate preview` 的背景说明 flag（三处命令构造共用一条）。
  *  pushTextFlag 按 `flag.slice(2)` 反推报错用的参数名，故值必须带 `--` 前缀。 */
@@ -378,17 +390,14 @@ function pushTextFlag(
   }
 }
 
-/** --exclude/--background/--provider/--model 等通用 flag。
- * 注意：ocr 的 --exclude 是 String 类型（实测多个 flag 实例只认最后一个，
- * 逗号分隔才生效）——多值必须合并为一个 flag 逗号连接，绝不能展开多个。
- * resume 不在这里：它与 scope 是互斥语义（workspace 禁恢复），由
- * buildReviewCommand 在拿到 scopeFlags 结果后前置校验。 */
-function optionalFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[] {
+/** 只作用于 LLM 阶段的说明面 flag：--background / --provider / --model。
+ *  preview 不建 LLM 运行时，故这三个值不参与文件选择（`agent.Preview` 的入参里没有
+ *  Background，也不加载 provider 配置）；非 preview 分支与 delegate preview 各自按需调用。
+ *  注意：ocr 的 --exclude 是 String 类型（实测多个 flag 实例只认最后一个，逗号分隔才生效）
+ *  ——多值必须合并为一个 flag 逗号连接，绝不能展开多个。exclude 与 rule/maxGitProcs 同属
+ *  选择面，住在 selectionFlags。 */
+function backgroundFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[] {
   const parts: string[] = [];
-  const excludes = commaList(args.exclude, "exclude", EXCLUDE_LIST_LIMIT, messages);
-  if (excludes.length > 0) {
-    parts.push("--exclude", shq(excludes.join(",")));
-  }
   pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
   pushTextFlag(parts, "--provider", args.provider, messages);
   pushTextFlag(parts, "--model", args.model, messages);
@@ -447,9 +456,10 @@ export function wrapWithHostReaper(command: string, messages: OcrReviewMessages)
     // 好过让恒真判据蒙混过去，两种失效都是静默的，显式分叉才诚实。
     `p0=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' '); [ -n "$p0" ] && HAVEPS=1 || HAVEPS=0`,
     // pgrep 必须单独探：它只出现在后代快照 desc() 里，探不到时 cs 恒空 ⇒ reap 只杀得掉
-    // 中间 bash 壳，真命令与孙进程全部存活。探针取 `pgrep -P 1`：PID 1 必然存在，被
-    // 沙箱拒绝时退出码非 0，且不受「当前进程恰好没有子进程」干扰。
-    `pgrep -P 1 >/dev/null 2>&1 && HAVEPG=1 || HAVEPG=0`,
+    // 中间 bash 壳，真命令与孙进程全部存活。探针取 `pgrep -P 1`：PID 1 必然存在，但它的
+    // 子进程集合可能为空（PID 命名空间里只有一个进程），那时 pgrep 以 1 退出——1 是
+    // 「没有匹配」而非不可用；2/3（语法错误、致命错误）与 exec 失败（126/127）才算被拒。
+    `pgrep -P 1 >/dev/null 2>&1; [ $? -lt 2 ] && HAVEPG=1 || HAVEPG=0`,
     // 两者齐备才挂守护；任一不可用就走降级分支：报一次说明后原样跑，把进程树交回宿主。
     `[ "$HAVEPS" = 1 ] && [ "$HAVEPG" = 1 ] || { printf '%s\\n' ${shq(messages.reaperDegraded)} >&2; { ${command} ; }; exit $?; }`,
     `{ ${command} ; } & ocr=$!`,
@@ -788,6 +798,11 @@ export function buildReviewCommand(
       throw new Error(messages.previewRejectsResume);
     }
     parts.push("--preview", ...scopeFlags(args, messages), ...selectionFlags(args, repo, messages));
+    // preview 的选择面里有 MaxTokens：`agent.Preview` 用模板的每文件 prompt 上限把超限
+    // 文件标成不审，不转发就会让预览与同参数的实跑给出两份不同的清单。其余调优面
+    // （effort/provider/model/background*/noFilter/并发/超时/工具次数/预算）只作用于
+    // LLM 阶段，preview 不建运行时，它们没有可消费的下游。
+    pushIntFlag(parts, MAX_TOKENS_FLAG, args.maxTokens, 0, messages);
     if (outputPath !== undefined) {
       parts.push("--output", shq(outputPath));
     }
@@ -804,12 +819,14 @@ export function buildReviewCommand(
   pushIntFlag(parts, "--max-tokens", args.maxTokens, 0, messages);
   pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
   const scopeParts = scopeFlags(args, messages);
-  parts.push(...scopeParts, ...optionalFlags(args, messages));
+  // 选择面（exclude/rule/max-git-procs）只经 selectionFlags 一处拼装；说明面另有
+  // backgroundFlags。两个 helper 各自的判据不会被第三个手写副本绕过。
+  parts.push(
+    ...scopeParts,
+    ...selectionFlags(args, repo, messages),
+    ...backgroundFlags(args, messages),
+  );
   pushBoolFlag(parts, "--no-filter", args.noFilter, "noFilter", messages);
-  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
-  if (rule !== null) {
-    parts.push("--rule", shq(rule));
-  }
   const backgroundFile = repoFileOf(
     args.backgroundFile,
     repo,
@@ -820,7 +837,6 @@ export function buildReviewCommand(
   if (backgroundFile !== null) {
     parts.push("--background-file", shq(backgroundFile));
   }
-  pushIntFlag(parts, MAX_GIT_PROCS_FLAG, args.maxGitProcs, 1, messages);
   if (resume !== "") {
     // OCR 契约：workspace 模式禁 resume（"resume requires --from/--to or --commit"，
     // registerReviewFlags 的 --resume；review_cmd.go:364-366）。scopeFlags 返回空 = workspace，
@@ -855,6 +871,10 @@ export function buildScanCommand(
   const parts: string[] = [ocrCommand(), "scan", "--audience", "agent", "--format", outputFormat];
   if (preview) {
     parts.push("--preview");
+    // scan 的选择面同样读模板 MaxTokens（selectScanItems 用它把超限文件标成
+    // ExcludeTooLarge），故与 review 一致转发 --max-tokens；批次/提供方/模型等只用于
+    // 后续 LLM 阶段。
+    pushIntFlag(parts, MAX_TOKENS_FLAG, args.maxTokens, 0, messages);
   }
   const paths = commaList(args.path, "path", PATH_LIST_LIMIT, messages);
   if (paths.length > 0) {
@@ -867,7 +887,7 @@ export function buildScanCommand(
     pushIntFlag(parts, "--concurrency", args.concurrency, 1, messages);
     pushIntFlag(parts, "--timeout", args.timeoutMinutes, 0, messages);
     pushIntFlag(parts, "--max-tools", args.maxTools, 0, messages);
-    pushIntFlag(parts, "--max-tokens", args.maxTokens, 0, messages);
+    pushIntFlag(parts, MAX_TOKENS_FLAG, args.maxTokens, 0, messages);
     pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
     pushBoolFlag(parts, "--no-plan", args.noPlan, "noPlan", messages);
     pushBoolFlag(parts, "--no-dedup", args.noDedup, "noDedup", messages);
@@ -913,12 +933,9 @@ export function buildDelegatePreviewCommand(
     "--format",
     "json",
     ...scopeFlags(scopeArgs, messages),
+    ...selectionFlags(scopeArgs, repo, messages),
+    ...backgroundFlags(scopeArgs, messages),
   ];
-  const excludes = commaList(args.exclude, "exclude", EXCLUDE_LIST_LIMIT, messages);
-  if (excludes.length > 0) {
-    parts.push("--exclude", shq(excludes.join(",")));
-  }
-  pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
   const backgroundFile = repoFileOf(
     args.backgroundFile,
     repo,
@@ -929,11 +946,6 @@ export function buildDelegatePreviewCommand(
   if (backgroundFile !== null) {
     parts.push("--background-file", shq(backgroundFile));
   }
-  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
-  if (rule !== null) {
-    parts.push("--rule", shq(rule));
-  }
-  pushIntFlag(parts, MAX_GIT_PROCS_FLAG, args.maxGitProcs, 1, messages);
   return { command: parts.join(" "), workdir: repo };
 }
 
@@ -945,7 +957,9 @@ export function buildDelegateRuleCommand(
   const repo = assertAbsoluteRoot(args.repo, messages);
   // commaList 已保证「数组元素必须是字符串」+ NUL 检查（错类型不再被静默丢弃：
   // 少一个路径 = 少审一个文件，结果却以「全部已审」口径报告）。
-  const paths = commaList(args.paths, "paths", 200, messages).map((filePath) => shq(filePath));
+  const paths = commaList(args.paths, "paths", DELEGATE_PATHS_LIMIT, messages).map((filePath) =>
+    shq(filePath),
+  );
   if (paths.length === 0) {
     throw new Error(messages.pathsRequired);
   }
@@ -1015,15 +1029,16 @@ type SessionAction = (typeof SESSION_ACTIONS)[number];
 
 const SESSION_SEVERITIES = ["critical", "high", "medium", "low"] as const;
 
-/** severity 过滤：大小写归一 + 白名单；未知值报错而不是交给 CLI 返回空集。 */
+/** severity 过滤：大小写归一 + 白名单 + 去重；未知值报错而不是交给 CLI 返回空集。 */
 function severityFilter(value: unknown, messages: OcrReviewMessages): string[] {
-  return commaList(value, "severity", SESSION_SEVERITIES.length, messages).map((item) => {
+  const items = commaList(value, "severity", SESSION_FILTER_LIST_LIMIT, messages).map((item) => {
     const lower = item.toLowerCase();
     if (!(SESSION_SEVERITIES as readonly string[]).includes(lower)) {
       throw new Error(format(messages.invalidSeverity, { value: item }));
     }
     return lower;
   });
+  return [...new Set(items)];
 }
 
 /** session list --limit：缺省 10（OCR 原生默认 20，本包收紧；OCR 的 0=不限在本包
@@ -1192,7 +1207,7 @@ export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessag
     before: idValue(args.before, "before", messages),
     after: idValue(args.after, "after", messages),
     severities: severityFilter(args.severity, messages),
-    categories: commaList(args.category, "category", 50, messages),
+    categories: commaList(args.category, "category", SESSION_FILTER_LIST_LIMIT, messages),
     hasFilters: false,
     limit: args.limit,
     output: idValue(args.output, "output", messages),

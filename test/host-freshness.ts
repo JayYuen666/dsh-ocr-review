@@ -79,11 +79,18 @@ function digestOf(text: string): string {
 /**
  * 取包名：正则从 package.json 抠，不为此把整张依赖表拉进类型面（同 client 侧夹具的取法）。
  * @param pkgDir - 包根绝对路径
- * @returns package.json 的 name，抠不到时为 unknown
+ * @returns package.json 的 name；文件在但抠不到 name 时为 unknown
+ * @throws Error 包根下没有 package.json（pkgDir 推导有误）
  */
 function packageNameOf(pkgDir: string): string {
+  const manifestPath = path.resolve(pkgDir, "package.json");
+  // 缺这份文件说明包根推导错了（pkgDir 由调用方文件位置上翻一级得到），此时不能与
+  // 「文件在、但 name 写法抠不到」共用 unknown：前者要让人看到路径，后者才允许降级。
+  if (!existsSync(manifestPath)) {
+    throw new Error(`门禁取不到包身份：${manifestPath} 不存在，包根推导有误。`);
+  }
   return (
-    /"name":\s*"(?<pkgName>[^"]+)"/u.exec(readText(path.resolve(pkgDir, "package.json")))?.groups?.[
+    /"name":\s*"(?<pkgName>[^"]+)"/u.exec(readFileSync(manifestPath, "utf8"))?.groups?.[
       "pkgName"
     ] ?? "unknown"
   );
@@ -135,6 +142,12 @@ export async function hostFreshnessEvidence(
   const built = await build();
   if (typeof built === "string") {
     return { pkgName, pkgDir, onDisk: readText(path.resolve(pkgDir, artifact)), built };
+  }
+  if (!(built instanceof Map)) {
+    throw new TypeError(
+      `[${pkgName}] build-host.mjs 的 ${builder}() 既不是字符串，也不是「落盘路径 → 正文」的 Map：` +
+        "门禁无法比对产物形状。",
+    );
   }
   return {
     pkgName,

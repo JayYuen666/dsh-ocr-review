@@ -93,7 +93,8 @@ function isRecord(value) {
  */
 function dataDirFrom(fromArg) {
   const arg = typeof fromArg === "string" ? fromArg.trim() : "";
-  const fromEnv = typeof process.env.DSH_HOME === "string" ? process.env.DSH_HOME.trim() : "";
+  const { DSH_HOME: rawHome } = process.env;
+  const fromEnv = typeof rawHome === "string" ? rawHome.trim() : "";
   let chosen = path.join(homedir(), ".dsh");
   if (fromEnv !== "") {
     chosen = fromEnv;
@@ -106,9 +107,17 @@ function dataDirFrom(fromArg) {
 
 /** 取值过程中遇到的坏消息（文件损坏/权限/引号写坏）；收集但不提前退出——某一层的
  *  小毛病不能把后面的合法层堵掉。出口只有两处：最终取不到时随失败原因一并报出，
- *  或取到了更低一层时以警告形式报出（用户必须知道生效的 key 不是最高优先级给的）。
- *  全程脱敏：明文值不进这条列表，YAML 报错走 yamlErrorDetail。 */
+ *  或取到了值时以警告形式报出（用户必须知道查过的层里有坏消息）。
+ *  全程脱敏：明文值不进这条列表，YAML 报错走 yamlErrorDetail。
+ * @type {string[]} */
 const problems = [];
+
+/**
+ * 缺字段时的空映射：解构取值同时满足 tsc 的 `noPropertyAccessFromIndexSignature`
+ * 与 lint 的点号规则，不必二选一。
+ * @type {Record<string, unknown>}
+ */
+const EMPTY_RECORD = {};
 
 /**
  * ENOENT 判定（文件不存在是正常态，别把它当损坏报出去）。
@@ -116,48 +125,108 @@ const problems = [];
  * @returns {boolean}
  */
 function isNotFound(error) {
-  return isRecord(error) && error.code === "ENOENT";
+  if (!isRecord(error)) {
+    return false;
+  }
+  const { code } = error;
+  return code === "ENOENT";
 }
 
 /**
  * YAML 解析错误的**脱敏**描述：只留 reason + 行列定位，不带出错位置前后若干行的原文。
  *
- * 为什么必须自己拼：js-yaml 的 YAMLException 有两处会把 mark.snippet（出错点邻域的
- * **原文**）附在文本后面——构造函数里的 `this.message = formatError(this, false)`，以及
- * `toString()` 在 compact 为假时的分支。而 .credentials.yaml 的 refs.<REF> 里放的就是
+ * 为什么必须自己拼：js-yaml 的 YAMLException 会把 mark.snippet（出错点邻域的**原文**）
+ * 附在 message 上——构造函数里的 `this.message = formatError(this, false)` 与
+ * `toString()` 的非紧凑分支都是这样。而 .credentials.yaml 的 refs.<REF> 里放的就是
  * 明文 key，于是一处缩进/引号笔误就会把邻近行的真实 key 写进 stderr（OCR 会记录
  * api_key_cmd 的 stderr，也可能进宿主日志），直接违反「明文只在取用时出现一次」。
- * 实测 `String(err)` 与 `err.message` 两条路都会带出 snippet，只有 toString(true)
- * （紧凑格式）是干净的。
+ * 因此这里既不读 message 也不调 toString：只取 YAMLException 的 reason 与 mark
+ * 两个数据字段。非 YAMLException 的 Error 没有这两个字段，退回 name——同样不碰
+ * message。
  *
  * @param {unknown} error
  * @returns {string}
  */
 function yamlErrorDetail(error) {
-  if (error instanceof Error) {
-    // js-yaml 的 YAMLException 覆盖了 toString(compact)：传 true 走紧凑分支，
-    // 只有这一条路不带 snippet。别的 Error 会忽略这个参数，返回普通的
-    // "Name: message"，同样不含出错点邻域的原文。
-    const compact = error.toString(true);
-    if (typeof compact === "string" && compact !== "") {
-      return compact;
-    }
-    // 拿不到紧凑形态时**不能**退回 error.message：js-yaml 构造器里赋的就是
-    // this.message = formatError(this, false)，那份 message 正是带 snippet 的
-    // 那一条。改用 reason + 行列定位自行拼装，两者都不含原文。
-    const reason = typeof error.reason === "string" ? error.reason : "";
-    const { mark } = error;
-    const line = isRecord(mark) ? mark.line : undefined;
-    const column = isRecord(mark) ? mark.column : undefined;
-    const located =
-      typeof line === "number" && typeof column === "number"
-        ? ` (line:${line + 1}, column:${column + 1})`
-        : "";
-    return `${reason}${located}`;
+  if (!(error instanceof Error)) {
+    // 不是 Error 实例：String(error) 只会得到 "[object Object]" 一类无信息文本。
+    return "";
   }
-  // 到这里 error 不是 Error 实例：String(error) 会隐式走 Object.prototype.toString
-  // 产出 "[object Object]" 这种毫无信息量的文本，直接给空串。
-  return "";
+  const { reason: rawReason, mark } = isRecord(error) ? error : EMPTY_RECORD;
+  const reason = typeof rawReason === "string" && rawReason !== "" ? rawReason : error.name;
+  const { line, column } = isRecord(mark) ? mark : EMPTY_RECORD;
+  const located =
+    typeof line === "number" && typeof column === "number" ? ` (${line + 1}:${column + 1})` : "";
+  return `${reason}${located}`;
+}
+
+/**
+ * 读取并解析托管文档；读不到或解析失败都留一条 problem，交回 undefined。
+ * @param {string} credPath
+ * @returns {unknown}
+ */
+function parseCredentialsDocument(credPath) {
+  let text;
+  try {
+    text = readFileSync(credPath, "utf8");
+  } catch (error) {
+    // 文档不存在是正常态（只用环境/`.env` 的部署），不当错误报。
+    if (!isNotFound(error)) {
+      problems.push(`读取凭证文件失败：${credPath} ${String(error)}`);
+    }
+    text = undefined;
+  }
+  let doc;
+  if (text !== undefined) {
+    try {
+      doc = load(text);
+    } catch (error) {
+      problems.push(`凭证文件不是合法 YAML：${credPath} ${yamlErrorDetail(error)}`);
+      doc = undefined;
+    }
+  }
+  return doc;
+}
+
+/**
+ * 取文档里的 refs 映射；顶层不是映射、或 refs 存在却不是映射时记 problem。
+ * 文件能解析但形状不对时，静默回退到环境层会让用户以为托管文档仍生效，实际拿的
+ * 是另一份旧 key；这里记一条不含任何值的 problem，成功回退时一并转述。
+ * refs 键缺席不算坏形状：没有要取的 ref 时它本来就是可选的。
+ * @param {unknown} doc
+ * @param {string} credPath
+ * @returns {Record<string, unknown> | undefined}
+ */
+function refsMapOf(doc, credPath) {
+  const { refs } = isRecord(doc) ? doc : EMPTY_RECORD;
+  if (doc !== undefined && (!isRecord(doc) || (refs !== undefined && !isRecord(refs)))) {
+    problems.push(`凭证文件顶层不是 { refs: { … } } 映射：${credPath}`);
+  }
+  return isRecord(refs) ? refs : undefined;
+}
+
+/**
+ * OCR 的 api_key_cmd 契约只认**单行** stdout（空/多行都是硬错误）。托管文档里
+ * 引号内的空白与块标量（| / >）分别产出空白值与多行值：交给 OCR 只会换来隔了
+ * 一层的「resolve LLM endpoint」报错，而这一层本可以当没有值、继续往下回退。
+ * @param {unknown} value
+ * @param {string} refName
+ * @param {string} credPath
+ * @returns {string | undefined}
+ */
+function singleLineKeyOf(value, refName, credPath) {
+  let key;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      problems.push(`凭证文件 refs.${refName} 为空白值，按未配置处理：${credPath}`);
+    } else if (/[\r\n]/u.test(trimmed)) {
+      problems.push(`凭证文件 refs.${refName} 为多行值，按未配置处理：${credPath}`);
+    } else {
+      key = trimmed;
+    }
+  }
+  return key;
 }
 
 /**
@@ -168,26 +237,13 @@ function yamlErrorDetail(error) {
  * @returns {string | undefined}
  */
 function fromCredentialsDoc(credPath, refName) {
-  let text;
-  try {
-    text = readFileSync(credPath, "utf8");
-  } catch (error) {
-    // 文档不存在是正常态（只用环境/`.env` 的部署），不当错误报。
-    if (!isNotFound(error)) {
-      problems.push(`读取凭证文件失败：${credPath} ${String(error)}`);
-    }
+  const refs = refsMapOf(parseCredentialsDocument(credPath), credPath);
+  let value;
+  if (refs !== undefined) {
+    const { [refName]: selected } = refs;
+    value = selected;
   }
-  /** @type {unknown} */
-  let doc;
-  if (text !== undefined) {
-    try {
-      doc = load(text);
-    } catch (error) {
-      problems.push(`凭证文件不是合法 YAML：${credPath} ${yamlErrorDetail(error)}`);
-    }
-  }
-  const refs = isRecord(doc) ? doc.refs : undefined;
-  let value = isRecord(refs) ? refs[refName] : undefined;
+  let key;
   if (value !== undefined && typeof value !== "string") {
     // 只报形状，绝不把值本身写进 problems（明文不落日志）。refs.<REF> 被写成
     // 数字/布尔/映射时若静默当「没有值」，用户改了托管文档却拿到下一层的旧值，
@@ -195,13 +251,10 @@ function fromCredentialsDoc(credPath, refName) {
     problems.push(
       `凭证文件 refs.${refName} 不是字符串（是 ${Array.isArray(value) ? "数组" : typeof value}）：${credPath}`,
     );
-    value = undefined;
+  } else {
+    key = singleLineKeyOf(value, refName, credPath);
   }
-  // OCR 的 api_key_cmd 契约只认**单行** stdout（空/多行都是硬错误）。托管文档里
-  // 引号内的空白与块标量（| / >）分别产出空白值与多行值：交给 OCR 只会换来隔了
-  // 一层的「resolve LLM endpoint」报错，而这一层本可以当没有值、继续往下回退。
-  const key = typeof value === "string" ? value.trim() : "";
-  return key !== "" && !/[\r\n]/u.test(key) ? key : undefined;
+  return key;
 }
 
 /**
@@ -218,7 +271,11 @@ function fromInheritedEnv(raw) {
   return value === "" || /[\r\n]/u.test(value) ? undefined : value;
 }
 
-/** 未加引号的取值：trim，含「 #」时从那里剥离行内注释；剥完为空白按没有值。 */
+/**
+ * 未加引号的取值：trim，含「 #」时从那里剥离行内注释；剥完为空白按没有值。
+ * @param {string} trimmed
+ * @returns {{ value: string | undefined, problem: string | undefined }}
+ */
 function unquotedValueOf(trimmed) {
   const commentAt = trimmed.indexOf(" #");
   const bare = commentAt === -1 ? trimmed : trimmed.slice(0, commentAt).trim();
@@ -323,7 +380,8 @@ function fromUserDotEnv(envPath, refName) {
     if (match === null) {
       continue;
     }
-    const parsed = parseDotEnvValue(match.groups?.value ?? "");
+    const { value: rawValue } = match.groups ?? EMPTY_RECORD;
+    const parsed = parseDotEnvValue(typeof rawValue === "string" ? rawValue : "");
     if (parsed.problem === undefined) {
       hit = parsed.value;
     } else {
@@ -349,26 +407,33 @@ function main() {
     fail(`[get-cred] dsh 数据目录必须是绝对路径，收到 ${JSON.stringify(home)}\n`);
     return;
   }
-  const found =
-    fromCredentialsDoc(path.join(home, CREDENTIALS_FILENAME), refName) ??
-    fromInheritedEnv(process.env[refName]) ??
-    fromUserDotEnv(path.join(home, ".env"), refName);
+  const credPath = path.join(home, CREDENTIALS_FILENAME);
+  const envPath = path.join(home, ".env");
+  let found = fromCredentialsDoc(credPath, refName);
+  let source = credPath;
+  if (found === undefined) {
+    found = fromInheritedEnv(process.env[refName]);
+    source = "进程环境";
+  }
+  if (found === undefined) {
+    found = fromUserDotEnv(envPath, refName);
+    source = envPath;
+  }
 
   if (found === undefined) {
     // 硬失败：OCR 契约里非零退出/空输出都不回退，所以原因必须写全（含查过的目录与
     // 各层的坏消息），否则用户只能看到「llm 请求 401」这种隔了一层的症状。
     const notes = problems.length === 0 ? "" : `；${problems.join("；")}`;
-    fail(
-      `[get-cred] 取不到 ${refName}：查过 ${path.join(home, CREDENTIALS_FILENAME)}、进程环境与 ${path.join(home, ".env")}${notes}\n`,
-    );
+    fail(`[get-cred] 取不到 ${refName}：查过 ${credPath}、进程环境与 ${envPath}${notes}\n`);
     return;
   }
-  // 成功回退也要说话：托管文件损坏/无权限/ref 形状错被回退层盖过去时，用户必须知道
-  // 生效的 key 不是最高优先级那层给的。problems 在收集时已按脱敏口径拼装（YAML 报错走
-  // yamlErrorDetail，绝不带邻域原文），这里原样转述即可。
+  // 成功回退也要说话：查过的层里有坏消息时，用户必须知道生效的 key 得自哪一层。
+  // problems 在收集时已按脱敏口径拼装（YAML 报错走 yamlErrorDetail，绝不带邻域
+  // 原文），这里原样转述。只报实际来源，不推断「更低的一层」——坏消息可能来自
+  // .env 自己的坏行，而值也正是同一层给的。
   if (problems.length > 0) {
     process.stderr.write(
-      `[get-cred] 注意：高优先级凭据层有坏消息（${problems.join("；")}），${refName} 实际取自更低的一层\n`,
+      `[get-cred] 注意：查凭据时遇到坏消息（${problems.join("；")}），${refName} 实际取自 ${source}\n`,
     );
   }
   process.stdout.write(`${found}\n`);

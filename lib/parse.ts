@@ -259,7 +259,9 @@ function llmOf(raw: unknown): LlmIdentity | null {
   return { provider: provider === "" ? null : provider, model };
 }
 
-/** `resume` 回执：字段全空时回 null（CLI 只在真的续审时发这个对象）。 */
+/** `retry_report`：三个计数全为 0 时回 null（CLI 只在这一场发生过重试/恢复时才发
+ *  这个对象；键是 total_retries / recovered_requests / failed_requests，不是 resume 的
+ *  resumed_from / reused_files 那一组）。 */
 function retryOf(raw: unknown): RetryView | null {
   if (!isRecord(raw)) {
     return null;
@@ -308,13 +310,19 @@ function capLines(lines: string[], total: number, messages: OcrReviewMessages): 
   return [...lines, format(messages.diagnosticOmitted, { count: String(total - lines.length) })];
 }
 
-/** 计数字段的合法形态：非负整数或纯十进制数字串（与 {@link num} 的取值域对齐，
- *  否则 "x" 或 -1 会被 num 折成 0，把「读不出」伪装成「零失败」）。 */
+/** 计数字段的合法形态：**安全整数域内**的非负整数或纯十进制数字串——与 {@link num}
+ *  的取值域是同一道闸。只查「是不是数字串」不够：`"99999999999999999999"` 过得了
+ *  `^\d+$`，而 num() 的 nonNegativeInt 会把它折成 0，于是「读不出」被伪装成「零失败」
+ *  （tool_calls 不进 unreadable、preview 的计数回退到本地长度），两种口径必须一起判。 */
 function isCount(value: unknown): boolean {
   if (typeof value === "number") {
     return Number.isSafeInteger(value) && value >= 0;
   }
-  return typeof value === "string" && DECIMAL_INTEGER.test(value.trim());
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  return DECIMAL_INTEGER.test(trimmed) && Number.isSafeInteger(Number(trimmed));
 }
 
 /**
@@ -341,6 +349,8 @@ function toolCallsOf(
     return { view: null, unreadable: true };
   }
   const rows: unknown[] = Array.isArray(details) ? details : [];
+  // 渲染条数另算：被 isRecord 丢掉的坏条目既没有渲染行，也不是「已省略」——
+  // 拿 rows.length 当总数，capLines 会给出一条点不存在的「另有 N 条已省略」。
   const rendered = rows
     .filter((row): row is Record<string, unknown> => isRecord(row))
     .map((row) => {
@@ -353,7 +363,7 @@ function toolCallsOf(
     view: {
       total: num(doc["total"]),
       failure: num(doc["failure"]),
-      failures: capLines(rendered.slice(0, DIAGNOSTIC_DETAIL_LIMIT), rows.length, messages),
+      failures: capLines(rendered.slice(0, DIAGNOSTIC_DETAIL_LIMIT), rendered.length, messages),
     },
     unreadable: false,
   };
@@ -502,6 +512,36 @@ function reviewFailure(status: "unparseable" | "invalid", message: string): Pars
  * 诊断字段读不出来时**不判整场失败**（评论仍然有效、token 已经花掉），而是各补一条
  * 说明进同一个 warnings 出口——「这一路没有数据」必须看得见，但不能把结果作废。
  */
+
+/**
+ * OCR 的 warnings 数组 → 渲染行 + 限流旗标（`limitReached`）。
+ *
+ * 明细到 DIAGNOSTIC_DETAIL_LIMIT 就停：条目带 file/message 全文，大会话里几百条能把
+ * 「省 token 的摘要」变成第二份原始输出。旗标必须扫**完整数组**——限流条目落在明细
+ * 上限之外时同样要抬旗，否则截断本身会把「这一场被限流」这条事实吃掉。
+ */
+function warningLinesOf(
+  warningsRaw: unknown[],
+  messages: OcrReviewMessages,
+): { lines: string[]; limitReached: boolean } {
+  const lines: string[] = [];
+  let limitReached = false;
+  for (const warn of warningsRaw) {
+    limitReached ||= isRecord(warn) && LIMIT_WARNING_TYPES.has(str(warn["type"]));
+    if (lines.length < DIAGNOSTIC_DETAIL_LIMIT) {
+      lines.push(warningLineOf(warn, messages));
+    }
+  }
+  if (warningsRaw.length > DIAGNOSTIC_DETAIL_LIMIT) {
+    lines.push(
+      format(messages.diagnosticOmitted, {
+        count: String(warningsRaw.length - DIAGNOSTIC_DETAIL_LIMIT),
+      }),
+    );
+  }
+  return { lines, limitReached };
+}
+
 function diagnosticsOf(
   root: Record<string, unknown>,
   messages: OcrReviewMessages,
@@ -511,18 +551,15 @@ function diagnosticsOf(
   coverage: CoverageView | null;
   limitReached: boolean;
 } {
+  const warningsRaw = root["warnings"];
   const warnings: string[] = [];
   let limitReached = false;
-  const warningsRaw = root["warnings"];
-  if (warningsRaw !== undefined) {
-    if (Array.isArray(warningsRaw)) {
-      for (const warn of warningsRaw) {
-        warnings.push(warningLineOf(warn, messages));
-        limitReached ||= isRecord(warn) && LIMIT_WARNING_TYPES.has(str(warn["type"]));
-      }
-    } else {
-      warnings.push(messages.warningUnreadable);
-    }
+  if (Array.isArray(warningsRaw)) {
+    const { lines, limitReached: flagged } = warningLinesOf(warningsRaw, messages);
+    warnings.push(...lines);
+    limitReached = flagged;
+  } else if (warningsRaw !== undefined) {
+    warnings.push(messages.warningUnreadable);
   }
   const toolCalls = toolCallsOf(root["tool_calls"], messages);
   const coverage = coverageOf(root["manifest"], messages);
@@ -622,18 +659,21 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
   };
 }
 
+/** 行号锚点：`start-end` / `start`；未锚定（start_line<=0）回空串，由调用方决定怎么表达。 */
+function lineRangeOf(comment: OcrComment): string {
+  if (comment.startLine <= 0) {
+    return "";
+  }
+  return comment.endLine > comment.startLine
+    ? `${comment.startLine}-${comment.endLine}`
+    : `${comment.startLine}`;
+}
+
 /** 单条评论的紧凑渲染：`path:startLine[-endLine] [severity/category] content`。 */
 export function renderComment(comment: OcrComment, messages: OcrReviewMessages): string {
-  const loc = comment.path || "(path unknown)";
-  let line: string;
-  if (comment.startLine > 0) {
-    line =
-      comment.endLine > comment.startLine
-        ? `${comment.startLine}-${comment.endLine}`
-        : `${comment.startLine}`;
-  } else {
-    line = messages.lineZeroNote;
-  }
+  const loc = comment.path || messages.pathUnknown;
+  const range = lineRangeOf(comment);
+  const line = range === "" ? messages.lineZeroNote : range;
   const tagSev = comment.severity && comment.severity !== "medium" ? comment.severity : "";
   const tags = [tagSev, comment.category].filter(Boolean).join("/");
   return `${loc}:${line}${tags ? ` [${tags}]` : ""}\n    ${comment.content.replaceAll(/\s*\n\s*/gu, " ")}`;
@@ -651,14 +691,14 @@ export interface SummaryPlan {
 /** 默认摘要计划（no-object-as-default-parameter：避免对象字面量作参数默认值）。 */
 const DEFAULT_PLAN: SummaryPlan = { maxComments: 12, includeZeroLine: false };
 
-/** 单条评论的 top 位置（0 行未锚定降级为 :0）。 */
-function locationOf(comment: OcrComment): string {
-  const fallbackPath = comment.path || "(path unknown)";
-  if (comment.startLine <= 0) {
-    return `${fallbackPath}:0`;
-  }
-  const suffix = comment.endLine > comment.startLine ? `-${comment.endLine}` : "";
-  return `${fallbackPath}:${comment.startLine}${suffix}`;
+/** 单条评论的位置标签：`path:start[-end]`，未锚定降级为 `:0`。
+ *
+ *  path 缺失时的占位文本来自 messages（`pathUnknown`），不在这里硬编码：本模块产出的
+ *  人读文本全部经 messages（见文件头「文案」一段），硬编码的英文占位会让中文界面里
+ *  冒出英文，也与 renderComment 里那份副本各说一套。 */
+function locationOf(comment: OcrComment, messages: OcrReviewMessages): string {
+  const range = lineRangeOf(comment);
+  return `${comment.path || messages.pathUnknown}:${range === "" ? "0" : range}`;
 }
 
 /** 摘要产出的可核对口径：展示数与「被丢弃数」同时给出，「干净」必须可证明。 */
@@ -744,7 +784,7 @@ export function summarizeReview(
     droppedCount: parsed.comments.length - ranked.length,
     invalidCommentCount: parsed.droppedComments,
     topComments: ranked.map((comment) => ({
-      location: locationOf(comment),
+      location: locationOf(comment, messages),
       severity: comment.severity,
       category: comment.category,
       content: comment.content,
@@ -759,9 +799,16 @@ export function summarizeReview(
 
 // ── delegate 解析 ───────────────────────────────────────────────────────────
 
-/** preview/rule 文档各自的契约键：一个都不命中即视为「不是该命令的输出」。 */
-const DELEGATE_PREVIEW_KEYS = ["mode", "repository", "total_files", "reviewable_files"] as const;
-const DELEGATE_RULE_KEYS = ["groups", "schema_version"] as const;
+/** preview/rule 文档各自的结构性键：一个都不命中即视为「不是该命令的输出」。
+ *
+ *  只取结构性键（数组字段），不取 `mode` / `schema_version` / `total_files` 这类
+ *  任何回执都可能带的通用键：`{"schema_version":"1.0","error":"auth failed"}` 命中
+ *  通用键就会过闸，被报成「0 个文件可审 / 0 条规则」——那是假阴性的范围结论，比解析
+ *  失败更难察觉。两侧由 CLI 的结构体标签保证必带（cmd/opencodereview/delegate_cmd.go：
+ *  `ReviewableFiles []… \`json:"reviewable_files"\`` 与 `Groups []… \`json:"groups"\``，
+ *  都没有 omitempty，空清单也发 []）。 */
+const DELEGATE_PREVIEW_KEYS = ["reviewable_files"] as const;
+const DELEGATE_RULE_KEYS = ["groups"] as const;
 
 function hitsContract(root: Record<string, unknown>, keys: readonly string[]): boolean {
   return keys.some((key) => root[key] !== undefined);
@@ -804,10 +851,7 @@ export interface ParsedDelegatePreview {
  * 但一条不剩时不能继续以 ok:true 的形态报「0 个文件可审」——那不是「没有可审的
  * 文件」，是半截产出，模型与用户都会拿它当范围结论。
  */
-function toDelegateFiles(raw: unknown): DelegateFile[] | null {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
+function toDelegateFiles(raw: unknown[]): DelegateFile[] | null {
   const files = raw
     .map((entry) => {
       if (!isRecord(entry)) {
@@ -835,10 +879,7 @@ function toDelegateFiles(raw: unknown): DelegateFile[] | null {
  *  读 `reason` 是照自己脑补的形状写的：真回执里那个键不存在，`str()` 把缺失读成空串，
  *  于是「被排除文件及原因」永远只有文件没有原因——schema 与工具描述都在承诺后者。
  *  `reason` 作回退保留：形如 `{"reason":…}` 的旧形态/别家产物仍读得出来。 */
-function toExcludedFiles(raw: unknown): { path: string; reason: string }[] | null {
-  if (!Array.isArray(raw)) {
-    return [];
-  }
+function toExcludedFiles(raw: unknown[]): { path: string; reason: string }[] | null {
   const files = raw
     .map((entry) => {
       if (!isRecord(entry)) {
@@ -876,14 +917,17 @@ export function parseDelegatePreview(text: string): ParsedDelegatePreview {
   // 于是 {"reviewable_files": null} 这种上游半截产出被当成「0 个文件可审」——
   // 假阴性的范围结论，比解析失败更难察觉。同层的 review 解析对 comments 非数组是
   // 硬失败，两条口径必须一致。
-  for (const key of ["reviewable_files", "excluded_files"]) {
-    const value = root[key];
-    if (value !== undefined && !Array.isArray(value)) {
-      return delegatePreviewFailure();
-    }
+  // reviewable_files 是契约里的结构性键，走到这里它一定存在；类型不对同样判失败。
+  const reviewableRaw = root["reviewable_files"];
+  if (!Array.isArray(reviewableRaw)) {
+    return delegatePreviewFailure();
   }
-  const reviewable = toDelegateFiles(root["reviewable_files"]);
-  const excluded = toExcludedFiles(root["excluded_files"]);
+  const excludedRaw = root["excluded_files"];
+  if (excludedRaw !== undefined && !Array.isArray(excludedRaw)) {
+    return delegatePreviewFailure();
+  }
+  const reviewable = toDelegateFiles(reviewableRaw);
+  const excluded = toExcludedFiles(excludedRaw ?? []);
   if (reviewable === null || excluded === null) {
     return delegatePreviewFailure();
   }
@@ -918,19 +962,21 @@ export function parseDelegateRules(text: string): { ok: boolean; groups: RuleGro
     return { ok: false, groups: [] };
   }
   const root = doc;
-  // 同 preview：`groups`/`schema_version` 都不命中就不是 rule 文档，报 ok:false 而不是
-  // 「0 个规则分组」。
+  // 同 preview：结构性键 groups 不命中就不是 rule 文档，报 ok:false 而不是
+  // 「0 个规则分组」。`schema_version` 不算数——它出现在任何回执里（含错误对象），
+  // 拿它过闸会把 {`schema_version`,"error"} 报成「0 条规则」。
   if (!hitsContract(root, DELEGATE_RULE_KEYS)) {
     return { ok: false, groups: [] };
   }
   // 与 preview 同款类型闸：groups 在但不是数组（null / 字符串 / 对象）⇒ 判失败，
   // 否则报出去的是「0 个规则分组」这种看不出异常的结论。
-  if (root["groups"] !== undefined && !Array.isArray(root["groups"])) {
+  const groupsValue = root["groups"];
+  if (!Array.isArray(groupsValue)) {
     return { ok: false, groups: [] };
   }
   // 组内 files 的形状同样要闸：files 缺失或非数组时该组会被 files.length > 0 过滤掉，
   // 于是一组规则凭空消失而 ok 仍是 true。契约破损必须显式失败。
-  const groupsRaw: unknown[] = Array.isArray(root["groups"]) ? root["groups"] : [];
+  const groupsRaw: unknown[] = groupsValue;
   const hasBadGroupShape = groupsRaw.some(
     (groupRaw) =>
       isRecord(groupRaw) && groupRaw["files"] !== undefined && !Array.isArray(groupRaw["files"]),
@@ -1096,13 +1142,13 @@ function compareSideOf(raw: unknown): CompareSide {
   };
 }
 
-function compareCommentOf(raw: unknown): CompareComment | null {
+function compareCommentOf(raw: unknown, messages: OcrReviewMessages): CompareComment | null {
   const comment = commentOf(raw);
   if (comment === null) {
     return null;
   }
   return {
-    location: locationOf(comment),
+    location: locationOf(comment, messages),
     severity: comment.severity,
     category: comment.category,
     content: comment.content,
@@ -1110,18 +1156,24 @@ function compareCommentOf(raw: unknown): CompareComment | null {
 }
 
 /** 一个 compare 桶：缺失/非数组判整个 compare 失败，部分条目坏只丢该条并计入 dropped。 */
-function compareBucketOf(raw: unknown): { items: CompareComment[]; total: number } | null {
+function compareBucketOf(
+  raw: unknown,
+  messages: OcrReviewMessages,
+): { items: CompareComment[]; total: number } | null {
   if (!Array.isArray(raw)) {
     return null;
   }
   const items = raw
-    .map((entry) => compareCommentOf(entry))
+    .map((entry) => compareCommentOf(entry, messages))
     .filter((entry): entry is CompareComment => entry !== null);
   return { items: items.slice(0, COMPARE_BUCKET_LIMIT), total: raw.length };
 }
 
 /** 解析 `ocr session compare --json`：四个桶与两侧会话标识。 */
-export function parseSessionCompare(text: string): { ok: boolean; view: CompareView | null } {
+export function parseSessionCompare(
+  text: string,
+  messages: OcrReviewMessages,
+): { ok: boolean; view: CompareView | null } {
   let doc: unknown;
   try {
     doc = JSON.parse(text);
@@ -1131,10 +1183,10 @@ export function parseSessionCompare(text: string): { ok: boolean; view: CompareV
   if (!isRecord(doc)) {
     return { ok: false, view: null };
   }
-  const newBucket = compareBucketOf(doc["new"]);
-  const persisting = compareBucketOf(doc["persisting"]);
-  const resolved = compareBucketOf(doc["resolved"]);
-  const notReviewed = compareBucketOf(doc["not_reviewed"]);
+  const newBucket = compareBucketOf(doc["new"], messages);
+  const persisting = compareBucketOf(doc["persisting"], messages);
+  const resolved = compareBucketOf(doc["resolved"], messages);
+  const notReviewed = compareBucketOf(doc["not_reviewed"], messages);
   if (newBucket === null || persisting === null || resolved === null || notReviewed === null) {
     return { ok: false, view: null };
   }

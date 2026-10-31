@@ -14,5 +14,7 @@
   // （DOM lib、types:[]），host 程序没有 DOM，把它收进来会在 document 一类取用上报
   // TS2304。include 的 test/**/*.ts 若不排除会把该目录抢进 host 程序。目录约定两端
   // 各写一次，新增 client 侧用例放进该目录即自动归位，无需改任何清单。
+  // exclude 只过滤入口：host 用例 import 的 src 模块仍会经依赖图进入本程序，所以
+  // src/remote.ts、src/ui-messages.ts 这类被 host 侧测试直接引用的模块必须保持 DOM-free。
   "exclude": ["test/client"]
 }

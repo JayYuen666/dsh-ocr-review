@@ -95,7 +95,8 @@ const REVIEW_SUMMARY_SCHEMA = {
             "elapsed",
           ],
           properties: {
-            // num() 收「数字字符串」，可能落成小数 ⇒ 用 number 不用 integer。
+            // num() 经 nonNegativeInt 收口，返回值恒为非负安全整数；这里仍写 number 是
+            // 刻意放宽，解析层将来若调整边界时输出契约不必跟着改。同款字段同理。
             filesReviewed: { type: "number" },
             comments: { type: "number" },
             totalTokens: { type: "number" },
@@ -251,16 +252,25 @@ const REVIEW_SUMMARY_SCHEMA = {
   },
 } satisfies JsonSchemaNode;
 
+/** preview 文件条目里两个输出共有的四字段（review/scan 的预览与 delegate preview
+ *  的文件清单都从这里取，避免两份 additionalProperties:false 各自演进后一边通过、
+ *  另一边被守卫拒绝）。 */
+const PREVIEW_FILE_FIELDS = {
+  path: { type: "string" },
+  status: { type: "string" },
+  insertions: { type: "number" },
+  deletions: { type: "number" },
+} satisfies Record<string, JsonSchemaNode>;
+
+const PREVIEW_FILE_REQUIRED = ["path", "status", "insertions", "deletions"] as const;
+
 /** review/scan `preview:true` 的文件清单对象（lib/parse.ts 的 PreviewView）。 */
 const PREVIEW_FILE_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["path", "status", "insertions", "deletions", "willReview", "excludeReason"],
+  required: [...PREVIEW_FILE_REQUIRED, "willReview", "excludeReason"],
   properties: {
-    path: { type: "string" },
-    status: { type: "string" },
-    insertions: { type: "number" },
-    deletions: { type: "number" },
+    ...PREVIEW_FILE_FIELDS,
     willReview: { type: "boolean" },
     excludeReason: { type: "string" },
   },
@@ -327,7 +337,7 @@ export const PREVIEW_OUTPUT_SCHEMA = {
         // OCR 端 merge_base 带 omitempty（delegate_cmd.go:263）：缺席落 null。
         mergeBase: NULLABLE_STRING,
         reviewableCount: { type: "integer" },
-        // 计数来自 num()（收「数字字符串」）⇒ 用 number 不用 integer。
+        // num() 经 nonNegativeInt 收口后恒为整数；写 number 是与 summary 同一条放宽口径。
         insertions: { type: "number" },
         deletions: { type: "number" },
         reviewableFiles: {
@@ -335,13 +345,8 @@ export const PREVIEW_OUTPUT_SCHEMA = {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["path", "status", "insertions", "deletions"],
-            properties: {
-              path: { type: "string" },
-              status: { type: "string" },
-              insertions: { type: "number" },
-              deletions: { type: "number" },
-            },
+            required: [...PREVIEW_FILE_REQUIRED],
+            properties: { ...PREVIEW_FILE_FIELDS },
           },
         },
         excludedFiles: {

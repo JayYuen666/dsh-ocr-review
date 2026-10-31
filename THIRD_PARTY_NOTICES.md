@@ -25,6 +25,32 @@
 `currentColor` 换成本包插件图标配色（`#658EFF` 主色 + `#54ECE7` 底衬），并把外层 `<g>` 与
 画布尺寸对齐本族插件统一的 `36×36` / `viewBox 0 0 24 24` 规格。
 
+`icon.svg` 随包分发，没有独立的 npm 包承载上游许可文本，因此在下文完整保留 MIT 正文：
+
+```text
+MIT License
+
+Copyright (c) Paweł Kuna
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## 机制与接口来源：open-code-review（ocr CLI）
 
 - 上游项目：`open-code-review`
@@ -56,7 +82,8 @@
 | 依赖 | 版本 | 许可 | 引入方 |
 | --- | --- | --- | --- |
 | `@alibaba-group/open-code-review` | 1.13.3（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
-| `js-yaml` | ^5.4.3 | MIT | `scripts/get-cred.mjs` 读 dsh 托管凭据文档 |
+| `js-yaml` | 5.4.3（精确钉版） | MIT | `scripts/get-cred.mjs` 读 dsh 托管凭据文档 |
+| `@jayyuen66/dsh-plugin-shared` | catalog（伞根 0.2.2） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共面（值导入，构建时外部化） |
 | `zod` | catalog（伞根 4.6.7） | MIT | 设置卡 `src/remote.ts` 的 strict codec 形状校验；client 产物由宿主 `PLATFORM_MODULES` 提供 |
 
 dsh 宿主侧的包分两档：产物里以**值**导入、且列在 `peerDependencies` 的五枚（`@deepseek-ai/schemastery` 宿主 fork、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`）由宿主在场提供、不随本包分发；其余 `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 只在 `devDependencies` 里，用途是把类型绑到官方声明上（type-only 绑定），产物里不留说明符。本包按 dsh `0.2.2-alpha.2` 逐条核对过（同版的 cordis `4.0.6-alpha.1` 与 schemastery `3.18.6-alpha.1` fork 一并核对）。

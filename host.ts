@@ -182,7 +182,7 @@ import {
   ocrHomeOverride,
 } from "./lib/ocr-config.ts";
 import type { EndpointVerify } from "./lib/ocr-config.ts";
-import { OCR_REMOTE_NAMESPACE } from "./lib/remote-shape.ts";
+import { OCR_REFUSE_STATUS, OCR_REMOTE_NAMESPACE } from "./lib/remote-shape.ts";
 import type {
   OcrAuthReply,
   OcrChatGptReply,
@@ -949,10 +949,20 @@ async function startBackground(
     sandboxPolicy: ocrSandboxPolicy(job.workdir),
   });
   const proc = await host.shell.execute(spec);
-  // 剪枝先于作业**登记**（进程已在上面起来）：注册表的容量闸只管"活的"，已落定的
-  // 旧记录只有我们 remove 才会消失。
-  pruneOcrJobHistory(registry, job.owner, ledger);
-  const messages = localeMessages(host);
+  // 进程已经起来 ⇒ 下面任何一步抛错都必须先把进程收掉，否则留下的是一条谁也停不掉、
+  // 谁也看不见的 OCR 在烧 token。剪枝与取文案都在注册**之前**，各自都可能抛（注册表
+  // 被换掉、locale 服务读失败），所以这一段自己兜住再重抛，而不是指望外层 catch——
+  // 外层 catch 管的是「登记被拒」，那时进程同样已经起来。
+  let messages: OcrReviewMessages;
+  try {
+    // 剪枝先于作业**登记**（进程已在上面起来）：注册表的容量闸只管"活的"，已落定的
+    // 旧记录只有我们 remove 才会消失。
+    pruneOcrJobHistory(registry, job.owner, ledger);
+    messages = localeMessages(host);
+  } catch (error) {
+    killProc(proc);
+    throw error;
+  }
   let jobId: JobId;
   try {
     jobId = startUnderOcrController(registry, {
@@ -1607,7 +1617,8 @@ async function runLlmTest(host: HostCtx, config: Config): Promise<{ ok: boolean;
 }
 
 /** effort 入参闸：undefined/null → 设置卡默认（auto 表示跟随 OCR 配置）；字符串 →
- *  白名单钳制（未知值回落 auto，与 --format 同一纪律）；其余类型抛错——静默回落会改变审查深度。 */
+ *  白名单钳制（未知值按「未指定」处理，回落设置卡值，与 undefined 同一条路）；其余类型抛错
+ *  ——静默回落会改变审查深度，所以类型错误必须当场说，而认不出的字符串只能当没指定。 */
 function effortOf(
   value: unknown,
   config: Config,
@@ -1621,7 +1632,7 @@ function effortOf(
       format(messages.mustBeString, { name: "effort", received: describeValue(value) }),
     );
   }
-  return clampEffort(value, "medium");
+  return clampEffort(value, readEffort(config));
 }
 
 /**
@@ -1782,7 +1793,9 @@ async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string>
       stdoutMaxBytes: 4096,
     });
     const top = exitCode === 0 ? output.trim() : "";
-    if (top.startsWith("/")) {
+    // 只用平台自己的绝对路径判据：Windows 上 git 交回的是 C:/…，POSIX 专用的
+    // startsWith("/") 会把它当相对路径，于是 review 与 ocr_session 的会话根分叉。
+    if (path.isAbsolute(top)) {
       return top;
     }
   } catch {
@@ -1813,7 +1826,7 @@ async function selectReply(
 ): Promise<OcrSelectReply> {
   const msgs = deps.messages();
   if (provider === "" || model === "") {
-    return { ok: false, error: msgs.providerModelRequired, status: 400 };
+    return { ok: false, error: msgs.providerModelRequired, status: OCR_REFUSE_STATUS.invalid };
   }
   try {
     const language = readLanguage(deps.config);
@@ -1829,7 +1842,7 @@ async function selectReply(
     }
     return { ok: true, applied, llmTest };
   } catch (error) {
-    return { ok: false, error: errorText(error), status: 400 };
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.invalid };
   }
 }
 
@@ -1875,7 +1888,7 @@ async function probeReply(deps: ProbeEndpointDeps): Promise<OcrProbeReply> {
     };
   } catch (error) {
     // shell 服务本身抛错（不是非零退出）也要回可读回执，理由同 migrate。
-    return { ok: false, error: errorText(error), status: 400 };
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.invalid };
   }
 }
 
@@ -1927,7 +1940,7 @@ async function providersReply(deps: ProvidersEndpointDeps): Promise<Record<strin
   } catch (error) {
     // 装配期之后的意外（设置项里的路径不合法、宿主服务抛错）也要回可读回执：
     // 卡片读的是 error 文本，让它卡在「加载 providers…」比让它报错更难排查。
-    return { ok: false, error: errorText(error), status: 500 };
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.internal };
   }
 }
 
@@ -1940,7 +1953,7 @@ async function migrateReply(deps: SelectEndpointDeps): Promise<OcrMigrateReply> 
   } catch (error) {
     // 坏 config.json / settings 读不到都会抛（写侧 fail-loud），必须回可读错误：
     // 卡片要能读出「为什么没迁移」。
-    return { ok: false, error: errorText(error), status: 400 };
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.invalid };
   }
 }
 
@@ -1950,7 +1963,7 @@ async function testReply(deps: SelectEndpointDeps): Promise<OcrTestReply> {
     const llmTest = await runLlmTest(deps.host, deps.config);
     return { ok: llmTest.ok, output: llmTest.output };
   } catch (error) {
-    return { ok: false, error: errorText(error), status: 400 };
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.invalid };
   }
 }
 
@@ -1959,26 +1972,50 @@ async function mcpReply(deps: SelectEndpointDeps): Promise<OcrMcpReply> {
   try {
     const result = await readMcpServers(pluginPaths(deps.config, msgs).ocrConfigJson, msgs);
     return result.ok
-      ? { ok: true, json: result.json }
-      : { ok: false, error: result.error, status: 400 };
+      ? { ok: true, json: result.json, revision: result.revision }
+      : { ok: false, error: result.error, status: OCR_REFUSE_STATUS.invalid };
   } catch (error) {
-    return { ok: false, error: errorText(error), status: 500 };
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.internal };
   }
 }
 
-async function saveMcpReply(json: unknown, deps: SelectEndpointDeps): Promise<OcrMcpSaveReply> {
+/** 保存回执：`request` 是整笔入参（`json` 与可选的基线 `revision`），两者都要过形态判定。 */
+async function saveMcpReply(request: unknown, deps: SelectEndpointDeps): Promise<OcrMcpSaveReply> {
   const msgs = deps.messages();
+  // 非对象请求按「没有这两位」处理：下面按字段逐个报可读理由，比笼统一句「请求体不是对象」
+  // 更能定位是哪一个位写错了。
+  const record = isRecord(request) ? request : {};
+  const { json, revision } = record;
   if (typeof json !== "string") {
     return {
       ok: false,
       error: format(msgs.mustBeString, { name: "json", received: describeValue(json) }),
-      status: 400,
+      status: OCR_REFUSE_STATUS.invalid,
     };
   }
-  const result = await saveMcpServers(pluginPaths(deps.config, msgs).ocrConfigJson, json, msgs);
-  return result.ok
-    ? { ok: true, count: result.count }
-    : { ok: false, error: result.error, status: 400 };
+  if (revision !== undefined && typeof revision !== "string") {
+    return {
+      ok: false,
+      error: format(msgs.mustBeString, { name: "revision", received: describeValue(revision) }),
+      status: OCR_REFUSE_STATUS.invalid,
+    };
+  }
+  try {
+    const result = await saveMcpServers(
+      pluginPaths(deps.config, msgs).ocrConfigJson,
+      json,
+      msgs,
+      revision,
+    );
+    return result.ok
+      ? { ok: true, count: result.count, revision: result.revision }
+      : { ok: false, error: result.error, status: OCR_REFUSE_STATUS.invalid };
+  } catch (error) {
+    // 设置项里的路径不合形态时 pluginPaths 会抛：这是**服务侧**故障，不是请求体错
+    // （400 已在上面按 json 形态说过）。与 mcp / auth 两条口径一致地回可读回执，
+    // 而不是让 Remote 直接 500——卡片显示一句人话比裸栈有用。
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.internal };
+  }
 }
 
 async function authReply(deps: SelectEndpointDeps): Promise<OcrAuthReply> {
@@ -1995,7 +2032,7 @@ async function authReply(deps: SelectEndpointDeps): Promise<OcrAuthReply> {
     );
     return { ok: exitCode === 0, output, loginCommand: CHATGPT_LOGIN_COMMAND };
   } catch (error) {
-    return { ok: false, error: errorText(error), status: 400 };
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.invalid };
   }
 }
 
@@ -2005,13 +2042,22 @@ async function chatGptReply(model: unknown, deps: SelectEndpointDeps): Promise<O
     return {
       ok: false,
       error: format(msgs.mustBeString, { name: "model", received: describeValue(model) }),
-      status: 400,
+      status: OCR_REFUSE_STATUS.invalid,
     };
   }
-  const result = await applyChatGptModel(pluginPaths(deps.config, msgs).ocrConfigJson, model, msgs);
-  return result.ok
-    ? { ok: true, model: model.trim() }
-    : { ok: false, error: result.error, status: 400 };
+  try {
+    const result = await applyChatGptModel(
+      pluginPaths(deps.config, msgs).ocrConfigJson,
+      model,
+      msgs,
+    );
+    return result.ok
+      ? { ok: true, model: model.trim() }
+      : { ok: false, error: result.error, status: OCR_REFUSE_STATUS.invalid };
+  } catch (error) {
+    // 同 saveMcp：坏设置项导致的抛错属服务侧，回 500 可读回执而不是让 Remote reject。
+    return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.internal };
+  }
 }
 
 /** 卡片读面（官方 Typert Remote）的全部依赖。 */
@@ -2080,10 +2126,9 @@ export class OcrReviewRemoteService extends TypertRemoteService {
     return mcpReply(this.deps);
   }
 
-  /** 校验并写入 `mcp_servers`；其他配置原样保留。 */
+  /** 校验并写入 `mcp_servers`；其他配置原样保留。`revision` 为读侧基线，不一致即整笔拒绝。 */
   public async saveMcp(request: OcrMcpSaveRequest): Promise<OcrMcpSaveReply> {
-    const json = isRecord(request) ? request.json : undefined;
-    return saveMcpReply(json, this.deps);
+    return saveMcpReply(request, this.deps);
   }
 
   /** 只读查询 ChatGPT 登录态；登录命令原样带回给卡片显示。 */
@@ -2742,7 +2787,7 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
           tuningOf(config),
           exec.signal,
         );
-        const parsed = parseSessionCompare(stdout.text);
+        const parsed = parseSessionCompare(stdout.text, runMsgs);
         if (parsed.ok) {
           return { ...parsed.view, hint: runMsgs.sessionCompareHint };
         }
@@ -2920,11 +2965,17 @@ async function probeEndpointAtApply(
   config: Config,
   sink: { value: EndpointVerify | null },
 ): Promise<void> {
-  // runCollect 自身「只收集不抛错」：命令跑不动时它把失败折进 exitCode/output，
-  // 故这里没有可抛路径，也就不需要 catch（本仓覆盖率 100%，写一条走不到的分支
-  // 只会逼出一条假用例）。
-  const result = await runLlmTest(host, config);
-  sink.value = endpointVerifyOf(result);
+  try {
+    // runCollect 只把「命令跑不动」折进 exitCode/output，**它自己仍会抛**：
+    // host.shell.resolve/execute/result 任一步的基础设施故障都是 reject。这一臂是
+    // fire-and-forget（apply 里不 await），漏出去就是未处理 rejection——Node ≥22 默认
+    // 终止宿主进程，而一次自检失败根本不值得杀掉整个 dsh。
+    const result = await runLlmTest(host, config);
+    sink.value = endpointVerifyOf(result);
+  } catch {
+    // 结论留空 = 卡片显示「未检测」：人按「检测」会走同一条路径现取，这里没有可报的
+    // 第二个出口（插件侧没有日志面），静默失败也不会把失败写成成功。
+  }
 }
 
 /**
@@ -2943,8 +2994,13 @@ async function probeVersionAtApply(
   config: Config,
   sink: { value: string | null },
 ): Promise<void> {
-  const probe = await runVersionProbe(host, config, localeMessages(host));
-  sink.value = probe.version;
+  try {
+    const probe = await runVersionProbe(host, config, localeMessages(host));
+    sink.value = probe.version;
+  } catch {
+    // 同端点自检：localeMessages 与 shell 基础设施都可能抛，fire-and-forget 不许把
+    // 未处理 rejection 留给 Node。版本留空 = 卡片显示「未实测」，检测按钮可现取。
+  }
 }
 
 export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe): void {

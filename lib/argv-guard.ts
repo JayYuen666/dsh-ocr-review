@@ -48,8 +48,14 @@ export function shq(value: string): string {
  * 归一（posix.normalize + 去尾随斜杠）的目的：同一个仓库只允许一种字符串形态到达下游。
  * `/repo//sub`、`/repo/./a`、`/repo/` 与 `/repo/sub` 是同一目录的几种写法，而会话目录
  * 等按路径派生的键会把这些写法各存一份；`..` 段按词法折叠成实际目标（`/repo/../..`
- * 落到 `/`）——折叠是 normalize 对绝对路径的既有行为，不存在「解析后仍含 `..`」的
- * 形态，所以这里没有可写的拒绝分支。
+ * 落到 `/`）——折叠是 normalize 对绝对路径的既有行为，不存在「解析后仍含 ..」的形态。
+ *
+ * 但**折叠到文件系统根必须拒绝**，这不是防御性噪音：/repo/../.. 与 / 都归一成 /，而下游
+ * resolveRepoFile 的边界判据是 path.relative(rootReal, real) 不以 .. 开头——根为 / 时它对
+ * /etc/passwd 给出 etc/passwd，判据恒成立，于是 --rule /etc/passwd 会被当成仓内文件读进
+ * OCR 并送给 LLM（子进程跑在 danger-full-access 下）。所以归一后落在根上的输入一律按
+ * 「repo 给得太宽」拒绝；win32 用 path.win32.parse 解出的根与归一结果比较，覆盖盘符根
+ * 与 UNC 共享根（两者的根形态各不止一种，不能只比字面量）。
  */
 export function assertAbsoluteRoot(root: unknown, messages: OcrReviewMessages): string {
   const trimmed = typeof root === "string" ? root.trim() : "";
@@ -64,12 +70,23 @@ export function assertAbsoluteRoot(root: unknown, messages: OcrReviewMessages): 
   // 当成已校验的根交给下游，所以不跨平台放宽。
   if (trimmed.startsWith("/")) {
     const normalized = path.posix.normalize(trimmed);
-    return normalized.length > 1 ? normalized.replace(TRAILING_POSIX_SLASHES, "") : normalized;
+    const collapsed =
+      normalized.length > 1 ? normalized.replace(TRAILING_POSIX_SLASHES, "") : normalized;
+    if (collapsed === "/") {
+      throw new Error(format(messages.repoMustNotBeFilesystemRoot, { root: trimmed }));
+    }
+    return collapsed;
   }
   if (process.platform === "win32" && path.win32.isAbsolute(trimmed)) {
     const normalized = path.win32.normalize(trimmed);
     // 盘符根 `C:\` 保留反斜杠；其余形态收成无尾随分隔符的目录。
-    return normalized.length > 3 ? normalized.replace(TRAILING_PATH_SEPARATORS, "") : normalized;
+    const collapsed =
+      normalized.length > 3 ? normalized.replace(TRAILING_PATH_SEPARATORS, "") : normalized;
+    // 盘符根与 UNC 共享根：比「解出来的根」而不是字面量，两者形态各不止一种。
+    if (path.win32.parse(collapsed).root === collapsed) {
+      throw new Error(format(messages.repoMustNotBeFilesystemRoot, { root: trimmed }));
+    }
+    return collapsed;
   }
   throw new Error(format(messages.repoMustBeAbsolute, { root: trimmed }));
 }
@@ -122,8 +139,17 @@ export function resolveRepoFile(
   if (path.isAbsolute(rel) || rel === ".." || rel.startsWith(`..${path.sep}`)) {
     throw new Error(format(messages.repoFileOutside, { name, path: text }));
   }
-  const stat = statSync(real);
-  if (!stat.isFile()) {
+  // 两次路径解析之间文件可能被删掉/换掉（TOCTOU）：realpath 已经成功、stat 却拿到 ENOENT
+  // 时，裸 statSync 抛的是带绝对路径与 errno 的 fs 错误——用户看到的既不是双语文案，也
+  // 不说明「哪个参数坏了」。用 throwIfNoEntry: false 把它折成同一个「必须是普通文件」
+  // 拒绝，既不起一条测不到的 catch 分支（本包覆盖率是四项 100%，写进去就是一条永远
+  // 不执行的死语句），也把文案留在双语表里。
+  //
+  // 这里仍用 stat（而不是 lstat）：real 已由 realpath 解到最终目标，stat 跟随的那一层软链
+  // 在 real 里不存在；真正的「最后一段被换成软链」窗口在两次系统调用之间，本函数之后 OCR
+  // 子进程还会按 real 重新打开文件，换 lstat 只能把窗口挪个位置、关不掉（见 REPORT 里 #69）。
+  const stat = statSync(real, { throwIfNoEntry: false });
+  if (stat === undefined || !stat.isFile()) {
     throw new Error(format(messages.repoFileNotFile, { name, path: text }));
   }
   const { size } = stat;

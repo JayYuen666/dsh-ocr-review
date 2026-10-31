@@ -56,19 +56,53 @@ const SCHEMA_TYPES: ReadonlySet<string> = new Set([
   "null",
 ]);
 
-/**
- * schema 里的关键字必须全部落在守卫支持的子集内（递归查 oneOf/properties/items），
- * 关键字的**取值形态**也必须合法。
- *
- * 违例抛错而不是当违规值报：schema 是插件自己的代码，错的是代码不是模型的数据。
- *
- * 为什么取值形态也要查：只查键名的话，`type: ["string","null"]` 这种官方子集不认的
- * 写法会让 `scalarMismatch` 走进最后那支 `value !== null`——于是 `null` 放行、字符串
- * 反而判违规，守卫给出的结论与它自己声称支持的子集无关。`enum` 写成字符串同理：
- * 走到 `enum.includes` 时成了子串匹配，非字符串值还会抛 `map is not a function`。
- */
+/** schema 形态错误的统一出口：错的是插件自己的 schema，不是模型交回的数据。 */
 function malformed(toolName: string, detail: string, messages: OcrReviewMessages): Error {
   return new Error(format(messages.resultSchemaMalformed, { tool: toolName, detail }));
+}
+
+/** 容器关键字的取值形态：`properties` 是字段表、`required` 是字段名数组、
+ *  `additionalProperties` 是布尔或子 schema、`items` 是单个子 schema。
+ *
+ *  形态不对时走查器会**静默丢掉整条约束**（数组 properties 把下标当字段名、字符串
+ *  required 逐字符迭代、对象 additionalProperties 与 `=== false` 比较恒假），
+ *  与 `type`/`enum` 写错是同一类「守卫假装支持」的缺陷，所以同样当场抛。
+ *  容器关键字也必须显式声明 `type`：走查按 `type` 分派，缺了它这些约束从不生效。 */
+function assertContainerShapes(
+  schema: JsonSchemaNode,
+  toolName: string,
+  messages: OcrReviewMessages,
+): void {
+  const { properties, required, additionalProperties, items, type } = schema;
+  const containers = [properties, required, additionalProperties, items].filter(
+    (value) => value !== undefined,
+  ).length;
+  if (containers > 0 && type === undefined) {
+    throw malformed(
+      toolName,
+      "properties/required/additionalProperties/items 必须同时声明 type",
+      messages,
+    );
+  }
+  if (properties !== undefined && !isRecord(properties)) {
+    throw malformed(toolName, "properties 必须是字段名的对象", messages);
+  }
+  if (
+    required !== undefined &&
+    (!Array.isArray(required) || required.some((key) => typeof key !== "string"))
+  ) {
+    throw malformed(toolName, "required 必须是字段名数组", messages);
+  }
+  if (
+    additionalProperties !== undefined &&
+    typeof additionalProperties !== "boolean" &&
+    !isRecord(additionalProperties)
+  ) {
+    throw malformed(toolName, "additionalProperties 必须是布尔或子 schema", messages);
+  }
+  if (items !== undefined && !isRecord(items)) {
+    throw malformed(toolName, "items 必须是单个子 schema（不支持元组数组）", messages);
+  }
 }
 
 /** 关键字白名单：守卫只认官方子集，多一个都算插件自己的 schema 写错了。 */
@@ -110,15 +144,43 @@ function assertOneOfShape(oneOf: unknown, toolName: string, messages: OcrReviewM
   throw malformed(toolName, "oneOf 必须是至少两项的数组", messages);
 }
 
-/** `enum` 的取值形态：非空数组。写成字符串时 `enum.includes` 会退化成子串匹配。 */
+/** JSON 标量（null / 布尔 / 有限数字 / 字符串）：const/enum 的比较只在标量上成立。 */
+function isJsonScalar(value: unknown): boolean {
+  return (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "string" ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+/** `enum` 的取值形态：非空数组，且成员必须是 JSON 标量。
+ *  非标量成员在 `includes` 下按引用比较，deep-equal 也会失配；本守卫的子集只认标量。 */
 function assertEnumShape(enumValues: unknown, toolName: string, messages: OcrReviewMessages): void {
   if (enumValues === undefined) {
     return;
   }
-  if (Array.isArray(enumValues) && enumValues.length > 0) {
+  if (
+    Array.isArray(enumValues) &&
+    enumValues.length > 0 &&
+    enumValues.every((entry) => isJsonScalar(entry))
+  ) {
     return;
   }
-  throw malformed(toolName, "enum 必须是非空数组", messages);
+  throw malformed(toolName, "enum 必须是非空的 JSON 标量数组", messages);
+}
+
+/** `const` 的取值形态：JSON 标量。对象/数组型 const 只能用引用比较，
+ *  而值侧总是新对象——deep-equal 也在本守卫的子集之外。 */
+function assertConstShape(
+  schema: JsonSchemaNode,
+  toolName: string,
+  messages: OcrReviewMessages,
+): void {
+  const { const: constValue } = schema;
+  if (constValue !== undefined && !isJsonScalar(constValue)) {
+    throw malformed(toolName, "const 必须是 JSON 标量（本守卫不支持对象/数组比较）", messages);
+  }
 }
 
 /**
@@ -138,22 +200,24 @@ function assertGuardable(
   messages: OcrReviewMessages,
 ): void {
   assertKnownKeywords(schema, toolName, messages);
+  assertContainerShapes(schema, toolName, messages);
   const { type, oneOf, enum: enumValues } = schema;
-  if (type !== undefined && oneOf !== undefined) {
-    throw malformed(toolName, "type 与 oneOf 不能同时声明", messages);
-  }
   assertTypeShape(type, toolName, messages);
   assertOneOfShape(oneOf, toolName, messages);
   assertEnumShape(enumValues, toolName, messages);
+  assertConstShape(schema, toolName, messages);
   for (const branch of Array.isArray(oneOf) ? oneOf : []) {
     assertGuardable(branch, toolName, messages);
   }
   for (const property of Object.values(schema.properties ?? {})) {
     assertGuardable(property, toolName, messages);
   }
-  const { items } = schema;
+  const { items, additionalProperties } = schema;
   if (items !== undefined) {
     assertGuardable(items, toolName, messages);
+  }
+  if (additionalProperties !== undefined && typeof additionalProperties !== "boolean") {
+    assertGuardable(additionalProperties, toolName, messages);
   }
 }
 
@@ -178,8 +242,35 @@ function scalarMismatch(
   return value !== null;
 }
 
+/** 违规收集器：`limit` 是保留条数（0 只计数、不留文案，供 oneOf 试跑用），
+ *  `total` 是全量违规数——省略条数由它减保留条数得出。 */
+interface ViolationSink {
+  readonly messages: string[];
+  readonly limit: number;
+  total: number;
+}
+
+/** 违规清单的保留上限与最终文本上限：失败消息会被宿主持久化进会话日志，两者都限量。 */
+const MAX_VIOLATIONS_LISTED = 20;
+const MAX_VIOLATION_CHARS = 2000;
+
+function recordViolation(sink: ViolationSink, message: string): void {
+  sink.total += 1;
+  if (sink.messages.length < sink.limit) {
+    sink.messages.push(message);
+  }
+}
+
 /** 递归走查的函数面（object/array 分支经它回到顶层走查器，避免相互定义序问题）。 */
-type Walker = (schema: JsonSchemaNode, value: unknown, path: string) => string[];
+type Walker = (schema: JsonSchemaNode, value: unknown, path: string, sink: ViolationSink) => void;
+
+const MAX_FIELDS_LISTED = 10;
+
+/** 字段名单同样限量：一个多余字段值可以声明任意多键，整份名单不该无界地进失败消息。 */
+function listedFields(keys: readonly string[]): string {
+  const omitted = keys.length - MAX_FIELDS_LISTED;
+  return keys.slice(0, MAX_FIELDS_LISTED).join(", ") + (omitted > 0 ? ` …(+${omitted})` : "");
+}
 
 /** object 分支：isRecord → additionalProperties:false 的多余键 → required（缺键与
  *  「键在但值是 undefined」同判，与官方一致）→ 逐声明字段递归。 */
@@ -187,10 +278,12 @@ function objectViolations(
   schema: JsonSchemaNode,
   value: unknown,
   path: string,
+  sink: ViolationSink,
   walk: Walker,
-): string[] {
+): void {
   if (!isRecord(value)) {
-    return [`${path}: expected object`];
+    recordViolation(sink, `${path}: expected object`);
+    return;
   }
   const { properties, required, additionalProperties } = schema;
   // 一律用 Object.hasOwn，而不是 `properties?.[key]` / `key in value`：后者沿原型链
@@ -202,22 +295,21 @@ function objectViolations(
   if (additionalProperties === false) {
     const extra = Object.keys(value).filter((key) => declared(key) === undefined);
     if (extra.length > 0) {
-      return [`${path}: fields outside the schema: ${extra.join(", ")}`];
+      recordViolation(sink, `${path}: fields outside the schema: ${listedFields(extra)}`);
     }
   }
   for (const key of required ?? []) {
     if (!Object.hasOwn(value, key) || value[key] === undefined) {
-      return [`${path}: missing required field ${key}`];
+      recordViolation(sink, `${path}: missing required field ${key}`);
+      return;
     }
   }
-  const violations: string[] = [];
   for (const key of Object.keys(value)) {
     const child = declared(key);
     if (child !== undefined) {
-      violations.push(...walk(child, value[key], `${path}.${key}`));
+      walk(child, value[key], `${path}.${key}`, sink);
     }
   }
-  return violations;
 }
 
 /** array 分支：Array.isArray → 无 items 视为任意元素 → 逐元素递归（违规一次列全）。 */
@@ -225,16 +317,20 @@ function arrayViolations(
   schema: JsonSchemaNode,
   value: unknown,
   path: string,
+  sink: ViolationSink,
   walk: Walker,
-): string[] {
+): void {
   if (!Array.isArray(value)) {
-    return [`${path}: expected array`];
+    recordViolation(sink, `${path}: expected array`);
+    return;
   }
   const { items } = schema;
   if (items === undefined) {
-    return [];
+    return;
   }
-  return value.flatMap((item, index) => walk(items, item, `${path}[${index}]`));
+  for (let index = 0; index < value.length; index += 1) {
+    walk(items, value[index], `${path}[${index}]`, sink);
+  }
 }
 
 // ── 明文 key 脱敏 ───────────────────────────────────────────────────────────
@@ -283,19 +379,31 @@ const UNDERSCORE_TOKEN = /\b(?:gh[pousr]|github_pat)_\w{20,}\b/gu;
 const REDACTION = "***REDACTED***";
 /** token 尾部至少一枚非 `-` 的字母/数字。 */
 const TOKEN_TAIL_CHARACTER = /[0-9A-Z]/u;
+/** 已知 provider key 的前缀：即便两侧是路径分隔符也按 key 处理。路径豁免是为了让
+ *  仓库路径保持可读，而裸 key 同样可能被嵌进 URL 或日志路径（代理回显、错误行），
+ *  这条豁免不能替它开口。 */
+const KNOWN_KEY_PREFIX = /^(?:sk|ark|xai|gsk|ghp)-/iu;
 
 /** 独立 key 形态的替换臂：随机串段里真有数字或大写才抹，否则原样交回（文件路径要保持可读）。
  *  两侧任一是路径分隔符的匹配是路径段而非 key：ocr CLI 会把仓库路径拍平成 kebab 段嵌进
  *  session 的 file_path（`…/sessions/Users-yuanjiang-Documents-…/uuid.jsonl`），原路径里
  *  只要有大写组件（macOS 的 Documents/Desktop 一类）就过得了「数字或大写」那道护栏——
- *  裸 key 从不出现在斜杠两侧，路径段也从不出现在别处，按上下文分比按字符集猜稳。 */
+ *  裸 key 从不出现在斜杠两侧，路径段也从不出现在别处，按上下文分比按字符集猜稳。
+ *  已知凭据前缀不走这条豁免：见 `KNOWN_KEY_PREFIX`。 */
 function redactStandaloneKey(match: string, offset: number, whole: string): string {
+  const hasTokenTail = TOKEN_TAIL_CHARACTER.test(match.slice(match.indexOf("-") + 1));
+  if (!hasTokenTail) {
+    return match;
+  }
+  if (KNOWN_KEY_PREFIX.test(match)) {
+    return REDACTION;
+  }
   const before = whole[offset - 1];
   const after = whole[offset + match.length];
   if (before === "/" || after === "/" || before === "\\" || after === "\\") {
     return match;
   }
-  return TOKEN_TAIL_CHARACTER.test(match.slice(match.indexOf("-") + 1)) ? REDACTION : match;
+  return REDACTION;
 }
 
 /**
@@ -323,8 +431,18 @@ export function redactKeyMaterial(text: string): string {
 /** ESC 由运行时构造：`eslint(no-control-regex)` 不许控制字符出现在正则字面量里，而这里
  *  必须按真 ESC 匹配——放宽成「匹配 `[33m` 这种文本」会把日志里合法的方括号内容一起吃掉。 */
 const ESC = String.fromCodePoint(27);
+/** BEL：OSC 的另一种合法终结符。 */
+const BEL = String.fromCodePoint(7);
 /** ECMA-48 的 CSI 序列：ESC `[` + 参数位 + 中间位 + 终结位（SGR 颜色码就是终结位 `m`）。 */
 const ANSI_CSI = new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]`, "gu");
+/** OSC（ESC `]` …）与 DCS/PM/APC/SOS（ESC `P`/`X`/`^`/`_` …）：以 BEL 或 ST（ESC `\`）收尾。
+ *  上游可能用 OSC 改窗口标题/超链接，DCS 回显设备控制；只剥 CSI 会让这些字节留在正文里。 */
+const ANSI_OSC_DCS = new RegExp(
+  `${ESC}(?:\\][^${BEL}${ESC}]*|[PX^_][^${ESC}]*)(?:${BEL}|${ESC}\\\\)?`,
+  "gu",
+);
+/** 其余单字符 ESC 序列（ESC + 一个终结字符）：放在 CSI/OSC/DCS 之后跑，避免抢走它们的起始字符。 */
+const ANSI_ESC_SINGLE = new RegExp(`${ESC}[^\\[\\]PX^_]`, "gu");
 
 /**
  * 剥掉终端控制序列，只给**要显示给人复制**的那段输出用。
@@ -335,49 +453,77 @@ const ANSI_CSI = new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]`, "gu");
  * 复制进终端的恰好是那条 `npm i -g …`——复制到的是带控制字符的脏命令。
  */
 export function stripAnsi(text: string): string {
-  return text.replaceAll(ANSI_CSI, "");
+  return text.replaceAll(ANSI_OSC_DCS, "").replaceAll(ANSI_CSI, "").replaceAll(ANSI_ESC_SINGLE, "");
+}
+
+/** oneOf 分支数必须恰好为 1。试跑只关心「这一支有没有违规」，不保留文案；
+ *  limit 0 让大数组不至于为每支各留一份名单。 */
+function oneOfViolations(
+  schema: JsonSchemaNode,
+  value: unknown,
+  path: string,
+  sink: ViolationSink,
+  walk: Walker,
+): void {
+  const { oneOf } = schema;
+  if (oneOf === undefined) {
+    return;
+  }
+  let passing = 0;
+  for (const branch of oneOf) {
+    const probe: ViolationSink = { messages: [], limit: 0, total: 0 };
+    walk(branch, value, path, probe);
+    if (probe.total === 0) {
+      passing += 1;
+    }
+  }
+  if (passing !== 1) {
+    recordViolation(sink, `${path}: matched ${passing} of ${oneOf.length} oneOf branches`);
+  }
+}
+
+/** type 分派的容器/标量走查，以及同级的 const/enum 比较。 */
+function leafViolations(
+  schema: JsonSchemaNode,
+  value: unknown,
+  path: string,
+  sink: ViolationSink,
+  walk: Walker,
+): void {
+  const { type } = schema;
+  if (type === "object") {
+    objectViolations(schema, value, path, sink, walk);
+  } else if (type === "array") {
+    arrayViolations(schema, value, path, sink, walk);
+  } else if (type !== undefined && scalarMismatch(type, value)) {
+    // type 缺省是官方子集的「无约束」节点：任何 JSON 值都合形态。
+    recordViolation(sink, `${path}: expected ${type}`);
+  }
+  if (schema.const !== undefined && value !== schema.const) {
+    recordViolation(sink, `${path}: must be exactly ${JSON.stringify(schema.const)}`);
+  }
+  if (schema.enum !== undefined && !(schema.enum as readonly unknown[]).includes(value)) {
+    recordViolation(
+      sink,
+      `${path}: must be one of ${schema.enum.map((entry) => JSON.stringify(entry)).join("/")}`,
+    );
+  }
 }
 
 /** 官方子集的迷你走查（path 限定违规位置，一次列全）。oneOf 语义与官方一致：
  *  恰好一支命中，多支/零支都算违规。 */
-function violationsOf(schema: JsonSchemaNode, value: unknown, path: string): string[] {
+function violationsOf(
+  schema: JsonSchemaNode,
+  value: unknown,
+  path: string,
+  sink: ViolationSink,
+): void {
   // 关键词之间是合取关系（与官方实现一致）：oneOf 命中**不等于**同级的 type/const/enum
   // 被豁免。在 oneOf 分支里直接 return 会把它们一并跳过，于是 `{ const: true,
   // oneOf: [...] }` 这类 schema 的 const 被静默放过——正是文件头警惕的那种
   // 「守卫假装支持却静默放过」。
-  const violations: string[] = [];
-  const { oneOf } = schema;
-  if (oneOf !== undefined) {
-    const passing = oneOf.filter((branch) => violationsOf(branch, value, path).length === 0);
-    if (passing.length !== 1) {
-      violations.push(`${path}: matched ${passing.length} of ${oneOf.length} oneOf branches`);
-    }
-  }
-  const { type } = schema;
-  // 逐条 push 而不是 `push(...子结果)`：全量评论一起不合形态时子结果可以是几十万条，
-  // 展开成实参要一次性占满调用栈（`RangeError: Maximum call stack size exceeded`），
-  // 而这个函数正是用来在那种时刻给出可读结论的。
-  if (type === "object") {
-    for (const violation of objectViolations(schema, value, path, violationsOf)) {
-      violations.push(violation);
-    }
-  } else if (type === "array") {
-    for (const violation of arrayViolations(schema, value, path, violationsOf)) {
-      violations.push(violation);
-    }
-  } else if (type !== undefined && scalarMismatch(type, value)) {
-    // type 缺省是官方子集的「无约束」节点：任何 JSON 值都合形态。
-    violations.push(`${path}: expected ${type}`);
-  }
-  if (schema.const !== undefined && value !== schema.const) {
-    violations.push(`${path}: must be exactly ${JSON.stringify(schema.const)}`);
-  }
-  if (schema.enum !== undefined && !(schema.enum as readonly unknown[]).includes(value)) {
-    violations.push(
-      `${path}: must be one of ${schema.enum.map((entry) => JSON.stringify(entry)).join("/")}`,
-    );
-  }
-  return violations;
+  oneOfViolations(schema, value, path, sink, violationsOf);
+  leafViolations(schema, value, path, sink, violationsOf);
 }
 
 /**
@@ -397,20 +543,19 @@ export function assertToolOutput(
   messages: OcrReviewMessages,
 ): unknown {
   assertGuardable(schema, toolName, messages);
-  const violations = violationsOf(schema, value, "result");
-  if (violations.length > 0) {
+  const sink: ViolationSink = { messages: [], limit: MAX_VIOLATIONS_LISTED, total: 0 };
+  violationsOf(schema, value, "result", sink);
+  if (sink.total > 0) {
     // 违规清单会被宿主持久化进 session log，所以既限量也脱敏：全量评论一起不合形态时
     // `join` 能产出几十万字符（日志膨胀），而清单里的字段名/路径一旦含 key 形状的串，
-    // 就等于把凭据写进长期存储。
-    const MAX_LISTED = 20;
-    const MAX_CHARS = 2000;
-    const omitted = violations.length - MAX_LISTED;
-    const listed =
-      violations.slice(0, MAX_LISTED).join("; ") + (omitted > 0 ? ` …(+${omitted})` : "");
+    // 就等于把凭据写进长期存储。收集阶段就按 MAX_VIOLATIONS_LISTED 截断，避免为
+    // 一份最终只列 20 条的清单先把几十万条字符串留在内存里。
+    const omitted = sink.total - sink.messages.length;
+    const listed = sink.messages.join("; ") + (omitted > 0 ? ` …(+${omitted})` : "");
     throw new Error(
       format(messages.resultSchemaViolation, {
         tool: toolName,
-        violations: redactKeyMaterial(listed).slice(0, MAX_CHARS),
+        violations: redactKeyMaterial(listed).slice(0, MAX_VIOLATION_CHARS),
       }),
     );
   }
