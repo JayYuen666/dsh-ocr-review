@@ -20,8 +20,11 @@
 - 上游许可：MIT，Copyright (c) Paweł Kuna
 - 取用图标：`code`（https://icones.js.org/icons/tabler/code）
 
-`icon.svg` 的形状取自该图标的**两枚尖括号**：坐标整体平移（+1, −1）并去掉中间的斜杠笔画，
-另加一枚对勾段（形态对齐 Tabler `check` 的笔画风格）。改动都不引入新的第三方形状：把
+`icon.svg` 的形状取自该图标的**两枚尖括号**（上游 outline `code` 的 path 实量：左枚
+`M7 8l-4 4 4 4`、右枚 `M17 8l4 4-4 4`）：左枚平移 (+1, −1) 落到 `m8 7`；右枚纵坐标同样收 1，
+横坐标从 17 落到 14——按同一平移本该落在 18，这里比它多收 4，两枚起点的间距因此由 10 变 6；
+中间的斜杠笔画（`M14 4l-4 16`）去掉。另加一枚
+对勾段（形态对齐 Tabler `check` 的圆角折线笔画）。改动都不引入新的第三方形状：把
 `currentColor` 换成本包插件图标配色（`#658EFF` 主色 + `#54ECE7` 底衬），并把外层 `<g>` 与
 画布尺寸对齐本族插件统一的 `36×36` / `viewBox 0 0 24 24` 规格。
 
@@ -56,7 +59,7 @@ SOFTWARE.
 - 上游项目：`open-code-review`
 - 上游仓库：https://github.com/alibaba/open-code-review
 - 上游许可：Apache-2.0，Copyright 2026 Alibaba
-- 验证版本：1.13.3（声明在 package.json 的 `ocrCliVersion`，代码里的镜像常量与两侧 README 由门禁对齐同一枚数字）
+- 验证版本：1.13.4（声明在 package.json 的 `ocrCliVersion`，代码里的镜像常量、两侧 README 与随包文档由门禁对齐同一枚数字）
 
 本包**使用**而非**包含**以下接口（`host.ts` / `lib/cli.ts` 的头注释按该版本源码逐条核对）：
 
@@ -81,9 +84,9 @@ SOFTWARE.
 
 | 依赖 | 版本 | 许可 | 引入方 |
 | --- | --- | --- | --- |
-| `@alibaba-group/open-code-review` | 1.13.3（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
+| `@alibaba-group/open-code-review` | 1.13.4（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
 | `js-yaml` | 5.4.3（精确钉版） | MIT | `scripts/get-cred.mjs` 读 dsh 托管凭据文档 |
-| `@jayyuen66/dsh-plugin-shared` | catalog（伞根 0.2.2） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共面（值导入，构建时外部化） |
+| `@jayyuen66/dsh-plugin-shared` | catalog（伞根 0.2.3） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共面（值导入，构建时外部化） |
 | `zod` | catalog（伞根 4.6.7） | MIT | 设置卡 `src/remote.ts` 的 strict codec 形状校验；client 产物由宿主 `PLATFORM_MODULES` 提供 |
 
-dsh 宿主侧的包分两档：产物里以**值**导入、且列在 `peerDependencies` 的五枚（`@deepseek-ai/schemastery` 宿主 fork、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`）由宿主在场提供、不随本包分发；其余 `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 只在 `devDependencies` 里，用途是把类型绑到官方声明上（type-only 绑定），产物里不留说明符。本包按 dsh `0.2.2-alpha.2` 逐条核对过（同版的 cordis `4.0.6-alpha.1` 与 schemastery `3.18.6-alpha.1` fork 一并核对）。
+dsh 宿主侧的包分两档：产物里以**值**导入、且列在 `peerDependencies` 的五枚（`@deepseek-ai/schemastery` 宿主 fork、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`）由宿主在场提供、不随本包分发；其余 `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 只在 `devDependencies` 里，用途是把类型绑到官方声明上（type-only 绑定），产物里不留说明符。本包按 dsh `0.2.2-alpha.3` 逐条核对过（同版的 cordis `4.0.6-alpha.2` 与 schemastery `3.18.6-alpha.2` fork 一并核对）。

@@ -8,6 +8,10 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
+# 与 ci.yml 同一枚取值：门禁 certify 的那棵树与发布装的树要由同一个 pnpm 解出。GitHub Actions 没有
+# 跨文件的 env，抬版本时与 ci.yml 那份一起动。
+env:
+  PNPM_VERSION: 12.11.2
 jobs:
   # 检查与发布拆成两个 job，只有 publish 持有 id-token: write。
   # 理由：install 与 pnpm run check 会执行依赖里的生命周期脚本（prepare / prepack 等），
@@ -31,9 +35,9 @@ jobs:
           # 本 job 只跑 check，不做任何 git 写操作；check 会跑仓库自己的脚本，
           # 也就不该让它们从 .git/config 里借到 token。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -80,9 +84,9 @@ jobs:
           # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
           # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -137,8 +141,12 @@ jobs:
           METAFILE="$(mktemp)"
           export METAFILE
           trap 'rm -f "$METAFILE"' EXIT
+          # 包名从 package.json 取，不写死第二份：写死的串与 manifest 改名不会同时红，
+          # 旧名 404 会被这句读成「本次是首发」，自检从此静默失准。
+          export PKG_URL
+          PKG_URL="https://registry.npmjs.org/$(node -p "encodeURIComponent(require('./package.json').name)")"
           if ! code=$(curl -sS --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 2 \
-               -o "$METAFILE" -w "%{http_code}" 'https://registry.npmjs.org/@jayyuen66%2fdsh-ocr-review'); then
+               -o "$METAFILE" -w "%{http_code}" "$PKG_URL"); then
             echo "::error::读 registry 元数据失败（curl 自身非零退出：DNS / 连接 / TLS 层）"
             exit 1
           fi
@@ -225,7 +233,16 @@ jobs:
           else
             echo "whoami: 跳过——本次没有静态 token，按 OIDC 发布"
           fi
-          code=$(fetch "https://registry.npmjs.org/@jayyuen66%2fdsh-plugin-shared" /dev/null)
+          # 依赖库的名字同样从 manifest 取：写死的一份与 package.json 改名不会同时红，
+          # 而它一旦指错，这条预检就永远返回同一个结论（404 或 200）而不再描述真实状态。
+          export SHARED_URL
+          SHARED_URL="https://registry.npmjs.org/$(node -p "
+            const deps = Object.keys(require('./package.json').dependencies ?? {});
+            const shared = deps.find((k) => k.startsWith('@jayyuen66/dsh-plugin-shared'));
+            if (!shared) { throw new Error('package.json 的 dependencies 里没有 @jayyuen66/dsh-plugin-shared'); }
+            encodeURIComponent(shared);
+          ")"
+          code=$(fetch "$SHARED_URL" /dev/null)
           echo "读 @jayyuen66/dsh-plugin-shared：HTTP $code"
           echo "判读：200=依赖库已公开，可以发；404=shared 还没发到 npmjs，先发它（本包 pnpm install 会因此取不到依赖）"
           [ "$code" = "200" ] || exit 1

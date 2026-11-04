@@ -39,7 +39,7 @@ import type { ReviewOutputFormat } from "./argv-guard.ts";
 
 /** Homebrew 安装路径（`Cellar` / `Homebrew` 任一段）。 */
 const HOMEBREW_PATH = /(?:^|[/\\])(?:Cellar|Homebrew)(?:[/\\]|$)/iu;
-/** `ocr` 版本行：`open-code-review v1.13.3`（允许预发布/构建元数据）。 */
+/** `ocr` 版本行：`open-code-review v1.13.4`（允许预发布/构建元数据）。 */
 const OCR_VERSION =
   /open-code-review\s+v?(?<version>\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/u;
 
@@ -80,7 +80,7 @@ const BACKGROUND_FLAG = "--background";
  * test/readme-parity.test.ts 再断言两侧 README 写的也是它。三处只有一处是人写的、
  * 靠门禁钉住另两处，就不会出现「README 教用户装 A、代码按 B 校验」这种两边各自自洽的错。
  */
-export const EXPECTED_OCR_CLI_VERSION = "1.13.3";
+export const EXPECTED_OCR_CLI_VERSION = "1.13.4";
 
 /** 报错用的值形态（永不调用可能被劫持的 toJSON/toString）。host.ts 的入参闸
  *  （effort/wait）复用同一口径，故导出。 */

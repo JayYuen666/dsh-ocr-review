@@ -1,8 +1,45 @@
 # Changelog
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，版本号遵循
-[语义化版本](https://semver.org/lang/zh-CN/)，最新版本在最上。条目自 0.1.0 起；更早的
+[语义化版本](https://semver.org/lang/zh-CN/)，最新版本在最上。这里的偏离是刻意的：版本标题不写
+发布日期（各版发布时间以 npm registry 为准，`npm view <包名> time` 取得到），并按需增设标准六类
+之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
+
+## 0.1.11
+
+这一版把宿主开发基线抬到 `0.2.2-alpha.3`，同步 shared `0.2.3`，并把外部 `ocr`
+契约抬到 `1.13.4`；随包文档的版本声明改由门禁与 manifest / catalog 对齐，测试补上
+平台桩与几处会随环境变脸的断言。对外工具与 Remote 方法名单不变。
+
+### Changed
+
+- **宿主开发基线与支持窗口**：`devDependencies` 的 dsh 家族抬到 `0.2.2-alpha.3`，
+  cordis 抬到 `4.0.6-alpha.2`，schemastery fork 抬到 `3.18.6-alpha.2`；`engines.dsh`
+  与 dsh 家族 peer 保持 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 并集窗口，同时覆盖 rc 线与
+  alpha 线。
+- **shared 抬到 `0.2.3`**：catalog、单仓 overrides 与 lockfile 同源到 0.2.3；
+  THIRD_PARTY_NOTICES 的依赖表同步。
+- **OCR 契约抬到 `1.13.4`**：`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的
+  `EXPECTED_OCR_CLI_VERSION`、两侧 README、两份 DETAIL 与 THIRD_PARTY_NOTICES 的验证
+  版本/运行期依赖行都由门禁核对到同一枚数字。
+- **发布链**：CI 与 publish 的 pnpm 固定到 `12.11.2`；registry 预检的包名与 shared
+  依赖名改从 `package.json` 读取，不再维护第二份字面量。
+- **测试**：新增 `test/fixtures/platform-stub.ts`，平台相关用例统一走它；Windows
+  非提权环境跳过符号链接越界用例（跳过的是 symlink 前提，不是用例意图）；CLI
+  默认解析改用全新记忆槽；临时目录回收移到文件顶层；飞行中的 `busy` 断言收紧为必须
+  为 `true`。
+- **随包文档**：图标来源补上上游 path 的几何取值；README 说明本地目录安装需要
+  Node ≥ 22.18；DETAIL 明确 `startupVerify` 同时门控装载期的端点自检与版本测量。
+
+### Verification
+
+- `npm run check`：typecheck、lint、双构建、全套用例、四项 100% 覆盖率与 oxfmt 全绿。
+- `pnpm install --frozen-lockfile --ignore-scripts`（pnpm `12.11.2`）通过；
+  `pnpm run sync --check` 与 `node scripts/bump-manifests.mjs` 无漂移。
+- `smoke dsh-ocr-review --tarball` 在 dsh `0.2.2-alpha.3` 沙箱命中本包层；tarball
+  含 `host.js`、`client.js`、`docs/`、`locale/`、`CHANGELOG.md` 与
+  `THIRD_PARTY_NOTICES.md`。
 
 ## 0.1.10
 
@@ -176,7 +213,7 @@
 ### Changed
 
 - **外部 ocr CLI 改由用户自装**：判据先扫 PATH、其次才是随包兜底，装法由用户自选；版本声明
-  一处（package.json 的 `ocrCliVersion`），代码镜像与两侧 README 由门禁对齐。按安装来源
+  一处（package.json 的 `ocrCliVersion`，初值 1.13.0；此前的随包 CLI 不记版本），代码镜像与两侧 README 由门禁对齐。按安装来源
   （brew / npm）给对应的那条安装命令；来源判不出来时退回部署项 `ocrInstallHint` 的偏好。
 - **实测版本与声明不符时不只说给人听**：probe 端点回 `expectedVersion`/`consistent`，工具回执
   的 hint 也带上那句不一致说明。

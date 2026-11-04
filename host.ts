@@ -713,8 +713,8 @@ function textBlock(value: unknown): RenderedContent {
  * 按调用携带的 `SandboxPolicyRequest` 只有 `session` 与 `mode` 两个字段，**没有**附加可写
  * 路径、没有自定义 HOME、没有目录级豁免；而 `SandboxMode` 的取值只有
  * `read-only | workspace-write | danger-full-access` 三档，中间那一档的可写根就是
- * `workspaceRoot` 一枚。两处声明都取自本包实际解析到的那版（dsh-sandbox-policy 与
- * dsh-sandbox 的 0.2.1-rc.3，`lib/types/index.d.ts`）。
+ * `workspaceRoot` 一枚。两处声明都取自本包实际解析到的 dsh-sandbox-policy 与
+ * dsh-sandbox 的 `lib/types/index.d.ts`。
  * 可选的收紧路径只有「改 ocr 自己的状态落点」或「等上游加字段」，两者都不是本包能在
  * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
  * 文件系统写权限，不是宿主其它能力；且 ocr 读什么、写什么仍由上面那条 argv 闸与

@@ -67,7 +67,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 卸载用 `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`。包在公共 npm 上，安装不需要凭据。
 
 - **升级已装的那一份要「先 remove 再 add」。** profile 跑着 HMR（出厂那几个都跑）时，`add` 一个 profile 已经依赖着的包会在 pnpm 动手之前就被拒（`already-installed`）——先 `remove` 再 `add` 目标版本，新版不必重启就起跑。没跑 HMR 时同一个 `add` 照样走 pnpm，报 `restart-required`。
-- **要求 Node.js `>= 22.12`，宿主 dsh 在 `0.2.1-rc.3` / `0.2.2-alpha.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.3`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时最近的三个已发布宿主版本上逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `>= 22.12`，宿主 dsh 在 `0.2.1-rc.3` 或 `0.2.2-alpha.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.3 || ^0.2.2-alpha.2`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 用 `nodeLinker: hoisted` 与 `autoInstallPeers: false` 安装，宿主包进了那张表就会落成真实目录，与宿主进程已加载的那份并存。`@deepseek-ai/dsh-tools` 的调度器键是普通 `Symbol`（不是 `Symbol.for`），符号身份按实例计算——那个 profile 里**每一次原生工具调用都抛**，而本包的构建、类型检查与覆盖率门在此前一路绿。
 - **`host.js` 以值导入的五枚宿主包是非 optional 的 peer**：`@deepseek-ai/schemastery`（宿主 fork——`.volatile()` 的解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`（Remote 的 Service 基类）。五枚同时以同一钉版另列进 `devDependencies`，本仓自己的类型检查才解析得到；构建对 manifest 三张表一律外部化，产物里保持裸说明符。
 - **发布面**（以 `package.json` 的 `files` 为准）：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`locale/*.json`、`docs/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepare` 重建两个 bundle，发出去的永远是当前源码的产物。
@@ -78,11 +78,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 外部 CLI
 
-本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.3** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
+本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.4** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
 
 ```sh
 brew install open-code-review                        # formula 只跟上游最新版
-npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那一版
+npm i -g @alibaba-group/open-code-review@1.13.4      # 钉在本包核对的那一版
 ```
 
 - **brew 钉不住版本。** `homebrew/core` 里只有一份 stable formula、没有版本化变体，`brew install` / `brew upgrade` 拿到的永远是上游最新。带得上核对版本的只有 npm 那条。
@@ -163,7 +163,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 | `providers()` | — | `{providers（每条附 hasKey 布尔）, current, getCredReady, source, endpointVerify, ocrBinary}`，不含任何明文 key。`ocrBinary` 是那份纯文件系统的可得性判定再补上版本上下文（`source`、`channel`、`expectedVersion`、`measuredVersion: string \| null`、`installHint`）；读这个方法不起进程 |
 | `select(request)` | `{provider, model}`，两者必须命中 `describe()` 给的清单 | `{ok, applied, llmTest}`（`autoVerify` 关闭时 `llmTest` 为 null） |
 | `migrate()` | — | `{ok, migrated, skippedUnknown}` |
-| `test()` | — | `{ok, output}`——`ok` 是**测试结论**，不是这次调用成没成；output 先脱敏再截 8000 字符 |
+| `test()` | — | `{ok, output}`——`ok` 是**测试结论**，不是这次调用成没成；output 先脱敏再截前 8000 个 UTF-16 码元 |
 | `probe()` | — | `{ok, version, expectedVersion, consistent, output, reason, changeText}`——15 秒墙钟内跑一次 `ocr version`，恒定带 `OCR_NO_UPDATE=1`。`consistent` 是三态（`null` = 没量到，此时宣称「不一致」就是把没证据的事说成结论）；`reason` 点名失败那一档；`changeText` 只在真有一条该给的命令时非空 |
 | `mcp()` | — | `{ok, json, revision}`——只回 `mcp_servers` 对象（pretty JSON），不含 providers/keys；`revision` 是这一支的摘要 |
 | `saveMcp(request)` | `{json, revision?}`——原始 JSON 文本，上限 64 KiB；stdio/remote 条目逐字段校验；`revision` 取 `mcp()` 交回的那一枚 | `{ok, count, revision}`——只写 `mcp_servers`，其他配置原样保留。基线过期时整笔拒绝（盘上不动）并回可读的「读取之后已被改动」；不带基线则沿用原来的后写覆盖 |
@@ -216,7 +216,7 @@ npm i -g @alibaba-group/open-code-review@1.13.3      # 钉在本包核对的那�
 
 | 现象 / 问题 | 结论 |
 | --- | --- |
-| 把 exit 0 当成评审成功 | exit 0 不等于成功：`status` 不在 success / complete / partial / completed_with_warnings / completed_with_errors / skipped 白名单内即按失败报。`partial` 指部分文件失败、但覆盖与评论仍有效。解析失败时回显脱敏后原文的前 500 个 UTF-16 码元 |
+| 把 exit 0 当成评审成功 | exit 0 不等于成功：`status` 不在 success / complete / partial / completed_with_warnings / completed_with_errors / skipped 白名单内即按失败报。`failed` 在名单里但**单独判成不成功**——它是 CLI 非零退出时照发的那份回执，覆盖明细（哪些文件没审成）由它承载，不与「解析失败、回显原文」混同。`partial` 指部分文件失败、但覆盖与评论仍有效。解析失败时回显脱敏后原文的前 500 个 UTF-16 码元 |
 | 摘要有没有覆盖全部产出？ | 两件不同的事，不能互相替代。`droppedCount` / `invalidCommentCount` 只说明**本摘要**有没有列全评论（调大 `maxComments` 或置 0 再复核）。**这一场**有没有把选中的文件审完看 `coverage`（`selected` 是分母，`failedItems` 给出文件名与原因）、`budgetExceeded` 与 `toolCalls` |
 | `add` 被拒，报 `already-installed` | HMR profile 对已装包的 `add` 在 pnpm 动手之前就拒——先 `remove` 再 `add` 目标版本（见「安装」） |
 | dsh 退出时后台进程怎么办？ | 收割守护在任何宿主退出方式下（含 kill -9 后被收养）以 TERM→1s→KILL 收走 review/scan 的进程树；取消工具调用即终止对应的后台进程 |

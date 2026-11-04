@@ -9,10 +9,25 @@ import { EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 
 const pkgDir = path.join(import.meta.dirname, "..");
 
+/** 本门禁要读的 manifest 面：宿主窗口与开发基线都从这两张表取真源。 */
+interface ManifestShape {
+  readonly engines?: Record<string, string>;
+  readonly devDependencies?: Record<string, string>;
+}
+
 const README_FILES = {
   en: "README.md",
   zh: "README.zh-CN.md",
 } as const;
+
+const DETAIL_FILES = {
+  en: "docs/DETAIL.md",
+  zh: "docs/DETAIL.zh.md",
+} as const;
+
+const NOTICES_FILE = "THIRD_PARTY_NOTICES.md";
+const MANIFEST_FILE = "package.json";
+const WORKSPACE_FILE = "pnpm-workspace.yaml";
 
 /** 两侧都必须出现的工具名（模型面的全部入口）。 */
 const TOOL_NAMES = [
@@ -150,15 +165,97 @@ describe("readme 双语结构", () => {
     } as const;
     expect(texts.en, "README.md 没有指向第三方声明").toContain("THIRD_PARTY_NOTICES");
     expect(texts.zh, "README.zh-CN.md 没有指向第三方声明").toContain("THIRD_PARTY_NOTICES");
-    expect(
-      existsSync(path.join(pkgDir, "THIRD_PARTY_NOTICES.md")),
-      "THIRD_PARTY_NOTICES.md 不在盘上",
-    ).toBe(true);
-    const manifest = JSON.parse(await readFile(path.join(pkgDir, "package.json"), "utf8")) as {
+    expect(existsSync(path.join(pkgDir, NOTICES_FILE)), `${NOTICES_FILE} 不在盘上`).toBe(true);
+    const manifest = JSON.parse(await readFile(path.join(pkgDir, MANIFEST_FILE), "utf8")) as {
       files?: string[];
     };
-    expect(manifest.files, "THIRD_PARTY_NOTICES.md 必须随包发布").toContain(
-      "THIRD_PARTY_NOTICES.md",
+    expect(manifest.files, `${NOTICES_FILE} 必须随包发布`).toContain(NOTICES_FILE);
+  });
+});
+
+describe("随包文档的版本声明同源", () => {
+  /** 用户会照着挑安装命令的文件：README 两侧与两份 DETAIL。 */
+  const INSTALL_DOCS = [
+    README_FILES.en,
+    README_FILES.zh,
+    DETAIL_FILES.en,
+    DETAIL_FILES.zh,
+  ] as const;
+
+  it("四份安装文档的 npm 装法都钉在 EXPECTED_OCR_CLI_VERSION", async () => {
+    // 只断言「文件里出现过版本号」不够：期望版本已改、安装命令仍停在旧版时，
+    // 用户照着装完就会永远收到「实测与核对版本不一致」。这里钉的是**装法那一行**。
+    const docs = await Promise.all(
+      INSTALL_DOCS.map(async (file) => ({
+        file,
+        text: await readFile(path.join(pkgDir, file), "utf8"),
+      })),
     );
+    for (const { file, text } of docs) {
+      expect(text, `${file} 的安装命令没钉在核对版本 ${EXPECTED_OCR_CLI_VERSION}`).toContain(
+        `@alibaba-group/open-code-review@${EXPECTED_OCR_CLI_VERSION}`,
+      );
+    }
+  });
+
+  it("第三方声明的两处 ocr 版本声明同源", async () => {
+    const text = await readFile(path.join(pkgDir, NOTICES_FILE), "utf8");
+    expect(text, "第三方声明的验证版本没跟上代码常量").toContain(
+      `验证版本：${EXPECTED_OCR_CLI_VERSION}`,
+    );
+    expect(text, "第三方声明的运行期依赖行没跟上代码常量").toContain(
+      `| \`@alibaba-group/open-code-review\` | ${EXPECTED_OCR_CLI_VERSION}（核对版本，非依赖） |`,
+    );
+  });
+
+  it("第三方声明的宿主基线与 manifest / catalog 同源", async () => {
+    // 这三枚是「本包按哪一版宿主核对过」的当前状态断言，不是历史读数：
+    // 代码基线抬了而声明没抬时，文档会继续指向一个本包从未核对过的版本。
+    const manifest = JSON.parse(
+      await readFile(path.join(pkgDir, MANIFEST_FILE), "utf8"),
+    ) as ManifestShape;
+    const dev = manifest.devDependencies ?? {};
+    const dshVersion = dev["@deepseek-ai/dsh-tools"];
+    const cordisVersion = dev["@deepseek-ai/cordis"];
+    const schemasteryVersion = dev["@deepseek-ai/schemastery"];
+    if (
+      dshVersion === undefined ||
+      cordisVersion === undefined ||
+      schemasteryVersion === undefined
+    ) {
+      throw new Error(`${MANIFEST_FILE} 的 devDependencies 缺宿主基线三枚`);
+    }
+    const workspace = await readFile(path.join(pkgDir, WORKSPACE_FILE), "utf8");
+    const sharedVersion = /"@jayyuen66\/dsh-plugin-shared":\s*(?<version>\S+)/u.exec(workspace)
+      ?.groups?.["version"];
+    if (sharedVersion === undefined) {
+      throw new Error(`${WORKSPACE_FILE} 的 catalog 里没有 @jayyuen66/dsh-plugin-shared`);
+    }
+    const text = await readFile(path.join(pkgDir, NOTICES_FILE), "utf8");
+    expect(text, "第三方声明的 dsh / cordis / schemastery 基线没跟上 devDependencies").toContain(
+      `本包按 dsh \`${dshVersion}\` 逐条核对过（同版的 cordis \`${cordisVersion}\` 与 schemastery \`${schemasteryVersion}\` fork 一并核对）`,
+    );
+    expect(text, `第三方声明的 shared catalog 版本没跟上 ${WORKSPACE_FILE}`).toContain(
+      `catalog（伞根 ${sharedVersion}）`,
+    );
+  });
+
+  it("两侧 README 的宿主支持窗口都来自 manifest 的 engines.dsh", async () => {
+    const manifest = JSON.parse(
+      await readFile(path.join(pkgDir, MANIFEST_FILE), "utf8"),
+    ) as ManifestShape;
+    const window = manifest.engines?.["dsh"];
+    if (window === undefined) {
+      throw new Error(`${MANIFEST_FILE} 的 engines.dsh 缺失：支持窗口没有真源`);
+    }
+    const sides = await Promise.all(
+      (Object.keys(README_FILES) as (keyof typeof README_FILES)[]).map(async (which) => ({
+        which,
+        text: await readReadme(which),
+      })),
+    );
+    for (const { which, text } of sides) {
+      expect(text, `${which} 侧 README 没写 engines.dsh 的窗口 ${window}`).toContain(window);
+    }
   });
 });

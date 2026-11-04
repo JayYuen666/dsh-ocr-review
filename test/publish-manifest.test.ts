@@ -72,6 +72,7 @@ interface Manifest {
   readonly optionalDependencies?: Record<string, string>;
   readonly engines?: Record<string, string>;
   readonly ocrCliVersion?: unknown;
+  readonly version?: string;
 }
 
 /** 一条 `files` 模式的两种形态。 */
@@ -347,6 +348,26 @@ describe("外部 CLI 的版本声明与依赖边界", () => {
     // 判据只断「这张表为空」：它守的是整类「装上本插件就顺带装别的东西」，不是某一个包名。
     const { manifest } = await readSurface();
     expect(manifest.optionalDependencies, "本包不随包分发外部 CLI").toBeUndefined();
+  });
+});
+
+describe("版本与变更记录", () => {
+  it("变更记录顶部版本与 package.json 的 version 一致", async () => {
+    // 发布版本只从 package.json 取，但读者从 CHANGELOG 判断这一版改了什么。
+    // 只改 version 不写条目时，npm 上会发出一个「没有变更记录」的新版本，而所有
+    // 既有门禁都是绿的；这条把两处版本标题钉在一起。
+    const { manifest } = await readSurface();
+    if (manifest.version === undefined) {
+      throw new Error("package.json 没有 version");
+    }
+    const changelog = await readFile(path.join(pkgDir, "CHANGELOG.md"), "utf8");
+    const top = /^## (?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/mu.exec(changelog)?.groups?.[
+      "version"
+    ];
+    if (top === undefined) {
+      throw new Error("CHANGELOG.md 里没有任何版本标题");
+    }
+    expect(top, "CHANGELOG 顶部版本必须与 package.json 的 version 一致").toBe(manifest.version);
   });
 });
 

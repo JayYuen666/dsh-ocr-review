@@ -12,7 +12,7 @@
 //      字符串与 children 当「渲染文本」——en 那份整棵子树不得出现汉字。
 // 带插值的行（currentConfig / provider 标签）另按 helper 直断，
 // 等价于样板包对 sessionRow 的渲染断言。
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi, afterAll } from "vitest";
 import {
   apply,
   inject,
@@ -157,7 +157,9 @@ const stubDocument = {
       selector === CARD_STYLE_SELECTOR ? (injectedStyles[0] ?? null) : null,
   },
 };
-globalThis.document = stubDocument as unknown as Document;
+// stubGlobal 进出平衡的回收挂在文件**末尾**的 describe（见文件末）：
+// 提前 unstub 会让本文件后续用例拿到真实 document 而大面积翻车。
+vi.stubGlobal("document", stubDocument);
 
 /**
  * 递归取出一棵元素树里的全部文本（无 jsdom 的渲染替身）：
@@ -665,8 +667,16 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(en).toContain("Migrate plain-text keys");
     expect(en).toContain("no key configured");
     expect(en).toContain("Keys are read dynamically via get-cred.mjs");
-    // 「中文」是语言枚举值本身的自称（刻意不进字典），它不算残留翻译。
-    expect(en.replaceAll("中文", "")).not.toMatch(HAN);
+    // 「中文」是语言枚举值本身的自称（刻意不进字典）。textOf 把每层取值用空格拼开，所以按
+    // 整枚 token 精确剔除这个自称：漏译里的汉字要么自成 token、要么夹在别的词里，两种都留在
+    // 断言范围内。按行剔除会把自称所在那一行的其余内容一起放走，等于把漏译藏进被删的行里。
+    const enWithoutSelfName = en
+      .split(" ")
+      .filter((token) => token !== "中文")
+      .join(" ");
+    // 剔除后必须还是那张卡：整串被抹空时下面这条 HAN 断言会恒真，测不出任何漏译。
+    expect(enWithoutSelfName).toContain("Apply to OCR config");
+    expect(enWithoutSelfName).not.toMatch(HAN);
     const zhHint = tZh("keyScriptMissing");
     const zhDeps = depsWith(tZh, { data: READY_DATA, keyHint: zhHint });
     const zh = textOf(buildProviderSection(zhDeps));
@@ -1459,7 +1469,8 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
     // 第一个字段已拒绝，但第二个还没 settle：此时 busy 必须仍是 true，
     // 否则用户能再点保存，对飞行中的那个字段重复写入。
     await Promise.resolve();
-    expect(busyAfter).not.toBe(false);
+    // undefined（从未置真）也要红：只在 finally 里调一次 false 的实现算漏了 busy 位。
+    expect(busyAfter).toBe(true);
     await running;
     expect(busyAfter).toBe(false);
     expect(seen).toStrictEqual(["maxComments", "timeoutMinutes"]);
@@ -1487,5 +1498,15 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
     );
     expect(touchedAfter).toStrictEqual({});
     expect(error).toBeNull();
+  });
+});
+
+describe("document 桩的进出平衡（文件收尾）", () => {
+  afterAll(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("桩存活到文件末尾", () => {
+    expect(globalThis.document).toBe(stubDocument);
   });
 });

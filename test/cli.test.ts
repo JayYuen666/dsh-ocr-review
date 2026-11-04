@@ -7,9 +7,10 @@
 // 命令构造走 lib/cli.ts——与生产侧的引用关系一致。
 import { afterEach, beforeEach, afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { symlink } from "node:fs/promises";
+import { rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pinPlatform, restorePlatform } from "./fixtures/platform-stub.ts";
 import {
   shq,
   assertAbsoluteRoot,
@@ -65,7 +66,9 @@ vi.mock("node:fs", async (importOriginal) => {
   const patched = {
     ...actual,
     existsSync: (target: string): boolean =>
-      target.endsWith("ocr.js") ? fsStub.exists : actual.existsSync(target),
+      // 收窄到随包入口的确切形状（…/bin/ocr.js）：裸后缀匹配会把 myocr.js 之类的
+      // 无关路径也拐进桩里。
+      target.endsWith(path.join("bin", "ocr.js")) ? fsStub.exists : actual.existsSync(target),
   };
   return { ...patched, default: patched };
 });
@@ -138,6 +141,21 @@ function unwrapReaper(wrapped: string): string {
 /* ── 临时目录夹具（可用性判据与装法判据都只问文件系统）───────────────────── */
 
 const tempDirs: string[] = [];
+
+describe("临时目录回收（挂在文件顶层：按 `-t` 过滤掉某套件时照样执行）", () => {
+  afterAll(async () => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    // 子目录都删掉后，把 makeTempDir 用过的 .tmp 空壳也收走（非空时忽略）。
+    // 非空或不存在都算正常：静默吞掉，错误对象不留名。
+    await rm(path.join(process.cwd(), ".tmp"), { force: true }).catch(() => null);
+  });
+
+  it("临时目录登记表可读（本 describe 只承载 afterAll 的作用域）", () => {
+    expect(Array.isArray(tempDirs)).toBe(true);
+  });
+});
 
 /** 仓内忽略目录 `/ .tmp/` 下造临时目录：PATH 语义的用例在 Windows 上不能传绝对路径
  *  （盘符里的 `:` 会被 POSIX 分支当成路径分隔符），相对 cwd 的形态可以两平台通用。 */
@@ -272,7 +290,7 @@ describe("assertAbsoluteRoot / resolveRoot", () => {
       if (real === undefined) {
         Reflect.deleteProperty(process, "platform");
       } else {
-        Object.defineProperty(process, "platform", real);
+        restorePlatform();
       }
     }
   });
@@ -346,12 +364,11 @@ describe("命令词的合法形态", () => {
 describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判据）", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
   });
 
   it("PATH 上有候选 ⇒ 命令词是它的绝对路径，随包入口不再抢在它前面", () => {
@@ -387,9 +404,9 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
   });
 
   it("生产那一档解析出的命令词可直接执行两种装法之一", () => {
-    // 不注入：走默认定位口与真实 PATH。命中时是绝对路径，两处都没有时是裸 ocr——
-    // 两者都是可执行命令词，这里只钉住这个不变量（本机装没装 CLI 不该让用例变脸）。
-    expect(ocrCommand()).toMatch(/^(?:'.*'|ocr)$/u);
+    // 不注入定位口、传全新记忆槽：模块顶部的 OCR 常量已经把默认槽填满了，再调
+    // ocrCommand() 只会读缓存、什么都没验。全新槽 + 真实 PATH 才是「默认解析」。
+    expect(ocrCommand(undefined, {}, undefined)).toMatch(/^(?:'.*'|ocr)$/u);
   });
 
   it("win32 恒走裸 ocr：绝对路径带反斜杠与空格在 cmd 里不可靠，随包 launcher 又是 shebang 脚本", () => {
@@ -406,7 +423,7 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
       if (real === undefined) {
         Reflect.deleteProperty(process, "platform");
       } else {
-        Object.defineProperty(process, "platform", real);
+        restorePlatform();
       }
     }
   });
@@ -448,12 +465,11 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
 describe("wrapWithHostReaper", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
   });
 
   it("外层 bash -c，内部命令完整保留且 ppid 监视带可用性探测", () => {
@@ -497,7 +513,7 @@ describe("wrapWithHostReaper", () => {
       if (real === undefined) {
         Reflect.deleteProperty(process, "platform");
       } else {
-        Object.defineProperty(process, "platform", real);
+        restorePlatform();
       }
     }
   });
@@ -706,12 +722,11 @@ describe("buildSessionCommand", () => {
 describe("withHomeEnv / buildLlmTestCommand", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
   });
 
   it("home 未设原样返回；设置时加 HOME= 赋值前缀且路径经 shq", () => {
@@ -847,12 +862,11 @@ const METACHARS = /[;&|`$<>*\n\\"'{}[\]()!#~%]/u;
 describe("注入防线：所有插值槽位都必须经 shq 或白名单", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
   });
 
   it("format 白名单：非枚举值（含注入 PoC）回落 json，绝不进命令串", () => {
@@ -1150,21 +1164,14 @@ describe("拒绝理由双语（注入 en 那份）", () => {
 /* ── 只问文件系统、不 spawn 的可用性判据 ─────────────────────────────────── */
 
 describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁装的", () => {
-  afterAll(() => {
-    for (const dir of tempDirs) {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   describe("resolveOcrAvailability：来源三档与它的假命中防线", () => {
     // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
     // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-    const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
     beforeEach(() => {
-      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      pinPlatform("linux");
     });
     afterEach(() => {
-      Object.defineProperty(process, "platform", realPlatform ?? {});
+      restorePlatform();
     });
 
     it("PATH 上有候选 ⇒ path，且随包入口在盘也不抢在它前面", () => {
@@ -1451,10 +1458,17 @@ describe("1.13.3 新增参数：preview / noFilter / scan 开关 / max-git-procs
     expect(normal).toContain("--rule");
   });
 
-  it("rule/background-file 只能指向 repo 根内普通文件；越界、目录与超大都拒绝", async () => {
+  it("rule/background-file 只能指向 repo 根内普通文件；越界、目录与超大都拒绝", () => {
+    // 这三条只读文件系统、与平台无关；不能跟着下面的 symlink 用例一起在 Windows 上跳过，
+    // 否则 argv-guard 的「非普通文件」与「超限」两条拒绝分支在 Windows 矩阵里零覆盖。
     expect(() => reviewCmd({ repo: root, rule: outsideFile }, "/o")).toThrow(/repo 根目录内/u);
     expect(() => reviewCmd({ repo: root, rule: "big.md" }, "/o")).toThrow(/文件过大/u);
     expect(() => reviewCmd({ repo: root, rule: "." }, "/o")).toThrow(/普通文件/u);
+  });
+
+  it("rule/background-file 拒绝符号链接逃逸", { skip: runsOnWindows }, async () => {
+    // symlink 在 Windows 上要 SeCreateSymbolicLinkPrivilege（管理员/开发者模式），
+    // 非提权环境会 EPERM——跳过的是符号链接那一段的前提，不是用例意图。
     const link = path.join(root, "escape.json");
     await symlink(outsideFile, link);
     expect(() => reviewCmd({ repo: root, rule: "escape.json" }, "/o")).toThrow(/repo 根目录内/u);

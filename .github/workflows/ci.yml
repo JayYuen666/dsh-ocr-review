@@ -23,6 +23,13 @@ concurrency:
 # 门槛只需要读代码。写成白名单而不是省略：省略会拿到仓库默认权限，而默认可能是读写。
 permissions:
   contents: read
+# pnpm 取具体补丁版本而不是主版本 12：`version: 12` 让每次运行拿上游最新的 12.x，补丁差在安装树的
+# 解法上是可观察的行为差异（本族各仓 cordis.patch.yml 就记着 pnpm 某个小版本的 add 缺陷）。取值与
+# 伞根 packageManager 同源，也是各仓 lockfile 当期由之生成的那一枚。口径：九仓 CI 都在 workflow 级
+# env 里写这枚字面值；唯一例外是 dsh-lesson-loop，它的 package.json 自带 packageManager，由
+# pnpm/action-setup 自己读，再写 env 就成了两份真源。
+env:
+  PNPM_VERSION: 12.11.2
 jobs:
   gate:
     name: gate (${{ matrix.os }}, node ${{ matrix.node }})
@@ -61,9 +68,9 @@ jobs:
           # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
           # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       # registry-url 留空：本仓 CI 不发布，装依赖走包自己的 .npmrc（@jayyuen66 指向公共 npm）。
       # 配上 registry-url 会让 setup-node 生成一份用户级 .npmrc，把 CI 的解析口径改成和开发者不一样。
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -94,12 +101,12 @@ jobs:
           name: coverage
           path: coverage/
           retention-days: 7
-          # 这里取 warn 而不是 error：这一步在 `if: always()` 下跑，而 coverage/
+          # 这里取 warn 而不是 error：这一步在 `!cancelled()` 下跑，而 coverage/
           # 由 `pnpm run check` 里的 vitest 产出——typecheck / lint / build 任一先红时
           # 目录根本不存在。此时判红会盖住真正的失败原因，还把后面的步骤一起中断。
           # 缺产物本身就是「门禁没跑完」的信号，不需要这一步再报一次。
           if-no-files-found: warn
-      - name: 门禁没跑过就别留下产物
+      - name: 门禁不该改写被跟踪文件
         if: matrix.os == 'ubuntu-latest'
         # 不开严格模式时 `git status` 自己失败（index 损坏、dubious ownership、工作树异常）
         # 会被 `changed="$(...)"` 这条赋值吞掉退出码，changed 落空串于是判绿——
@@ -150,9 +157,9 @@ jobs:
           # 本仓的 workflow 不用 git 写动词，token 没必要留在 .git/config 里：
           # 后续步骤会跑仓库自己的 install/构建/测试脚本，也就跑得到依赖里的脚本。
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -171,6 +178,12 @@ jobs:
         run: |
           set -euo pipefail
           tarball="$(find /tmp/pkg -name '*.tgz' -print -quit)"
+          # 打不出 tgz 是一条独立的红：pnpm pack 非零退出在这里已经拦住了，但「跑成功却没落盘」
+          # 的形态（pack-destination 指错、目录被清）会让下面拿到空串，报成 npm install 的问题。
+          if [ -z "$tarball" ]; then
+            echo "::error::/tmp/pkg 下没有 tgz——pnpm pack 没产出可安装的包"
+            exit 1
+          fi
           mkdir -p /tmp/probe && cd /tmp/probe
           npm init -y >/dev/null
           # 不传 --legacy-peer-deps：那正是本包 peer 面能不能被默认安装语义吃下去的判据。
@@ -199,20 +212,25 @@ jobs:
           const patch = path.join(pkgDir, patchRel);
           if (!existsSync(patch)) throw new Error(`bundle patch 没随包发出：${patchRel}`);
           const text = readFileSync(patch, "utf8");
-          // 守卫要判的是「有没有一条条目按裸包名引用本包」，不是「有没有 id 行」也不是
-          // 「全文出现过这个串」：注释里的 `# - id:` 会让前者过，而 `.../settings` 子路径
-          // 条目天然包含完整包名会让后者过——两种情况下主入口都丢了，条目却照样注册不上。
-          const patchLines = text.split(/\r?\n/u);
-          const entries = [];
-          for (let i = 0; i < patchLines.length - 1; i += 1) {
-            const idHit = /^[ \t]*-[ \t]*id:[ \t]*(\S+)[ \t]*$/u.exec(patchLines[i]);
-            if (idHit === null) continue;
-            const nameHit = /^[ \t]*name:[ \t]*(?:"([^"]*)"|(\S+))[ \t]*$/u.exec(patchLines[i + 1]);
-            if (nameHit === null) continue;
-            entries.push([idHit[1], nameHit[1] ?? nameHit[2]]);
+          // 条目从 YAML 解析，不按行抠正则：合法写法（`- id:` 与 `name:` 之间插注释、name 写在
+          // id 之前、流式序列、用别名）都会让逐行匹配报「没有 id/name 条目」——那是判据自己
+          // 失效的假红，不是产物缺陷。js-yaml 是本包 dependencies，随 tarball 一起装进
+          // /tmp/probe，这里按声明解析一次。
+          const yaml = require("js-yaml");
+          const doc = yaml.load(text);
+          const entries = (Array.isArray(doc) ? doc : [doc]).flatMap((row) =>
+            row !== null && typeof row === "object" && Array.isArray(row.insert) ? row.insert : [],
+          );
+          if (entries.length === 0) throw new Error(`bundle patch 里没有 insert 条目：${patchRel}`);
+          // 守卫要判的仍是「有没有一条条目按裸包名引用本包」，不是「全文出现过这个串」：
+          // `.../settings` 子路径条目天然包含完整包名，拿 includes 判会被它满足，而宿主
+          // client-modules 只扫描裸包名条目的 dsh.client 声明。
+          if (!entries.some((entry) => entry?.name === NAME)) {
+            throw new Error(`bundle patch 没有按裸包名引用 ${NAME} 的条目`);
           }
-          if (entries.length === 0) throw new Error(`bundle patch 里没有 id/name 条目：${patchRel}`);
-          if (!entries.some(([, name]) => name === NAME)) throw new Error(`bundle patch 没有按裸包名引用 ${NAME} 的条目`);
+          if (!entries.every((entry) => typeof entry?.id === "string" && entry.id.length > 0)) {
+            throw new Error(`bundle patch 有条目缺 id：${patchRel}`);
+          }
           console.log("装载通过：apply / Config / bundle patch 均就位");
           '
 
@@ -318,7 +336,8 @@ jobs:
           # 豁免不写在命令行上：`-ignore` 是全局的，而这条命令的 glob 覆盖全部工作流，
           # 于是「探针那段单引号包 JS」这一处豁免会让 SC2016 在 publish / codeql / scorecard
           # 三份文件里也彻底失效——那边若真出现「单引号里写 $VAR 以为是变量」的实错就再也抓不到。
-          # 所以豁免收进 .github/actionlint.yaml 的 paths 段，只对本文件生效（已实测该版本
-          # 在 git 仓库里能自动发现该配置，且 paths 收窄对未列出的文件不生效）。
+          # 所以豁免收进 .github/actionlint.yaml 的 paths 段，只对本文件生效。配置文件用
+          # -config-file 显式指过去，不靠默认发现（1.7.12 实测该旗标存在且带上它四份工作流退 0）：
+          # 文件缺失或改名会以一条报错暴露，而不是让豁免静默失效、SC2016 变成整轮的假红。
           # shell 先把 glob 展开，再把文件清单交给它。
-          /tmp/actionlint .github/workflows/*.yml
+          /tmp/actionlint -config-file .github/actionlint.yaml .github/workflows/*.yml

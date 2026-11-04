@@ -11,26 +11,30 @@ import path from "node:path";
 import { assertAbsoluteRoot, commaList } from "../../lib/argv-guard.ts";
 import { resolveOcrAvailability, withHomeEnv, wrapWithHostReaper } from "../../lib/cli.ts";
 import { MESSAGES } from "../../lib/messages.ts";
+import { pinPlatform, restorePlatform } from "../fixtures/platform-stub.ts";
 
 const { zh } = MESSAGES;
 
-/** process.platform 桩：win32 分支在本机不可达，这一桩是官方文档化的触达方式之一。 */
+/** 平台桩统一走 fixture：这里只负责成对进出，恢复的是模块求值时的真实描述符。 */
 function withPlatform<Result>(platform: NodeJS.Platform, body: () => Result): Result {
-  const original = process.platform;
-  Object.defineProperty(process, "platform", { value: platform });
+  pinPlatform(platform);
   try {
     return body();
   } finally {
-    Object.defineProperty(process, "platform", { value: original });
+    restorePlatform();
   }
 }
 
 describe("assertAbsoluteRoot 的「形态优先于平台」契约", () => {
   it("posix 形在任何平台都收并归一；盘符与 UNC 形在 posix 上拒绝（不跨平台放宽）", () => {
+    // POSIX 形这一半由宿主平台自然生效；Windows 形拒绝那一半必须显式钉 posix，
+    // 否则 Windows CI 上这条会拿真实 win32 去判「posix 上拒绝」，假红。
     assert.equal(assertAbsoluteRoot("/repo/src", zh), "/repo/src");
-    for (const winShape of [String.raw`C:\repo`, String.raw`\\host\share\dir`, "C:repo"]) {
-      assert.throws(() => assertAbsoluteRoot(winShape, zh), /absolute|绝对/u, winShape);
-    }
+    withPlatform("linux", () => {
+      for (const winShape of [String.raw`C:\repo`, String.raw`\\host\share\dir`, "C:repo"]) {
+        assert.throws(() => assertAbsoluteRoot(winShape, zh), /absolute|绝对/u, winShape);
+      }
+    });
   });
 
   it("win32 桩下：盘符形收下并归一；盘符根与 UNC 共享根拒绝；POSIX 形照常收", () => {
@@ -82,8 +86,15 @@ describe("resolveOcrAvailability 的 windows 定位语义（platform/env 全注�
 describe("home 前缀与回收守护的平台放行", () => {
   it("withHomeEnv：POSIX 加 HOME= 前缀（shq 转义）；win32 桩与缺省都原样返回", () => {
     const command = "/usr/bin/ocr review";
-    assert.equal(withHomeEnv(command, "/sandbox/home"), "HOME='/sandbox/home' /usr/bin/ocr review");
-    assert.equal(withHomeEnv(command, undefined), command);
+    // POSIX 前缀那一半显式钉 linux：Windows CI 上真实 platform 是 win32，不钉就会把
+    // 「win32 原样返回」的预期套到 POSIX 用例上，假红。
+    withPlatform("linux", () => {
+      assert.equal(
+        withHomeEnv(command, "/sandbox/home"),
+        "HOME='/sandbox/home' /usr/bin/ocr review",
+      );
+      assert.equal(withHomeEnv(command, undefined), command);
+    });
     withPlatform("win32", () => {
       assert.equal(withHomeEnv(command, "/sandbox/home"), command);
     });

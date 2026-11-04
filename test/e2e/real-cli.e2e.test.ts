@@ -10,20 +10,59 @@
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { parseOcrVersion, EXPECTED_OCR_CLI_VERSION } from "../../lib/cli.ts";
 import { parseDelegateRules } from "../../lib/parse.ts";
 
-/** 真 CLI 定位：PATH 逐目录探测（不 spawn），win32 补常见后缀；排除本仓测试自己的 stub。 */
+/** 环境：真 CLI 的 `version` 不允许顺带触发自更新，颜色输出也不进字节判据。 */
+const PROBE_ENV = {
+  FORCE_COLOR: "0",
+  NO_COLOR: "1",
+  CLICOLOR: "0",
+  OCR_NO_UPDATE: "1",
+} as const;
+
+/** spawn 失败时子进程的流在运行期可能为 null，类型面却写成 string；统一按字节读。 */
+function readText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/**
+ * PATH 上同名文件不等于可用的真 CLI：Windows runner 上命中的候选可能是目录，也可能是
+ * 不能直接 CreateProcess 的 `.cmd` shim。后者 `spawnSync` 会回 `error` 且 `stdout/stderr`
+ * 为 null，旧判据随后在 `.includes` 上抛 TypeError，把「没装 CLI」误报成失败。
+ * 这里只收**普通文件**且 `version` 能真跑通、输出能被本包解析的候选；不满足就按缺席跳过。
+ */
+function isRunnableRealOcr(candidate: string): boolean {
+  if (candidate.includes("dsh-ocr-review")) {
+    return false;
+  }
+  const entry = statSync(candidate, { throwIfNoEntry: false });
+  if (entry === undefined || !entry.isFile()) {
+    return false;
+  }
+  const probe = spawnSync(candidate, ["version"], {
+    encoding: "utf8",
+    timeout: 15_000,
+    env: { ...process.env, ...PROBE_ENV },
+  });
+  return (
+    probe.error === undefined &&
+    probe.status === 0 &&
+    parseOcrVersion(readText(probe.stdout)) !== null
+  );
+}
+
+/** 真 CLI 定位：PATH 逐目录探测，win32 补常见后缀；候选必须真能跑通 `version`。 */
 function locateRealOcr(): string | undefined {
   const dirs = (process.env["PATH"] ?? "").split(path.delimiter).filter((dir) => dir.length > 0);
   const suffixes = process.platform === "win32" ? ["", ".exe", ".cmd"] : [""];
   return dirs
     .flatMap((dir) => suffixes.map((suffix) => path.join(dir, `ocr${suffix}`)))
-    .find((candidate) => !candidate.includes("dsh-ocr-review") && existsSync(candidate));
+    .find((candidate) => isRunnableRealOcr(candidate));
 }
 
 const realOcr = locateRealOcr();
@@ -39,16 +78,19 @@ function run(
     env: {
       ...process.env,
       ...(home === undefined ? {} : { HOME: home, USERPROFILE: home }),
-      FORCE_COLOR: "0",
-      NO_COLOR: "1",
-      CLICOLOR: "0",
+      ...PROBE_ENV,
     },
     timeout: 60_000,
   });
+  // spawn 自身失败（EINVAL/ENOENT/EACCES）时 stdout 与 stderr 可能是 null；原样返回会让
+  // 断言在 `.includes` 上炸成 TypeError，掩盖真正的原因。统一归一成字符串与可读错误。
+  const spawnError =
+    result.error === undefined ? "" : `${result.error.name}: ${result.error.message}`;
+  const stderr = readText(result.stderr) || spawnError;
   return {
     status: result.status ?? -1,
-    stdout: result.stdout,
-    stderr: result.stderr,
+    stdout: readText(result.stdout),
+    stderr,
   };
 }
 

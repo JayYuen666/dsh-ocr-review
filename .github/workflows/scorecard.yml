@@ -13,6 +13,8 @@ on:
   workflow_dispatch: {}
   schedule:
     - cron: "23 4 * * 1"
+  # 分支名写死 main，而下面的门控读 default_branch：`on.push.branches` 不支持表达式，
+  # 两者要一致就得让默认分支保持 main（改名时这一行与门控会各说一套，push 入口静默失效）。
   push:
     branches: [main]
 # 四类触发完全可能在同一分钟内重叠：批量改 ruleset 会连着抛多次 branch_protection_rule，
@@ -44,6 +46,10 @@ jobs:
       # job 级 permissions 一旦写了，没列出的项一律是 none，checkout 也就读不到仓库内容。
       # 这里显式补回来：它要的是读，与上面两项写权限不冲突。
       contents: read
+      # 官方 code scanning 起始工作流把 actions: read 标为「only required for workflows in
+      # private repositories」：upload-sarif 那一步要读本次运行的 workflow 元数据。本仓是 public，
+      # 结论不变；这一枚是给可见性变化准备的，不是实测缺过权限才加的。
+      actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,7 +67,7 @@ jobs:
       # 就会让 job 直接失败，而下面的 upload-sarif 根本不会执行——本次分析既没进 code scanning
       # 也没进 OpenSSF API，可失败原因却是一条与供应链体检无关的存储错误。
       - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
         with:
           sarif_file: results.sarif
       - name: Upload artifact

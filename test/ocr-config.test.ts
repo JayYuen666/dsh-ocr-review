@@ -24,6 +24,7 @@ import path from "node:path";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
 import { makeGateway, NonErrorFault } from "./fixtures/gateway-fixture.ts";
 import type { GatewayFixture } from "./fixtures/gateway-fixture.ts";
+import { pinPlatform, restorePlatform } from "./fixtures/platform-stub.ts";
 import {
   applyProviderSelection,
   ensureKeyScriptPointer,
@@ -159,6 +160,7 @@ function removeTmpSandbox(): void {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
 describe("providersFromSettingsValue", () => {
   const providers = providersFromSettingsValue(PI_AI_SETTINGS_VALUE);
 
@@ -607,12 +609,11 @@ describe("markKeyFlags", () => {
 describe("buildApiKeyCmd", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
   });
 
   it("路径含空格/单引号被 shq 转义", () => {
@@ -660,7 +661,7 @@ describe("buildApiKeyCmd", () => {
       if (real === undefined) {
         Reflect.deleteProperty(process, "platform");
       } else {
-        Object.defineProperty(process, "platform", real);
+        restorePlatform();
       }
     }
   });
@@ -757,7 +758,6 @@ describe("renderSelectedConfig", () => {
 describe("resolveOcrConfigPath（外部 ocr CLI 配置的位置）", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   // 家目录由环境变量注入，不用形参也不用 vi.mock：os.homedir() 在 POSIX 读 $HOME、
   // Windows 读 %USERPROFILE%，官方 expandHomePath 内部那次 homedir() 调用读到的必须是
   // **同一个注入值**（实测两侧读到的是同一个值）。vi.mock("node:os") 做不到这点——vitest
@@ -768,12 +768,12 @@ describe("resolveOcrConfigPath（外部 ocr CLI 配置的位置）", () => {
   const savedHome = process.env["HOME"];
   const savedUserProfile = process.env["USERPROFILE"];
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
     process.env["HOME"] = HOME;
     process.env["USERPROFILE"] = HOME;
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
     if (savedHome === undefined) {
       delete process.env["HOME"];
     } else {
@@ -927,12 +927,11 @@ describe("providersForCard（磁盘只剩外部 ocr config）", () => {
 describe("applyProviderSelection", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
     removeTmpSandbox();
   });
 
@@ -1241,12 +1240,11 @@ describe("renderSelectedConfig 的写侧闸门（坏 JSON 绝不覆盖用户配�
 describe("migratePlaintextKeys", () => {
   // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
-  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    pinPlatform("linux");
   });
   afterEach(() => {
-    Object.defineProperty(process, "platform", realPlatform ?? {});
+    restorePlatform();
     removeTmpSandbox();
   });
 

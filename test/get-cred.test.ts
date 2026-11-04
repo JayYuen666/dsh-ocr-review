@@ -198,6 +198,7 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
     mkdirSync(dotDsh, { recursive: true });
     writeFileSync(path.join(dotDsh, ".credentials.yaml"), DOC);
     const res = await runCred(["OCR_TEST_KEY"], { HOME: parent, DSH_HOME: undefined });
+    expect(res.code).toBe(0);
     expect(res.stdout).toBe(MANAGED_DOC_STDOUT);
   });
 
@@ -208,6 +209,7 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
       DSH_HOME: undefined,
       OCR_TEST_KEY: PROCESS_ENV_KEY,
     });
+    expect(res.code).toBe(0);
     expect(res.stdout).toBe(MANAGED_DOC_STDOUT);
   });
 
@@ -226,10 +228,15 @@ describe("get-cred.mjs（OCR api_key_cmd 入口）", () => {
   });
 
   it("托管文档没有该 ref ⇒ 回退 $DSH_HOME/.env（含 export 前缀与引号）", async () => {
-    const home = homeWith({ dotEnv: 'export OCR_TEST_KEY="sk-from-dot-env"\nOTHER=1\n' });
-    const res = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
-    expect(res.code).toBe(0);
-    expect(res.stdout).toBe("sk-from-dot-env\n");
+    const DOT_ENV_KEY = "sk-from-dot-env";
+    const home = homeWith({ dotEnv: `export OCR_TEST_KEY="${DOT_ENV_KEY}"\nOTHER=1\n` });
+    const viaEnv = await runCred(["OCR_TEST_KEY"], { HOME: ROOT, DSH_HOME: home });
+    expect(viaEnv.code).toBe(0);
+    expect(viaEnv.stdout).toBe(`${DOT_ENV_KEY}\n`);
+    // 显式参数指向同一目录时走同一条回退（参数只决定数据目录，不改变层序）。
+    const viaArg = await runCred(["OCR_TEST_KEY", home], { HOME: ROOT, DSH_HOME: undefined });
+    expect(viaArg.code).toBe(0);
+    expect(viaArg.stdout).toBe(`${DOT_ENV_KEY}\n`);
   });
 
   it("空值按未配置处理，并给出查过哪几层的可行动错误", async () => {

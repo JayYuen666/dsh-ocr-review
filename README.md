@@ -67,9 +67,9 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`. The package is on the public npm registry, so installation needs no credentials.
 
 - **Upgrading an installed copy is remove-then-add.** On a profile running HMR (the shipped ones do), `add` on a package the profile already depends on refuses before pnpm runs (`already-installed`) — run `remove` first, then `add` the target version; the new one starts without a restart. Without HMR the same `add` runs pnpm and reports `restart-required`.
-- **Requires Node.js `>= 22.12` and host `dsh` on the `0.2.1-rc.3` / `0.2.2-alpha.2` line.** The host reads `engines.dsh` (`^0.2.1-rc.3`) and decides on it alone; prereleases participate in the comparison. An incompatible host needs the explicit risk grant `dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<version> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against the three most recently released host versions at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
+- **Requires Node.js `>= 22.12` and host `dsh` on the `0.2.1-rc.3` or `0.2.2-alpha.2` line.** The host reads `engines.dsh` (`^0.2.1-rc.3 || ^0.2.2-alpha.2`) and decides on it alone; prereleases participate in the comparison. An incompatible host needs the explicit risk grant `dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<version> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **No `@deepseek-ai/*` under `dependencies`, by contract** (`test/publish-manifest.test.ts` enforces it). Consumer profiles install with `nodeLinker: hoisted` and `autoInstallPeers: false`, so a host package there is materialized as a real directory next to the copy the running host already loaded. `@deepseek-ai/dsh-tools` keys its scheduler with a plain `Symbol` (not `Symbol.for`), so symbol identity is per instance and **every native tool call in that profile throws** — while this package's build, typecheck and coverage gates stay green right up to that moment.
-- **The five host packages `host.js` imports as values are required peers**: `@deepseek-ai/schemastery` (the host fork — only it resolves `.volatile()` fields), `@deepseek-ai/dsh-credentials`, `@deepseek-ai/dsh-home-paths`, `@deepseek-ai/dsh-atomic-write` and `@deepseek-ai/dsh-typert-protocol` (the Remote service base). Each is repeated in `devDependencies` at the same pin so this repository's own typecheck resolves them; the build externalizes all manifest tables, keeping bare specifiers in the artifact.
+- **The five host packages `host.js` imports as values are required peers**: `@deepseek-ai/schemastery` (the host fork — only it resolves `.volatile()` fields), `@deepseek-ai/dsh-credentials`, `@deepseek-ai/dsh-home-paths`, `@deepseek-ai/dsh-atomic-write` and `@deepseek-ai/dsh-typert-protocol` (the Remote service base). Each also appears in `devDependencies` pinned to the compile-time host line (which may differ from the peer support window above) so this repository's own typecheck resolves them; the build externalizes all manifest tables, keeping bare specifiers in the artifact.
 - **What ships** (see `files` in `package.json`): `host.js`, `client.js`, `cordis.patch.yml`, `scripts/`, `locale/*.json`, `docs/`, `icon.svg`, `CHANGELOG.md` and `THIRD_PARTY_NOTICES.md`. `prepare` rebuilds the bundles, so nothing stale is published.
 
 ### <img src="https://api.iconify.design/lucide/arrow-down-to-line.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Shared version floor
@@ -78,11 +78,11 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> The external CLI
 
-This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.3** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
+This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.4** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
 
 ```sh
 brew install open-code-review                        # the formula tracks the newest release
-npm i -g @alibaba-group/open-code-review@1.13.3      # pinned to the version this plugin verifies against
+npm i -g @alibaba-group/open-code-review@1.13.4      # pinned to the version this plugin verifies against
 ```
 
 - **brew cannot pin.** `homebrew/core` carries one stable formula and no versioned variant, so `brew install` / `brew upgrade` always yields whatever is newest upstream. The npm command is the only one that can carry the verified version.
@@ -232,7 +232,7 @@ pnpm run check   # typecheck (both sides) → lint → client build → host bui
 - Coverage thresholds are **100%** across four metrics over the surface `vitest.config.ts` opts into (`coverageInclude`: `host.ts` + `lib/**`); two areas are deliberately outside it: the client half (`src/**`) is exercised through the bundle and the settings-card tests, and `scripts/get-cred.mjs` is driven by process-level tests spawning a child (v8 coverage cannot see a child process) — its behavioral gate lives in `test/get-cred.test.ts`.
 - Adding this package's **local directory** to a profile (`pnpm add <path>`) needs pnpm ≥ 12.3.0: earlier pnpm 12 releases resolve an unaliased local path as a registry package name (upstream #14437, fixed in 12.3.0). Installing from the registry is unaffected.
 - Bundle freshness is pinned by `test/build-host.test.ts`: a stale `host.js` / `client.js` fails the suite. Never hand-edit the bundles; `prepare` rebuilds them.
-- The plugin source is TypeScript loaded directly by the host's cordis loader (Node ≥ 22.18 type stripping); the bundles exist for the published npm surface.
+- The plugin source is TypeScript loaded directly by the host's cordis loader (Node ≥ 22.18 type stripping); the bundles exist for the published npm surface. Installing from a local path (`pnpm add <path>`) therefore needs Node ≥ 22.18 — the `>= 22.12` floor above applies to the published bundles only.
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> License
 
