@@ -20,7 +20,7 @@ const root = import.meta.dirname;
 // 外置清单 = shared 已发布的 REACT_RUNTIME_MODULES + zod（宿主 `PLATFORM_MODULES` 里本卡
 // 值导入的第三方运行时）。基座只能取已发布的导出：消费者 CI 装的是 registry 上那份 shared，
 // 未发布的符号在它发布之前不存在。zod 内联会打进每份 client.js，并让同一页面出现两份 zod 身份。
-const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod"];
+const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod", "@jayyuen66/dsh-plugin-shared/client"];
 
 /** 生成 client.js 的完整文本（含 ModuleLoader 外壳）。 */
 export async function buildClient() {

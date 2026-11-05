@@ -11,8 +11,8 @@
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-ocr-review?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-ocr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-ocr-review/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/node-%3E%3D22.12-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.3-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -67,7 +67,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 卸载用 `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`。包在公共 npm 上，安装不需要凭据。
 
 - **升级已装的那一份要「先 remove 再 add」。** profile 跑着 HMR（出厂那几个都跑）时，`add` 一个 profile 已经依赖着的包会在 pnpm 动手之前就被拒（`already-installed`）——先 `remove` 再 `add` 目标版本，新版不必重启就起跑。没跑 HMR 时同一个 `add` 照样走 pnpm，报 `restart-required`。
-- **要求 Node.js `>= 22.12`，宿主 dsh 在 `0.2.1-rc.3` 或 `0.2.2-alpha.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.3 || ^0.2.2-alpha.2`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `>= 24.9`，宿主 dsh 在 `0.2.1-rc.5` 或 `0.2.2-alpha.3` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 用 `nodeLinker: hoisted` 与 `autoInstallPeers: false` 安装，宿主包进了那张表就会落成真实目录，与宿主进程已加载的那份并存。`@deepseek-ai/dsh-tools` 的调度器键是普通 `Symbol`（不是 `Symbol.for`），符号身份按实例计算——那个 profile 里**每一次原生工具调用都抛**，而本包的构建、类型检查与覆盖率门在此前一路绿。
 - **`host.js` 以值导入的五枚宿主包是非 optional 的 peer**：`@deepseek-ai/schemastery`（宿主 fork——`.volatile()` 的解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`（Remote 的 Service 基类）。五枚同时以同一钉版另列进 `devDependencies`，本仓自己的类型检查才解析得到；构建对 manifest 三张表一律外部化，产物里保持裸说明符。
 - **发布面**（以 `package.json` 的 `files` 为准）：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`locale/*.json`、`docs/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepare` 重建两个 bundle，发出去的永远是当前源码的产物。
@@ -78,11 +78,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 外部 CLI
 
-本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.4** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
+本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.5** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
 
 ```sh
 brew install open-code-review                        # formula 只跟上游最新版
-npm i -g @alibaba-group/open-code-review@1.13.4      # 钉在本包核对的那一版
+npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那一版
 ```
 
 - **brew 钉不住版本。** `homebrew/core` 里只有一份 stable formula、没有版本化变体，`brew install` / `brew upgrade` 拿到的永远是上游最新。带得上核对版本的只有 npm 那条。
@@ -110,7 +110,7 @@ npm i -g @alibaba-group/open-code-review@1.13.4      # 钉在本包核对的那�
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- `package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，其唯一注册行是 `- id: ocr-review`、`name` 为裸包名——宿主只按裸包名扫描 client 半。
+- `package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面是**两条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件）与 `- id: ocr-review`、`name` 为裸包名——宿主只按裸包名扫描 client 半。
 - 卡片要 web profile（`dsh.client.platform: web`、`immediately: true`）。九个 `ocrReview` 方法由 apply fiber 无条件注册，宿主的 web 层从不起（如 TUI）时工具与设置照常在。
 - 网关只把方法暴露给本 profile 的客户端；本包不在它前面再加一层。
 - 部署默认写在注册行的 `config:` 上（cordis 按导出的 `Config` schema 校验）；优先级：设置卡运行时值 > 行 config > 内置默认。
@@ -232,7 +232,7 @@ pnpm run check   # typecheck（两侧）→ lint → client 构建 → host 构�
 - 覆盖率阈值**四项 100%**，分母是 `vitest.config.ts` 里 `coverageInclude` 选定的那一面（`host.ts` + `lib/**`）；两块刻意在分母外：客户端半（`src/**`）经 bundle 与设置卡用例覆盖，`scripts/get-cred.mjs` 由进程级用例另起进程驱动（v8 覆盖率看不到子进程），它的行为门禁在 `test/get-cred.test.ts`。
 - 往 profile 加本包的**本地目录**（`pnpm add <路径>`）需要 pnpm ≥ 12.3.0：更早的 pnpm 12 把无别名的本地路径当 registry 包名解析（上游 #14437，12.3.0 修复）。从 registry 装不受影响。
 - 产物新鲜度由 `test/build-host.test.ts` 钉着：`host.js` / `client.js` 落后于源码就红。发布物不手改；`prepare` 重建。
-- 插件源码是 TypeScript，由宿主的 cordis Loader 直接加载（Node ≥ 22.18 类型剥离）；bundle 只为 npm 发布面存在。
+- 插件源码是 TypeScript，由宿主的 cordis Loader 直接加载（Node ≥ 22.18 类型剥离）；bundle 只为 npm 发布面存在。从本地目录安装（`pnpm add <路径>`）读的是源码，因此需要 Node ≥ 22.18，而本包自己声明的地板是 `engines.node`（`>=24.9.0`）。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可
 

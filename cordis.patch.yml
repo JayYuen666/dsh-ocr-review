@@ -14,5 +14,8 @@
 # registry 包名解析；12.1.0/12.2.0 复现，12.2.0 的 release notes 无修复），12.3.0 起修复。
 # 把本包目录加进 profile 前先确认 pnpm ≥12.3.0；从 registry 装不受影响。
 - insert:
+    # 故意不写 id：shared 是本包 patch 启用的内部组件行，不是用户可停用的独立组件；
+    # 写 id 会让插件页出现一个可关闭的组件，关闭后本包设置卡会失去组件供应。
+    - name: "@jayyuen66/dsh-plugin-shared"
     - id: ocr-review
       name: "@jayyuen66/dsh-ocr-review"

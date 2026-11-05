@@ -6,6 +6,21 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.12
+
+外部 `ocr` 契约抬到 `1.13.5`，宿主开发基线抬到 `0.2.2-rc.1`、支持窗口由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 滚到 `^0.2.1-rc.5 || ^0.2.2-alpha.3`，`engines.node` 地板抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。对外工具与 Remote 方法名单不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。
+
+### Changed
+
+- **shared 抬到 0.2.4**：catalog、生成物与 lockfile 随之同步；shared 新增的 `apply_patch` 目标解析由它自己的普通依赖 `@deepseek-ai/dsh-fs-patch` 提供，本包不需要重复声明。
+- **OCR 契约抬到 `1.13.5`**：`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION` 与 `package.json` 的 `ocrCliVersion` 同值，两份 README、四份安装文档里钉版本的装法行、`THIRD_PARTY_NOTICES.md` 的验证版本与运行期依赖行都由 `test/readme-parity.test.ts` 核到同一枚数字——期望版本改了而装法行停在旧版时，用户照着装完会永远收到「实测与核对版本不一致」，而两侧文档各自自洽。
+- **宿主开发基线**：`devDependencies` 的 dsh 家族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，cordis 插件组两枚抬到 `1.1.0`，`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
+- **支持窗口与 Node 地板**：`engines.dsh` 与四枚 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3`；`@deepseek-ai/schemastery` 的 peer 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，与两条宿主线各自的实装版本对齐；`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`（宿主 `0.2.2` 线自己的地板）。
+- **卡片组件改由 shared 的 `./client` 供**：`src/client-entry.ts` 与 `src/remote.ts` 的运行期值导入迁到 `./client`，`package.json` 新增 `dsh.bundle.client.external`，`build-client.mjs` 的外置清单同步；`cordis.patch.yml` 因此插入一条**不写 id** 的 `@jayyuen66/dsh-plugin-shared` 组件行（写 id 会在插件页多出一个可关闭的组件，关掉后设置卡失去组件供应）。
+- **`js-yaml` 抬到 5.5.0**：本包唯一直接消费它的解析路径不变，取值随伞根 catalog 与 overrides 同源。
+- **CI 的 node 矩阵收敛**：`ci.yml` 的 `node: [22, 24]` 加 macOS 排除改为单格 `node: [24.9]`，两份 workflow 的 `node-version` 由 `24` 改为 `24.9`，与 `engines.node` 同值。
+- **文档纠偏**：dsh 徽章由 `^0.2.1-rc.3` 抬到 `^0.2.1-rc.5`，与 `engines.dsh` 首条同值；`cordis.patch.yml` 的注册行由「唯一一行」改写为「两条条目」并说明 shared 那行为何不写 id；「本地目录安装需要 Node ≥ 22.18」那句原文推论成「`>= 24.9` 只约束发布产物」，而 `engines.node` 是 manifest 字段、不分安装路线，改为两条并列陈述（读源码需 ≥22.18，本包地板是 `>=24.9.0`），中文侧此前完全没有这一句；`THIRD_PARTY_NOTICES.md` 指向的 README 小节名 `External CLI status and version` 在两份 README 里都不存在，改为实际标题 “The external CLI”；`docs/DETAIL.zh.md` 的 `startupVerify` 补上「同时门控版本测量」那半，此前只有英文侧写了。
+
 ## 0.1.11
 
 这一版把宿主开发基线抬到 `0.2.2-alpha.3`，同步 shared `0.2.3`，并把外部 `ocr`

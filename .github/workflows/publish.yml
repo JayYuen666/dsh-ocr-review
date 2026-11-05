@@ -40,7 +40,7 @@ jobs:
           version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.9
           # pnpm/action-setup 已在前一步装好 pnpm，cache: pnpm 的前置条件已满足。
           # 不加这一行，发布链每次都要全量 install，在 45 分钟上限下压缩的是 check 的可用时间。
           cache: pnpm
@@ -89,7 +89,7 @@ jobs:
           version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.9
           registry-url: https://registry.npmjs.org
           # publish job 里也要装依赖（prepack 要重建产物），同样受益于 store 缓存。
           cache: pnpm

@@ -47,13 +47,7 @@ jobs:
         # 于是 fmt:check 会把每个文件都判成未格式化（内容一字不差）。
         # 本仓用 .gitattributes 钉住 eol=lf，这一格就是它的判据。
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node: [22, 24]
-        exclude:
-          # 平台行为与 node 版本是两个正交维度：macOS 那一格只跑 node 24，
-          # 不让矩阵从 2 格变 4 格。全 9 仓的门禁在本机（darwin）上实跑通过，
-          # 所以这一格验的是真实 darwin 行为，不是重复劳动。
-          - os: macos-latest
-            node: 22
+        node: [24.9]
     runs-on: ${{ matrix.os }}
     # 官方对单 job 的上限是 6 小时，那是「系统允许」不是「应该允许」。不设这一行，
     # 一个卡住的 install 或测试会烧满 6 小时 runner 分钟才被杀，而期间没有任何信号。
@@ -95,7 +89,7 @@ jobs:
       # 想表达「失败也要传、取消就算了」只有 `!cancelled()` 这一种写法。`if:` 以 `!` 开头时必须
       # 整个表达式包进 `${{ }}`，否则 YAML 把它当标签语法。
       - name: 上传覆盖率报告
-        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && matrix.node == 24 }}
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && matrix.node == 24.9 }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
@@ -162,7 +156,7 @@ jobs:
           version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 24.9
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # 只用 pnpm pack：`npm pack` 不解析 `catalog:`，会把未解析的协议原样写进 tarball 的
@@ -228,8 +222,20 @@ jobs:
           if (!entries.some((entry) => entry?.name === NAME)) {
             throw new Error(`bundle patch 没有按裸包名引用 ${NAME} 的条目`);
           }
-          if (!entries.every((entry) => typeof entry?.id === "string" && entry.id.length > 0)) {
-            throw new Error(`bundle patch 有条目缺 id：${patchRel}`);
+          // 「每条都有 id」这条判据要放过 shared 那一行：它刻意不写 id，因为写 id 会在插件页
+          // 多出一个可关闭的组件，关掉后本包设置卡失去组件供应。放过得精确——只免「名字正是
+          // shared 且没有 id」这一形，其余条目仍必须有 id，且至少要有一条带 id，否则整张表
+          // 退化成全无 id 也照样绿。
+          if (!entries.some((entry) => typeof entry?.id === "string" && entry.id.length > 0)) {
+            throw new Error(`bundle patch 没有一条带 id 的条目：${patchRel}`);
+          }
+          for (const entry of entries) {
+            if (entry?.name === "@jayyuen66/dsh-plugin-shared" && entry?.id === undefined) {
+              continue;
+            }
+            if (!(typeof entry?.id === "string" && entry.id.length > 0)) {
+              throw new Error(`bundle patch 有条目缺 id：${patchRel}`);
+            }
           }
           console.log("装载通过：apply / Config / bundle patch 均就位");
           '

@@ -19,7 +19,7 @@ The card's MCP-servers editor writes the **external `ocr` tool's own** configura
 
 ## What it needs from outside
 
-The `ocr` command line, expected at version **1.13.4**; the expectation is declared once as `ocrCliVersion` in `package.json`, and the code constant plus both READMEs mirror that string, so a mismatch is reported (as a hint, never a hard failure) rather than papered over. Install paths are `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review@1.13.4`. With no candidate on PATH at all, the pre-check reports "no ocr candidate on either path" plus an install hint; "command not found" (exit 127) is the different case where a candidate exists but the binary cannot actually be run. The version probe always forces `OCR_NO_UPDATE=1` so probing cannot trigger an upgrade.
+The `ocr` command line, expected at version **1.13.5**; the expectation is declared once as `ocrCliVersion` in `package.json`, and the code constant plus both READMEs mirror that string, so a mismatch is reported (as a hint, never a hard failure) rather than papered over. Install paths are `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review@1.13.5`. With no candidate on PATH at all, the pre-check reports "no ocr candidate on either path" plus an install hint; "command not found" (exit 127) is the different case where a candidate exists but the binary cannot actually be run. The version probe always forces `OCR_NO_UPDATE=1` so probing cannot trigger an upgrade.
 
 API credentials are not stored here: the plugin writes a `api_key_cmd` that calls a helper script, so the key is fetched at run time instead of landing in a config file. If that script is missing, the card warns rather than sending an unauthenticated request.
 

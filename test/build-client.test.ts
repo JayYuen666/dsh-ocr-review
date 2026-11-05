@@ -29,7 +29,39 @@ import os from "node:os";
 import path from "node:path";
 
 import { z } from "zod";
+import {
+  CARD_UI_CSS,
+  CardForm,
+  Field,
+  NumberField,
+  SaveBar,
+  Section,
+  SelectField,
+  TextField,
+  ToggleField,
+  diffTouched,
+  fieldOf,
+  isRecord,
+  splitHint,
+} from "@jayyuen66/dsh-plugin-shared/client";
 import { buildClient } from "../build-client.mjs";
+
+const sharedClient = {
+  CARD_UI_CSS,
+  CardForm,
+  Field,
+  NumberField,
+  SaveBar,
+  Section,
+  SelectField,
+  TextField,
+  ToggleField,
+  claimApply: (): boolean => true,
+  diffTouched,
+  fieldOf,
+  isRecord,
+  splitHint,
+};
 
 /** 本包包名与包根（profile 的 link: 目标必须正好是它，否则比的是另一份残留副本）。 */
 const PKG_NAME = (
@@ -113,10 +145,11 @@ function profileBundleName(): string {
 /** 本包 cordis.patch.yml 声明的裸条目 id（= 0.1.7 的 settings 命名空间 = 表单入参）。 */
 function patchEntryIds(): string[] {
   const patch = readFileSync(path.join(PKG_DIR, "cordis.patch.yml"), "utf8");
+  // shared 是卡片组件行，不是本包的 settings 命名空间；这里只收本包自己的裸条目。
   return Array.from(
     patch.matchAll(/^\s*(?:-\s+)?id:\s*(?<id>\S+)\s*$/gmu),
     (row) => row.groups?.["id"] ?? "",
-  );
+  ).filter((id) => id !== "shared");
 }
 
 /**
@@ -303,6 +336,9 @@ async function loadClientExports(): Promise<{
     }
     if (name === "zod") {
       return { z };
+    }
+    if (name === "@jayyuen66/dsh-plugin-shared/client") {
+      return sharedClient;
     }
     throw new Error(`unexpected require in client factory: ${name}`);
   });

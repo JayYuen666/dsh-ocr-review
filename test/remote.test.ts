@@ -312,7 +312,7 @@ describe("设置卡 Remote（宿主读面与客户端消费侧）", () => {
       delete process.env["HOME"];
       try {
         const { deps } = depsOf({
-          scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.4 darwin/arm64" }],
+          scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.5 darwin/arm64" }],
         });
         const service = serviceOf(deps);
         const probed = await service.probe();
@@ -428,16 +428,16 @@ describe("设置卡 Remote（宿主读面与客户端消费侧）", () => {
 
     it("probe：一致 ⇒ consistent 真且不给换版命令；版本落进 versionSink", async () => {
       const { deps, versionSink } = depsOf({
-        scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.4 darwin/arm64" }],
+        scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.5 darwin/arm64" }],
       });
       const reply = await serviceOf(deps).probe();
       assert.equal(reply.ok, true);
       assert.equal("status" in reply, false, PROBE_NOT_REFUSED);
       if (!("status" in reply)) {
-        assert.equal(reply.version, "1.13.4");
+        assert.equal(reply.version, "1.13.5");
         assert.equal(reply.consistent, true);
         assert.equal(reply.changeText, "");
-        assert.equal(versionSink.value, "1.13.4");
+        assert.equal(versionSink.value, "1.13.5");
       }
     });
 

@@ -59,7 +59,7 @@ SOFTWARE.
 - 上游项目：`open-code-review`
 - 上游仓库：https://github.com/alibaba/open-code-review
 - 上游许可：Apache-2.0，Copyright 2026 Alibaba
-- 验证版本：1.13.4（声明在 package.json 的 `ocrCliVersion`，代码里的镜像常量、两侧 README 与随包文档由门禁对齐同一枚数字）
+- 验证版本：1.13.5（声明在 package.json 的 `ocrCliVersion`，代码里的镜像常量、两侧 README 与随包文档由门禁对齐同一枚数字）
 
 本包**使用**而非**包含**以下接口（`host.ts` / `lib/cli.ts` 的头注释按该版本源码逐条核对）：
 
@@ -76,7 +76,7 @@ SOFTWARE.
 
 这些都是 CLI 的外层面，但不是任何文档承诺过的稳定 API——本包把契约钉在上面那一版正是为了
 守住这一组接口；上游变更时以本包的契约闸测试（`test/cli.test.ts`、`test/parse.test.ts`）为
-首道防线，版本对不上时卡片、徽标与工具回执都会说（见 README 的「External CLI status and version」）。
+首道防线，版本对不上时卡片、徽标与工具回执都会说（见 README 的 “The external CLI” 一节）。
 
 ## 运行期依赖
 
@@ -84,9 +84,9 @@ SOFTWARE.
 
 | 依赖 | 版本 | 许可 | 引入方 |
 | --- | --- | --- | --- |
-| `@alibaba-group/open-code-review` | 1.13.4（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
-| `js-yaml` | 5.4.3（精确钉版） | MIT | `scripts/get-cred.mjs` 读 dsh 托管凭据文档 |
-| `@jayyuen66/dsh-plugin-shared` | catalog（伞根 0.2.3） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共面（值导入，构建时外部化） |
+| `@alibaba-group/open-code-review` | 1.13.5（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
+| `js-yaml` | 5.5.0（精确钉版） | MIT | `scripts/get-cred.mjs` 读 dsh 托管凭据文档 |
+| `@jayyuen66/dsh-plugin-shared` | catalog（伞根 ^0.2.4） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共面（值导入，构建时外部化） |
 | `zod` | catalog（伞根 4.6.7） | MIT | 设置卡 `src/remote.ts` 的 strict codec 形状校验；client 产物由宿主 `PLATFORM_MODULES` 提供 |
 
-dsh 宿主侧的包分两档：产物里以**值**导入、且列在 `peerDependencies` 的五枚（`@deepseek-ai/schemastery` 宿主 fork、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`）由宿主在场提供、不随本包分发；其余 `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 只在 `devDependencies` 里，用途是把类型绑到官方声明上（type-only 绑定），产物里不留说明符。本包按 dsh `0.2.2-alpha.3` 逐条核对过（同版的 cordis `4.0.6-alpha.2` 与 schemastery `3.18.6-alpha.2` fork 一并核对）。
+dsh 宿主侧的包分两档：产物里以**值**导入、且列在 `peerDependencies` 的五枚（`@deepseek-ai/schemastery` 宿主 fork、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`）由宿主在场提供、不随本包分发；其余 `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 只在 `devDependencies` 里，用途是把类型绑到官方声明上（type-only 绑定），产物里不留说明符。本包按 dsh `0.2.2-rc.1` 逐条核对过（同版的 cordis `4.1.0` 与 schemastery `3.19.0` fork 一并核对）。

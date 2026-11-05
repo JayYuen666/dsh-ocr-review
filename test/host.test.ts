@@ -958,9 +958,12 @@ function volatileFormOf(node: SchemaNode): string[] | null {
  *  读文件而不是抄常量：卡片/端点/命名空间三处都按它对齐，写死会让测试与包体漂移。 */
 function patchEntryId(): string {
   const yml = readFileSync(fileURLToPath(new URL("../cordis.patch.yml", import.meta.url)), "utf8");
-  const id = /^\s*-\s+id:\s*(?<id>\S+)\s*$/mu.exec(yml)?.groups?.["id"];
+  const id = Array.from(
+    yml.matchAll(/^\s*-\s+id:\s*(?<id>\S+)\s*$/gmu),
+    (row) => row.groups?.["id"] ?? "",
+  ).find((candidate) => candidate !== "" && candidate !== "shared");
   if (typeof id !== "string" || id.length === 0) {
-    throw new Error("cordis.patch.yml 里没有裸 `- id:` 条目");
+    throw new Error("cordis.patch.yml 里没有本包的裸 `- id:` 条目");
   }
   return id;
 }
