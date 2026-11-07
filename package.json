@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-ocr-review",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "dsh 工作区代码审查插件：把 open-code-review（ocr CLI）封装为 7 个模型工具 + 设置卡片（从宿主设置服务的 provider 清单选 provider/model 应用到 OCR 配置）。",
   "keywords": [
     "ai-code-review",
@@ -143,10 +143,7 @@
     },
     "client": {
       "platform": "web",
-      "immediately": true,
-      "external": [
-        "@jayyuen66/dsh-plugin-shared/client"
-      ]
+      "immediately": true
     }
   },
   "ocrCliVersion": "1.13.5"

@@ -20,7 +20,14 @@ const root = import.meta.dirname;
 // 外置清单 = shared 已发布的 REACT_RUNTIME_MODULES + zod（宿主 `PLATFORM_MODULES` 里本卡
 // 值导入的第三方运行时）。基座只能取已发布的导出：消费者 CI 装的是 registry 上那份 shared，
 // 未发布的符号在它发布之前不存在。zod 内联会打进每份 client.js，并让同一页面出现两份 zod 身份。
-const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod", "@jayyuen66/dsh-plugin-shared/client"];
+//
+// shared 的 `./client` 刻意**不**外置：外置的供应方是另一份包的 client 产物，要靠宿主把
+// 那份包装载成模块表条目才兑现；它只作为传递依赖装进 profile 时（`dsh plugin add` 的
+// 正常结果），宿主侧可能既不报错也不把它的 client 产物排进启动图，本卡的
+// `require("@jayyuen66/dsh-plugin-shared/client")` 就在页面启动时落进
+// "missed the module table"（GitHub issue #2，宿主 0.2.2-rc.1 dsh desktop）。内联之后
+// 产物自足，react / zod 仍经模块表取宿主的唯一实例，不产生第二份身份。
+const CLIENT_EXTERNALS = [...REACT_RUNTIME_MODULES, "zod"];
 
 /** 生成 client.js 的完整文本（含 ModuleLoader 外壳）。 */
 export async function buildClient() {

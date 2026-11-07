@@ -961,7 +961,7 @@ function patchEntryId(): string {
   const id = Array.from(
     yml.matchAll(/^\s*-\s+id:\s*(?<id>\S+)\s*$/gmu),
     (row) => row.groups?.["id"] ?? "",
-  ).find((candidate) => candidate !== "" && candidate !== "shared");
+  ).find((candidate) => candidate !== "");
   if (typeof id !== "string" || id.length === 0) {
     throw new Error("cordis.patch.yml 里没有本包只写 `- id:` 的条目");
   }

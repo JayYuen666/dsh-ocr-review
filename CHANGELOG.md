@@ -6,6 +6,14 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.13
+
+修复 0.1.12 引入的 web 启动失败：设置卡组件收回 `client.js` 内联，移除对 `@jayyuen66/dsh-plugin-shared/client` 的模块表外置与 `cordis.patch.yml` 里的 shared 供应行。对外工具与 Remote 方法名单不变；0.1.12 里遇到「应用无法启动或已意外停止」的用户升级本版即可，不需要再把 shared 装成 profile 的直接依赖。
+
+### Fixed
+
+- **设置卡组件内联进 `client.js`，产物自足**：0.1.12 把 `@jayyuen66/dsh-plugin-shared/client` 外置给宿主模块表，靠 `cordis.patch.yml` 插入的一条**不写 id** 的 shared 组件行把 shared 装载成供应方。这份供应链在 shared 只作为传递依赖装进 profile 时（`dsh plugin add @jayyuen66/dsh-ocr-review` 的正常结果）没有保证——宿主侧可以既不报错也不把 shared 的 client 产物排进启动图，页面启动时 `require("@jayyuen66/dsh-plugin-shared/client")` 落进 `missed the module table`，整窗报「应用无法启动或已意外停止」（GitHub issue #2，宿主 0.2.2-rc.1 dsh desktop；把 shared 装成 profile 直接依赖可绕过，回归 0.1.11 也可绕过）。`build-client.mjs` 的外置清单收回 react / zod 两族（宿主 `PLATFORM_MODULES` 供给，内联反而会产生第二份身份），卡片组件、`claimApply`/`diffTouched`/`isRecord` 等工具全部内联；`package.json` 的 `dsh.bundle.client.external` 与 patch 里的 shared 供应行随之移除，`cordis.patch.yml` 回到只声明本包一行。`client.js` 体积由 73.5 KB 增至 96.4 KB，仍在 `test/dist-size.test.ts` 的 116 KB 预算内；`test/build-client.test.ts` 新增两条产物自足判据（零 shared/client 请求、单层 ModuleLoader 外壳），工厂替身对未知请求的抛出把外置回流挡在装配层。
+
 ## 0.1.12
 
 外部 `ocr`契约抬到 `1.13.5`，宿主开发基线抬到 `0.2.2-rc.1`、支持窗口由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 滚到 `^0.2.1-rc.5 || ^0.2.2-alpha.3`，`engines.node` 下限抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。对外工具与 Remote 方法名单不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。

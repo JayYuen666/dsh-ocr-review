@@ -110,7 +110,7 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # pinned to the version thi
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
-- `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, which carries **two entries**: `- name: "@jayyuen66/dsh-plugin-shared"` (the supplier of the card components, deliberately **without an `id`** so the plugin page does not list it as a switchable component) and `- id: ocr-review` with `name` set to the bare package name — the bare name is what makes the host scan the client half.
+- `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, which carries a single entry `- id: ocr-review` with `name` set to the bare package name — the bare name is what makes the host scan the client half. The card components are bundled into `client.js` (only `react` / `zod` stay external to the host's module table), so no second package has to be loaded for the card to work.
 - The card needs a web profile (`dsh.client.platform: web`, `immediately: true`). The nine `ocrReview` methods are installed unconditionally on the apply fiber, so a host whose web layer never comes up (a TUI) still has the tools and settings.
 - The gateway exposes the methods only to clients of this profile; this package adds nothing in front of it.
 - Deployment defaults go on the registration line's `config:` (cordis validates through the exported `Config` schema); precedence: settings-card runtime value > line config > built-in default.

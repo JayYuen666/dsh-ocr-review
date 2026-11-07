@@ -29,39 +29,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { z } from "zod";
-import {
-  CARD_UI_CSS,
-  CardForm,
-  Field,
-  NumberField,
-  SaveBar,
-  Section,
-  SelectField,
-  TextField,
-  ToggleField,
-  diffTouched,
-  fieldOf,
-  isRecord,
-  splitHint,
-} from "@jayyuen66/dsh-plugin-shared/client";
 import { buildClient } from "../build-client.mjs";
-
-const sharedClient = {
-  CARD_UI_CSS,
-  CardForm,
-  Field,
-  NumberField,
-  SaveBar,
-  Section,
-  SelectField,
-  TextField,
-  ToggleField,
-  claimApply: (): boolean => true,
-  diffTouched,
-  fieldOf,
-  isRecord,
-  splitHint,
-};
 
 /** 本包包名与包根（profile 的 link: 目标必须正好是它，否则比的是另一份残留副本）。 */
 const PKG_NAME = (
@@ -145,11 +113,10 @@ function profileBundleName(): string {
 /** 本包 cordis.patch.yml 声明的裸条目 id（= 0.1.7 的 settings 命名空间 = 表单入参）。 */
 function patchEntryIds(): string[] {
   const patch = readFileSync(path.join(PKG_DIR, "cordis.patch.yml"), "utf8");
-  // shared 是卡片组件行，不是本包的 settings 命名空间；这里只收本包自己的裸条目。
   return Array.from(
     patch.matchAll(/^\s*(?:-\s+)?id:\s*(?<id>\S+)\s*$/gmu),
     (row) => row.groups?.["id"] ?? "",
-  ).filter((id) => id !== "shared");
+  );
 }
 
 /**
@@ -337,9 +304,10 @@ async function loadClientExports(): Promise<{
     if (name === "zod") {
       return { z };
     }
-    if (name === "@jayyuen66/dsh-plugin-shared/client") {
-      return sharedClient;
-    }
+    // shared 的 `./client` 不再是可满足的请求：产物内联了卡片组件（build-client.mjs 的
+    // 外置清单只留 react / zod）。工厂真对模块表发起这个 require 时，替身按「未知请求」
+    // 抛出，正好把「外置回流」挡在这里——宿主页面上的同款失败是启动期的
+    // "missed the module table"（GitHub issue #2）。
     throw new Error(`unexpected require in client factory: ${name}`);
   });
   const exported = mod as { apply?: unknown; inject?: unknown };
@@ -369,6 +337,25 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     // 精确全等，不放宽为包含判定：`settingsScope` 在 installed 0.1.7 全树零命中，
     // 留在清单里 = 整条 client 入口挂不上（症状正是设置卡静默消失）。
     assert.deepEqual(inject, ["slots", "configForms", "locale"]);
+  });
+
+  it("产物自足：client.js 不含 shared/client 的请求，也不嵌第二层 ModuleLoader 外壳", async () => {
+    const out = readFileSync(path.join(PKG_DIR, "client.js"), "utf8");
+    // 卡片组件内联进产物（build-client.mjs 的外置清单只留 react / zod）：对外置供应行
+    // 的请求在宿主侧可能静默没有供应（GitHub issue #2），所以这里要的是零命中——
+    // 上面的工厂替身把这一条按「未知请求即抛」再钉一遍，两条各管一层（文本层/装配层）。
+    assert.ok(
+      !out.includes("@jayyuen66/dsh-plugin-shared/client"),
+      "client.js 又出现 shared/client 的请求：build-client.mjs 的外置清单回流了",
+    );
+    // 内联目标是 shared 的 `./client` 经 `import` 条件解析出的 ESM 入口；若解析退化到
+    // `default` 条件（factory 外壳形态），嵌进来的第二层 load 外壳会在装载时把本包的
+    // 注册顶掉。外壳只允许最外层这一处。
+    assert.equal(
+      out.split("window.__ModuleLoader__.load").length - 1,
+      1,
+      "client.js 出现多层 ModuleLoader 外壳：内联解析落到了 shared 的 factory 形态产物上",
+    );
   });
 
   it("四个贡献槽逐条对齐；卡片/指引按 bundle 包名 keyed，表单仍吃裸条目 id", async () => {

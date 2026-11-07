@@ -110,7 +110,7 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- `package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面是**两条条目**：`- name: "@jayyuen66/dsh-plugin-shared"`（卡片组件的供应行，**刻意不写 `id`**，所以插件页不会把它列成可停用组件）与 `- id: ocr-review`、`name` 为裸包名——宿主只按裸包名扫描 client 半。
+- `package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面只有一条 `- id: ocr-review`、`name` 为裸包名——宿主只按裸包名扫描 client 半。卡片组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不再依赖第二份包被装载。
 - 卡片要 web profile（`dsh.client.platform: web`、`immediately: true`）。九个 `ocrReview` 方法由 apply fiber 无条件注册，宿主的 web 层从不起（如 TUI）时工具与设置照常在。
 - 网关只把方法暴露给本 profile 的客户端；本包不在它前面再加一层。
 - 部署默认写在注册行的 `config:` 上（cordis 按导出的 `Config` schema 校验）；优先级：设置卡运行时值 > 行 config > 内置默认。
