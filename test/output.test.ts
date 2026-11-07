@@ -3,7 +3,7 @@
 // 脱敏闸（OCR stderr 会整段回显 provider 配置）。
 // 守卫现校验「canonical 值命中该工具自己的 output schema」：本文件用
 // 合成 schema 把迷你校验器的每个分支点亮；真实 schema 的全流程由 host.test.ts 覆盖
-// （每次 execute 都在 define() 出口过一遍守卫）。
+// （每次 execute 产出的内容都会在 define() 那里过一遍守卫）。
 import { describe, expect, it } from "vitest";
 import type { JsonSchemaNode } from "@deepseek-ai/dsh-tools";
 import { assertToolOutput, redactKeyMaterial, stripAnsi } from "../lib/output.ts";
@@ -57,7 +57,7 @@ describe("assertToolOutput", () => {
     expect(() => guardOf("plain string", objectSchema)).toThrow(/result: expected object/u);
     expect(() => guardOf(["a"], objectSchema)).toThrow(/result: expected object/u);
     expect(() => guardOf({}, objectSchema)).toThrow(/missing required field text/u);
-    // 与官方同口径：键在但值是 undefined 同样算缺必填（JSON 里本就存不下 undefined）。
+    // 和官方一样：键在但值是 undefined 同样算缺必填（JSON 里本来就存不下 undefined）。
     expect(() => guardOf({ text: undefined }, objectSchema)).toThrow(
       /missing required field text/u,
     );
@@ -203,7 +203,7 @@ describe("assertToolOutput", () => {
     // 只查键名时这些写法会走到与官方子集无关的分支：`type: ["string","null"]` 让
     // scalarMismatch 走最后一支（null 放行、string 反被判违规），`enum: "abc"` 变成
     // 子串匹配且非字符串值抛 `map is not a function`。这些都是插件自己的代码写错，
-    // 必须在 schema 面炸掉，而不是继续拿错误的判据去判模型的数据。
+    // 必须在 schema 这里就报错，而不是继续拿错的判断去判模型的数据。
     const typeArray: Record<string, unknown> = { type: ["string", "null"] };
     expect(() => guardOf("x", typeArray as JsonSchemaNode)).toThrow(/type 必须是单个类型名/u);
     const enumString: Record<string, unknown> = { type: "string", enum: "abc" };
@@ -361,7 +361,7 @@ describe("redactKeyMaterial", () => {
     );
   });
 
-  it("已知凭据前缀嵌在路径分隔符之间也照抹：路径豁免不替裸 key 开口", () => {
+  it("已知凭据前缀嵌在路径分隔符之间也照抹：路径豁免不替独立 key 开口", () => {
     expect(redactKeyMaterial("/logs/sk-AbCdEfGhIjKlMnOpQrStUv/line")).toBe(
       "/logs/***REDACTED***/line",
     );
@@ -373,7 +373,7 @@ describe("redactKeyMaterial", () => {
   it("无空格的小写长 run 不随长度平方放大（脱敏同步跑在宿主事件循环上）", () => {
     // 上限取 `stdoutMaxBytes` 的默认档 400_000：失败详情与 llm test 回执都吃这一档，
     // 而脱敏排在截断之前（先截会把 key 切半、剩下半截全小写就不再命中这条规则）。
-    // 2 秒是独立写死的判据，不是量出来的余量：坏写法（把「run 里有数字或大写」写成前瞻）
+    // 2 秒是独立写死的判断，不是量出来的余量：坏写法（把「run 里有数字或大写」写成前瞻）
     // 在本机实测 51 秒，好写法 1.3 毫秒，差四个数量级，不存在擦边。
     const input = "aa-a".repeat(100_000);
     const started = performance.now();

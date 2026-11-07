@@ -1,4 +1,4 @@
-// 解析链与脱敏层的属性面：OCR 输出解析是「外部工具的任意文本 → 工具回执」的第一站，
+// 解析链与脱敏层的属性测试：OCR 输出解析是「外部工具的任意文本 → 工具回执」的第一站，
 // 全函数性与不变量在这里钉。期望值来自 lib/parse.ts / lib/output.ts 头注写明的契约、
 // /tmp 探针实测（redact 对纯小写不抹的保守方向、parseOcrVersion 的产品名锚定、
 // commaList 交回数组）与 test/fixtures 的真实 OCR 回执，不从实现派生。
@@ -18,7 +18,7 @@ const { zh } = MESSAGES;
 
 /** 路径段生成域（commaList 的合法输入）。 */
 const pathItemArb = fc.array(fc.stringMatching(/^[a-z0-9_.-]{1,10}$/u), { maxLength: 8 });
-/** effort 取值域：白名单变体 + 任意串（clampEffort 的输入全集）。 */
+/** effort 的取值范围：白名单里的写法加上任意字符串（clampEffort 的输入全集）。 */
 const effortArb = fc.oneof(
   fc.constant("LOW"),
   fc.constant("Medium"),
@@ -52,7 +52,7 @@ describe("parseReviewOutput 的全函数性", () => {
     assert.equal(summary.totalCommentCount, 3);
   });
 
-  it("status 非法（不在白名单）判 ok:false；failed 状态认得出但同样 ok:false", () => {
+  it("status 非法（不在白名单里）判 ok:false；failed 认得出来，但同样 ok:false", () => {
     const hostile = JSON.stringify({ ...JSON.parse(FIXTURE), status: "random-status" });
     assert.equal(parseReviewOutput(hostile, zh).ok, false);
     const failed = JSON.stringify({ ...JSON.parse(FIXTURE), status: "failed" });
@@ -78,7 +78,7 @@ describe("redactKeyMaterial 的保守性", () => {
         assert.equal(redactKeyMaterial(sk).includes(sk), false, `独立 key 未抹：${sk}`);
         const ghp = `ghp_${"A1".repeat(Math.ceil(length / 2)).slice(0, length)}`;
         assert.equal(redactKeyMaterial(ghp).includes(ghp), false);
-        // 纯小写短段连 20 字符门槛都不到，原样保留（路径可读性那一侧）。
+        // 纯小写短段连 20 字符阈值都不到，原样保留（保留它才能保持路径可读）。
         const kebabPath = "a-kebab-lowercase-path-segment";
         assert.equal(redactKeyMaterial(kebabPath), kebabPath, "路径形态被误抹");
       }),
@@ -125,7 +125,7 @@ describe("commaList 与 clampEffort 的取值域", () => {
     assert.deepEqual(commaList([], "paths", 32, zh), []);
   });
 
-  it("clampEffort：白名单外恒回 fallback；大小写不敏感收口", () => {
+  it("clampEffort：白名单之外总是回 fallback；比较大小写不敏感并统一处理", () => {
     fc.assert(
       fc.property(effortArb, (value) => {
         const clamped = clampEffort(value, "medium");

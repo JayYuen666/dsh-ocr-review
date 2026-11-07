@@ -1,8 +1,8 @@
-// ocr-config 纯函数测试：settings 值投影、官方通道降级状态、映射、迁移、落盘权限。
+// ocr-config 纯函数测试：settings 值投影、官方通道降级状态、映射、迁移、写到磁盘权限。
 //
-// 装配层在 lib/ocr-config.ts，判据分家在三层：lib/provider-projection.ts（settings 值 →
+// 装配层在 lib/ocr-config.ts，判据分在三层：lib/provider-projection.ts（settings 的值 →
 // provider 形状）、lib/provider-source.ts（通道门面与降级状态）、lib/config-store.ts
-// （外部 config.json 的落点与读写）。本文件按各自的边界直接取用，与生产侧的引用关系一致。
+// （外部 config.json 的写到哪儿与读写）。本文件按各自的边界直接取用，与生产侧的引用关系一致。
 //
 // 关键约束：**不读任何宿主文件**。provider 清单与 key 状态一律来自
 // test/fixtures/gateway-fixture.ts 的 DshConfigGateway 替身（宿主侧真身在
@@ -52,22 +52,22 @@ import type { DshProvider } from "../lib/provider-projection.ts";
 import type { ProviderDescriptor, ProviderSource } from "../lib/provider-source.ts";
 import type { OcrPaths, SelectInput } from "../lib/config-store.ts";
 import { MESSAGES } from "../lib/messages.ts";
-// #59 的守卫用例：净化判据的真源在宿主（dsh-subprocess），本包只能本地复刻（这条包不
-// 依赖任何 @deepseek-ai/*），所以把官方导出当**独立期望值**逐格比对，上游改判据这里红。
+// 那条环境净化的守卫用例：判据的唯一来源在宿主（dsh-subprocess），本包只能本地复刻（这个包不
+// 依赖任何 @deepseek-ai/*），所以把官方导出的内容当作**独立写死的期望值**逐格比对，上游改了判据这里就会失败。
 import { DSH_ENV_PREFIX, SENSITIVE_ENV_PATTERN } from "@deepseek-ai/dsh-subprocess";
 
 /** 全部 ref 都能解析出值的替身（apply 走 resolve 这一问）。 */
 const ALL_REFS = ["SENSENOVA_API_KEY", "XKIRO_API_KEY", "AMD_API_KEY", "ANTDIGITAL_API_KEY"];
 
 // ── 样本值（断言与入参各钉一次；host/lib 侧那些同名私有常量一律不 import，
-//    否则实现漂了测试跟着漂，判据就空转了）────────────────────────────────────
+//    否则实现变了测试跟着变，这一条就没有实际校验作用了）──────────────────────────
 /** 外部 ocr CLI 默认配置位置的组成：home 下的目录名 + 文件名。 */
 const OCR_CONFIG_DIR = ".opencodereview";
 const OCR_CONFIG_FILE = "config.json";
 /** 真实运行平台：这些用例会把 `process.platform` 桩成 linux 覆盖 POSIX 分支，
  *  文件系统权限位与路径分隔符仍按真实平台判，故另存一份。 */
 const runsOnWindows = process.platform === "win32";
-/** 凭据脚本的文件名（lib/config-store.ts 按 pluginDir/scripts 兜底拼的就是它）。 */
+/** 凭据脚本的文件名（lib/config-store.ts 按 pluginDir/scripts 拼兜底路径时用的就是它）。 */
 const GET_CRED_FILE = "get-cred.mjs";
 /** settings-fixture 里 sensenova 那条的两个模型与 baseURL。 */
 const SENSENOVA_MODEL = "deepseek-v4-flash";
@@ -76,11 +76,11 @@ const SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1";
 /** parseApiKeyCmd 用例共用的样本脚本路径与 amd 那条的真实型号。 */
 const SAMPLE_SCRIPT = "/a/get-cred.mjs";
 const AMD_MODEL = "DeepSeek-V4-Flash";
-/** pi-ai 侧的 api 取值（入参那一侧）与投影到 OCR 的 protocol（期望那一侧）：同一个字，
- *  两个角色，分成两名才留得住「api→protocol 是映射」这条判据。 */
+/** pi-ai 那边的 api 取值（当作入参）与投影到 OCR 的 protocol（当作期望值）：同一个字，
+ *  两个角色，分成两个名字才留得住「api 到 protocol 是映射」这条判断。 */
 const RESPONSES_API = "openai-responses";
 const RESPONSES_PROTOCOL = "openai-responses";
-/** 渲染入参样本：配置文件标签（写侧错误点名它）与 pluginDir 兜底用的目录。 */
+/** 渲染入参的样本：配置文件的标签（写入那侧报错时点名它）和 pluginDir 拼兜底路径用的目录。 */
 const CONFIG_LABEL = "/tmp/ocr/config.json";
 const PLUGIN_DIR_SAMPLE = "/tmp/plugin";
 /** buildApiKeyCmd 的期望产物形态（本文件按「未转义的样本」断言，路径已由 helper 转义）。 */
@@ -195,7 +195,7 @@ describe("providersFromSettingsValue", () => {
     expect(anthropic[0]?.protocol).toBe("anthropic");
   });
 
-  it("api 缺省按 llm-pi-ai 的默认 openai-completions 兜底（discovery.ts:300）；未知 api 原样透传给写侧白名单拒绝", () => {
+  it("api 没给出时按 llm-pi-ai 的默认值 openai-completions 顶上；未知的 api 原样透传，交给写入侧的白名单拒绝", () => {
     const value = {
       providers: {
         noApi: { apiKeyEnv: "K", baseURL: "https://n", models: [] },
@@ -218,8 +218,8 @@ describe("providersFromSettingsValue", () => {
     ).toThrow(/无法映射到 OCR 支持的 protocol/u);
   });
 
-  it("api 显式空串/全空白不兜底：protocol 原样透传，写侧白名单拒绝", () => {
-    // llm-pi-ai 的兜底是 `request.api ?? 'openai-completions'`（nullish 才兜）：
+  it("api 显式写成空串或全空白时不代替它取默认值：protocol 原样透传，由写入侧的白名单拒绝", () => {
+    // llm-pi-ai 的默认值是 `request.api ?? 'openai-completions'`（只有 nullish 才顶）：
     // 显式空串不是「未声明」，兜成 openai 等于把畸形声明改写成可用配置。
     const parsed = providersFromSettingsValue({
       providers: {
@@ -258,7 +258,7 @@ describe("providersFromSettingsValue", () => {
     expect(parsed.map((provider) => provider.name)).toStrictEqual(["upper"]);
   });
 
-  it("apiKeyEnv 不符合写侧白名单 ⇒ 置 null（不进入凭据查询与回显文案）", () => {
+  it("apiKeyEnv 不符合写入侧的白名单 ⇒ 置为 null（不进入凭据查询，也不出现在回显文案里）", () => {
     // 把真实 key 误填进这个字段时，旧实现会把它当 ref 送进凭据查询，失败文案再原样回显；
     // 小写 ref 同侧也构造不出 api_key_cmd（buildApiKeyCmd 的 badEnvKey），故一并置 null。
     const parsed = providersFromSettingsValue({
@@ -275,7 +275,7 @@ describe("providersFromSettingsValue", () => {
   });
 
   it("models 声明了但形状不对整条丢弃；未声明与显式空数组保留为空列表", () => {
-    // 非数组的 models 若也透传成 models=[]，写侧对空 models 放行任意 model，白名单被绕开。
+    // 不是数组的 models 如果也透传成 models=[]，写入侧对空 models 会放行任意 model，白名单就被绕开了。
     const parsed = providersFromSettingsValue({
       providers: {
         allJunk: { baseURL: "https://j", models: [{ id: 7 }, "scalar", { name: "无 id" }] },
@@ -427,8 +427,8 @@ describe("readProviders：官方通道的四种降级", () => {
 
   it("providers 形状异常（值里没有 providers 表）⇒ 不报 ready，理由点名命名空间", () => {
     // 此前这条固化的是「ready + 空清单」：卡片只显示一个空的 provider 选择器且没有任何
-    // 原因，apply 侧闸门放行后报 providerNotInList，把「配置形状坏了」说成
-    // 「你没配这个 provider」，排查方向直接跑偏。
+    // 原因，apply 侧检查放行后报 providerNotInList，把「配置形状坏了」说成
+    // 「你没配这个 provider」，会把排查带错方向。
     const { providers, source } = readOf(
       makeGateway({ descriptors: descriptorsWithValue({ defaultProvider: "x" }) }),
     );
@@ -495,7 +495,7 @@ describe("readProviders：官方通道的四种降级", () => {
   });
 
   it("providers 键是敌意 getter ⇒ 与键缺席同形（namespace-unavailable），不穿破不抛契约", () => {
-    // shared 的 fieldOf 把读取抛错塌成「取不到」：敌意键与「没配 providers」在本读口
+    // shared 的 fieldOf 把读取抛错收成「取不到」：敌意键和「没配 providers」在这个读取处
     // 不可区分，一律按 namespace-unavailable。仍能区分的故障形态（describe 形状、
     // descriptor 属性、投影条目读取）由上面三条用例分别钉在 settings-failed。
     const hostileValue = Object.defineProperty({}, "providers", {
@@ -544,8 +544,8 @@ describe("markKeyFlags", () => {
   });
 
   it("空串 apiKeyEnv 与 null 同义：不把空 ref 送进凭据服务", async () => {
-    // 此前判据只有 === null，而 apply / migrate 侧是 === null || === ""：同一份
-    // DshProvider 上两套判据，有别的构造路径送来 "" 就会去问凭据服务。
+    // 此前只判 === null，而 apply 和 migrate 那两侧是 === null 或 === ""：同一份
+    // DshProvider 上用两套标准，只要有别的构造路径送来 "" 就会去问凭据服务。
     const gateway = makeGateway();
     const keyed = await markKeyFlags(gateway, [
       {
@@ -584,7 +584,7 @@ describe("markKeyFlags", () => {
   });
 
   it("单个 ref 探测失败只降级这一条，不连坐整张卡", async () => {
-    // 修复前 Promise.all 整体 reject → providersForCard 抛穿到 GET /providers 的兜底，
+    // 修复前 Promise.all 整体 reject → providersForCard 抛穿到 GET /providers 的兜底处理，
     // 整张卡退化成 500 JSON，连其他 provider 已探到的 configured 结果一起丢。
     const gateway = makeGateway({ configured: ["SENSENOVA_API_KEY"] });
     const original = gateway.credentialConfigured;
@@ -607,7 +607,7 @@ describe("markKeyFlags", () => {
 });
 
 describe("buildApiKeyCmd", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   beforeEach(() => {
     pinPlatform("linux");
@@ -756,7 +756,7 @@ describe("renderSelectedConfig", () => {
 });
 
 describe("resolveOcrConfigPath（外部 ocr CLI 配置的位置）", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   // 家目录由环境变量注入，不用形参也不用 vi.mock：os.homedir() 在 POSIX 读 $HOME、
   // Windows 读 %USERPROFILE%，官方 expandHomePath 内部那次 homedir() 调用读到的必须是
@@ -837,9 +837,9 @@ describe("resolveOcrConfigPath（外部 ocr CLI 配置的位置）", () => {
     },
   );
 
-  it("windows 分隔符一侧交官方：`~\\x` 落到家目录之下（这是采纳 expandHomePath 换来的兼容面）", () => {
+  it("windows 分隔符一侧交官方：`~\\x` 落到家目录之下（这是采纳 expandHomePath 换来的兼容）", () => {
     // 断言写成 startsWith/endsWith 而不是 path.join(HOME, …) 等值：本机 join 是 POSIX
-    // 语义，反斜杠属于文件名，等值断言会在 CI 上假红。HOME 是注入值，所以 startsWith
+    // 语义，反斜杠属于文件名的一部分，等值断言会在 CI 上误报。HOME 是注入进去的值，所以 startsWith
     // 这一条不是"由构造必然成立"——展开走偏（原样返回或折到真家目录）当场就抓得到。
     const out = expandHomeForSeparator(String.raw`~\notes.txt`, "\\");
     expect(out.startsWith(HOME)).toBe(true);
@@ -867,7 +867,7 @@ describe("credentialScriptPath / defaultCredScriptPath", () => {
     expect(credentialScriptPath(paths)).toBe("/opt/other.mjs");
   });
 
-  it("getCredScript 为空 ⇒ 按 pluginDir 兜底，两处拼法同源", () => {
+  it("getCredScript 为空 ⇒ 按 pluginDir 拼兜底路径，两处的拼法来自同一处", () => {
     const paths: OcrPaths = {
       ocrConfigJson: "/tmp/c.json",
       homeOverride: undefined,
@@ -925,7 +925,7 @@ describe("providersForCard（磁盘只剩外部 ocr config）", () => {
 });
 
 describe("applyProviderSelection", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   beforeEach(() => {
     pinPlatform("linux");
@@ -956,9 +956,9 @@ describe("applyProviderSelection", () => {
     expect(wrote, "形状不合时不得留下半份配置").not.toContain(true);
   });
 
-  it("provider / model 在入口一次 trim：带首尾空白也能命中白名单并写成干净值", async () => {
-    // 下游三处判据都是**逐字相等**：providers.find(name === …)、renderSelectedConfig
-    // 的 models 白名单、写盘与回执。只判 trim 非空却继续用未归一的原值，得到的是
+  it("provider 和 model 在入口处 trim 一次：带首尾空白也能命中白名单，并写成干净的值", async () => {
+    // 下游三处的判断都是**逐字相等**：providers.find(name === …)、renderSelectedConfig
+    // 的 models 白名单、写到磁盘与回执。只判 trim 之后非空却继续用没归一的原值，得到的是
     // 「名字明明在清单里却报 providerNotInList」——用户没法自救的错形状。
     const paths = makePaths();
     const applied = await selectOf(
@@ -1063,7 +1063,7 @@ describe("applyProviderSelection", () => {
     expect(gateway.resolvedRefs).toStrictEqual(["AMD_API_KEY"]);
   });
 
-  it("key 只存在于 OCR 运行时不可达的层（env/project-env）⇒ 写盘前拒绝（假绿闸）", async () => {
+  it("key 只存在于 OCR 运行时够不到的层（env 或 project-env）⇒ 在写到磁盘之前就拒绝（防漏报的那道闸）", async () => {
     // env 层 + ref 名命中宿主净化模式（*API_KEY 全中招）⇒ OCR 子进程拿不到。
     const paths = makePaths();
     const envGateway = makeGateway({ sources: { AMD_API_KEY: "env" } });
@@ -1120,7 +1120,7 @@ describe("applyProviderSelection", () => {
     );
   });
 
-  it("getCredScript 缺省时按 pluginDir 兜底解析脚本路径", async () => {
+  it("getCredScript 没给出时按 pluginDir 拼出脚本路径", async () => {
     const paths = makePaths();
     const applied = await selectOf(
       makeGateway(),
@@ -1169,7 +1169,7 @@ describe("loadOcrConfig", () => {
   });
 });
 
-describe("renderSelectedConfig 的写侧闸门（坏 JSON 绝不覆盖用户配置）", () => {
+describe("renderSelectedConfig 的写侧检查（坏 JSON 绝不覆盖用户配置）", () => {
   const providers = providersFromSettingsValue(PI_AI_SETTINGS_VALUE);
   const base = {
     configLabel: CONFIG_LABEL,
@@ -1238,7 +1238,7 @@ describe("renderSelectedConfig 的写侧闸门（坏 JSON 绝不覆盖用户配�
 });
 
 describe("migratePlaintextKeys", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   beforeEach(() => {
     pinPlatform("linux");
@@ -1333,7 +1333,7 @@ describe("migratePlaintextKeys", () => {
   });
 
   it("apiKeyEnv 形状不合法 ⇒ 投影层置 null，迁移记 unknown、明文原样留着", async () => {
-    // 投影层按 CREDENTIAL_ENV_KEY 收口后，非法 ref 不会进入迁移映射；这里验证的是
+    // 投影层按 CREDENTIAL_ENV_KEY统一处理之后，非法的 ref 不会进入迁移映射；这里验证的是
     // 「映射里没有它 ⇒ 不删明文」这条后果，与「命令构造失败」那条旧路径同义。
     const paths = makePaths();
     writeFileSync(
@@ -1451,7 +1451,7 @@ describe("migratePlaintextKeys", () => {
     expect(existsSync(`${paths.ocrConfigJson}.bak`)).toBe(false);
   });
 
-  it("migrate 也按 pluginDir 兜底找脚本，并跳过无 apiKeyEnv 的 provider 映射", async () => {
+  it("migrate 也按 pluginDir 找脚本，并跳过没有 apiKeyEnv 的 provider 映射", async () => {
     const paths = makePaths();
     const gateway = makeGateway({
       descriptors: descriptorsWithValue({
@@ -1494,7 +1494,7 @@ describe("migratePlaintextKeys", () => {
 
   // 前提是 POSIX 权限位：Windows 上 writeFile 的 mode 与 stat.mode 都不是这一套语义。
   it.skipIf(runsOnWindows)(
-    "旧文件权限比 0600 宽时写回仍收口到 0600（官方靠新 inode 携带 mode，不靠事后 chmod）",
+    "旧文件的权限比 0600 宽时，写回去仍然设成 0600（官方靠新的 inode 带上 mode，不靠事后 chmod）",
     async () => {
       const paths = makePaths();
       const before = JSON.stringify({
@@ -1513,8 +1513,8 @@ describe("migratePlaintextKeys", () => {
   );
 
   it("并发「应用 provider」与「一键迁移」不互相覆盖整份文档，且不留下 .lock", async () => {
-    // 落盘交给异步 writeFileAtomic 之后，"读→判→写"不再同处一个 tick：
-    // 不加锁时两条链各自从旧快照渲染整份文档再落盘，后写者把先写者的效果抹掉。
+    // 写到磁盘交给异步 writeFileAtomic 之后，"读→判→写"不再同处一个 tick：
+    // 不加锁时两条链各自从旧快照渲染整份文档再写到磁盘，后写者把先写者的效果抹掉。
     // 这里的两个信号是**互不相交**的键，所以任何一侧的丢失都看得见：
     //   apply 唯一负责顶层 provider；migrate 唯一负责把 amd 的明文 key 换成 cmd。
     const paths = makePaths();
@@ -1666,7 +1666,7 @@ describe("parseApiKeyCmd", () => {
   });
 
   it("路径里有空格或单引号也能原样反解（shq 转义的往返）", () => {
-    // 这条判据要走 POSIX 的 shq 写出与反解；Windows 上 buildApiKeyCmd 默认走 cmd 双引号，
+    // 这一条要走 POSIX 的 shq 写出与反解；Windows 上 buildApiKeyCmd 默认走 cmd 的双引号，
     // 不桩平台就覆盖不到单引号转义分支（Windows CI 的 100% 覆盖会因此掉一行）。
     const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
@@ -1704,7 +1704,7 @@ describe("parseApiKeyCmd", () => {
     });
   });
 
-  it("win32 双引号形态（双引号臂写出的那种）也能反解，含引号/尾部反斜杠的往返", () => {
+  it("win32 的双引号写法（走双引号那条分支写出的那种）也能反解，含引号和尾部反斜杠的往返", () => {
     expect(parseApiKeyCmd(String.raw`node "C:\p\get-cred.mjs" "K" "C:\u\.dsh"`)).toStrictEqual({
       script: String.raw`C:\p\get-cred.mjs`,
       envKey: "K",
@@ -1731,7 +1731,7 @@ describe("parseApiKeyCmd", () => {
       dshHome: undefined,
     });
     // 双引号形态自己的三档形态不符（POSIX 先判 null 才轮到它们）：裸词 / 未闭合 /
-    // 尾随空白在最后一枚 token 之后照常收口。
+    // 最后一个 token 之后的尾随空白照常去掉。
     expect(parseApiKeyCmd(`node ${SAMPLE_SCRIPT} "KEY"`)).toBeNull();
     expect(parseApiKeyCmd(`node "${SAMPLE_SCRIPT} 'KEY'`)).toBeNull();
     expect(parseApiKeyCmd(`node "${SAMPLE_SCRIPT}" "KEY"   `)).toStrictEqual({
@@ -1767,7 +1767,7 @@ describe("协议映射表不被原型链污染", () => {
   // 而这里要验的恰恰是「方括号查表不命中继承属性」。
   const protoKey = "__proto__";
 
-  it("api=constructor / __proto__ / toString 原样透传（交给写侧白名单拒绝），不取到构造函数", () => {
+  it("api 写成 constructor、__proto__、toString 时原样透传（交给写入侧的白名单拒绝），不会取到构造函数", () => {
     const value = {
       providers: {
         ctor: providerRaw("constructor"),
@@ -1784,8 +1784,8 @@ describe("协议映射表不被原型链污染", () => {
     ]);
   });
 
-  it("api 类型不对（数字/对象）不静默降级成 openai，字符串化后原样透传给白名单", () => {
-    // 此前所有非字符串 api 都塌成 ""，与「未声明」共用同一条 openai 兜底，于是
+  it("api 类型不对（数字或对象）时不悄悄降级成 openai，字符串化后原样透传给白名单", () => {
+    // 此前所有非字符串的 api 都塌成 ""，和「没有声明」共用同一条 openai 默认值，于是
     // api: 123 被写进 config.json 当成 OpenAI 线协议 —— select 成功、OCR 调不通。
     const value = {
       providers: {
@@ -1867,7 +1867,7 @@ describe("repointDanglingKeyScripts", () => {
     }
   });
 
-  it("旧脚本还活着 ⇒ 一条都不动（用户显式指定优先于 pluginDir 兜底）", () => {
+  it("旧脚本还在 ⇒ 一条都不动（用户显式指定的优先于按 pluginDir 拼的兜底路径）", () => {
     const paths = makePaths();
     try {
       const live = { script: paths.getCredScript, dshHome: current.dshHome };
@@ -1876,7 +1876,7 @@ describe("repointDanglingKeyScripts", () => {
       expect(repointDanglingKeyScripts(same, live, zh).repointed).toStrictEqual([]);
       expect(entryOf(same, "opencodego")["api_key_cmd"]).toContain(paths.getCredScript);
       // 情形二：指向另一份**同样存在**的脚本（自制脚本 / 共享副本）。这条走的是
-      // 「旧脚本还活着」而不是「就是当前这份」，两者是不同的判据。
+      // 「旧脚本还在」而不是「就是当前这一份」，这是两个不同的判断。
       const elsewhere = path.join(paths.pluginDir, "scripts", "other-get-cred.mjs");
       writeFileSync(elsewhere, "#!/usr/bin/env node\n");
       const other = docOf(elsewhere);
@@ -2117,16 +2117,16 @@ describe("ensureKeyScriptPointer", () => {
   });
 });
 
-// ── #59 上游净化判据的等价守卫 ───────────────────────────────────────────────
+// ── 上游环境净化规则的等价守卫 ───────────────────────────────────────────────
 // 本包不能运行期 import 宿主常量（"@deepseek-ai/* 一律不进 dependencies" 由
-// test/publish-manifest.test.ts 强制），本地只能复刻一份判据。复刻漂了的症状是
+// test/publish-manifest.test.ts 强制），本地只能复刻一份判断。复刻得不一样的症状是
 // 「key 在 OCR 运行时其实取不到，却被判可达」→ 卡片报 select 成功、OCR 侧 401。
-// 这条用例把官方导出当**独立期望值**：上游改判据而本地没跟，这里就红。
-/** 官方判据的独立复述：大小写不敏感命中敏感词，或以 DSH_ 开头（大小写不敏感）。 */
+// 这条用例把官方导出的内容当**独立写死的期望值**：上游改了规则而本地没跟，这里就失败。
+/** 官方那条规则的独立复述：大小写不敏感地命中敏感词，或者以 DSH_ 开头（也不区分大小写）。 */
 const officialReachable = (ref: string): boolean =>
   !SENSITIVE_ENV_PATTERN.test(ref) && !ref.toUpperCase().startsWith(DSH_ENV_PREFIX);
 
-describe("净化模式与宿主 dsh-subprocess 等价（上游改判据这里必须红）", () => {
+describe("净化模式与宿主 dsh-subprocess 等价（上游改了规则这里必须失败）", () => {
   // 语料两侧都要有：只有一侧的话，「恒 true」或「恒 false」的退化实现也能一起绿。
   const CORPUS = [
     "SENSENOVA_API_KEY",
@@ -2169,10 +2169,10 @@ function atomicSandbox(): { dir: string; cleanup: () => void } {
   };
 }
 
-describe("writeConfigAtomic：备份权限与符号链接落点", () => {
+describe("writeConfigAtomic：备份权限与符号链接位置", () => {
   it("备份按 0600 创建（源文件是 0644 时也不留宽权限窗口）", async () => {
     if (runsOnWindows) {
-      // Windows 没有 POSIX 权限位；本用例的判据不成立，显式跳过而不是假装通过。
+      // Windows 没有 POSIX 的权限位；这一条的判断在这里不成立，要显式跳过而不是假装通过。
       return;
     }
     const box = atomicSandbox();
@@ -2182,7 +2182,7 @@ describe("writeConfigAtomic：备份权限与符号链接落点", () => {
       await writeConfigAtomic(target, "new");
       const backup = `${target}.bak`;
       expect(readFileSync(backup, "utf8")).toBe("old");
-      // 判据是创建那一刻的权限位：copyFileSync + chmod 会先落一份 0644 的备份。
+      // 看的是创建那一刻的权限位：copyFileSync 加 chmod 会先落下一份 0644 的备份。
       // 权限位是 mode 的低 9 位；取模等价于按 0o777 掩码。
       expect(statSync(backup).mode % 0o1000).toBe(0o600);
       expect(statSync(target).mode % 0o1000).toBe(0o600);

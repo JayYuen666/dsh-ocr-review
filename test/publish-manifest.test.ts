@@ -1,15 +1,15 @@
-// test/publish-manifest.test.ts —— 发布形态门禁：入口面必须**与发布器无关**地可解析。
+// test/publish-manifest.test.ts —— 发布形态的门禁：入口声明必须**与用哪个发布器无关**地解析得开。
 //
-// 为什么值得一条测试：构建与单测都在源码侧跑绿，而真实故障发生在装出去之后。两类坑都在
-// 那一侧。其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
+// 为什么值得一条测试：构建与单测都在源码这边跑绿，而真实故障发生在装出去之后。两类坑都在
+// 装出去之后。其一是入口指向没随包发出去的文件；其二是入口覆盖写在 `publishConfig` 里——
 // pnpm 发布时把它合并到顶层，npm 不合并（npm 会打印
 // "Unknown publishConfig config main/exports" 并忽略），同一个仓库换个发布器就发出一个
 // import 必失败的包。这里不模仿任何发布器的实现，而是把不变式钉成断言：**顶层入口自己就
 // 完整可解析，且 publishConfig 不再承载入口字段**，于是两套发布器语义的差恒为空。
 //
-// 第二组门禁扫注释：日期与轮次编号写下时有用，读的人只会困惑，且没有任何读者能从中重建
-// 当时的上下文。只扫注释行与文档；测试夹具里的日期（modifiedAfter 之类的边界值）是数据，
-// 角色文档里的日期是内容，两者都不在禁面内。
+// 第二组门禁扫注释：日期和轮次编号在写下的当时有用，读的人只会困惑，而且没有人能从中重建
+// 当时的上下文。只扫注释行和文档；夹具里的日期（modifiedAfter 这类边界值）是数据，
+// 角色文档里的日期是内容，这两种都不在禁止之列。
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { readFile, readdir } from "node:fs/promises";
@@ -22,21 +22,21 @@ const pkgDir = path.join(import.meta.dirname, "..");
 /**
  * 只在注释与文档里禁的指涉：日期。
  *
- * 「轮次编号」刻意不进门禁。本仓的 `本轮` / `第 N 轮` 绝大多数指的是**会话轮次**这个产品概念
+ * 「轮次编号」刻意不放进这条门禁。本仓的 `本轮` 和 `第 N 轮` 绝大多数指的是**会话轮次**这个产品概念
  * （`第一轮消息不支持 fork`、gate 的「下一轮重新计数」），而不是写下这段注释时的工作轮次。
- * 两种含义在中文里同形，机器分不开；要禁只能靠逐条人工判断，那不是门禁能做到的事。
+ * 两种含义在中文里写法相同，机器分不开；要禁只能靠逐条人工判断，那不是自动门禁能做到的事。
  */
 const FORBIDDEN_IN_COMMENTS: readonly RegExp[] = [/\b(?:19|20)\d{2}-\d{2}-\d{2}\b/u];
 
 /**
- * `publishConfig` 里允许出现的字段：可见性、源，与发布用的 dist-tag。三者都不是入口面。
+ * `publishConfig` 里允许出现的字段：可见性、源，与发布用的 dist-tag。三者都不是入口字段。
  *
  * `tag` 是**允许**写在这里、但本包刻意不写：npm 对带 prerelease 段的版本在既没有 `--tag`
  * 也没有 `publishConfig.tag` 时**直接拒绝发布**（installed npm/lib/commands/publish.js 的
  * isDefaultTag/isPreRelease 那道检查），所以漏旗标的后果是「发不出去」而不是「发错标签」——
- * 响亮失败比把预发布版推上 latest 好。不带这一位时稳定版照默认走 latest，发预发布版就得
- * 显式表态。它与本门禁守的那类字段不同：门禁管的是「入口字段不得只写在 `publishConfig`
- * 里」（npm 不合并 main/exports，换个发布器就发出一个 import 必失败的包），`tag` 没有这个
+ * 直接报错比把预发布版推到 latest 上更好。不带这一位时稳定版按默认走 latest，发预发布版就得
+ * 显式表态。它和这条门禁负责的那类字段不同：门禁管的是「入口字段不能只写在 `publishConfig`
+ * 里」（npm 不合并 main 和 exports，换一个发布器就发出一个 import 必定失败的包），`tag` 没有这个
  * 风险：npm 读它，pnpm 侧还有 `--tag` 旗标可覆盖。
  */
 const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry", "tag"]);
@@ -44,14 +44,14 @@ const ALLOWED_PUBLISH_CONFIG = new Set(["access", "registry", "tag"]);
 /** 精确版本：三段数字，可带预发布后缀，整串锚定（`^`/`~`/`||` 与尾随文本都不放行）。 */
 export const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
 
-/** 遍历时跳过的目录：依赖、产物、以及本门禁刻意不管的面。 */
+/** 遍历时跳过的目录：依赖、产物，以及这条门禁刻意不管的范围。 */
 const SKIP_DIRS = new Set([
   "node_modules",
   "coverage",
   "_env",
   "dist",
   ".git",
-  // 测试夹具里的日期与轮次编号是数据，不是注释噪音。
+  // 夹具里的日期和轮次编号是数据，不是注释里的干扰内容。
   "test",
   "tests",
   "__tests__",
@@ -59,7 +59,7 @@ const SKIP_DIRS = new Set([
   "agents",
 ]);
 
-/** package.json 里与入口面有关的形状；其余字段本门禁不关心。 */
+/** package.json 里和入口声明有关的那几个字段；其余字段这条门禁不管。 */
 interface Manifest {
   readonly main?: string;
   readonly types?: string;
@@ -91,12 +91,12 @@ export type PatternShape =
  * 把 `files` 的一条模式归类。本仓实际用到的只有三种写法：裸文件名、目录名、`dir/*.ext`。
  *
  * 「精确文件名」这一档不能和后缀过滤混为一谈：把 `host.js` 当成 `.js` 后缀过滤，于是
- * `files` 里列的每个构建产物都匹配不上任何条目——`files` 覆盖这道断言的集合会空掉，门禁
- * 自己先失效。实测报出来是「main 指向 host.js，但它不在 files 覆盖范围内」。
+ * `files` 里列的每个构建产物都匹配不上任何条目——`files` 覆盖到的、这道断言要查的集合会空掉，这条
+ * 检查自己先失效。实测报出来是「main 指向 host.js，但它不在 files 覆盖范围内」。
  *
  * 后缀只取通配符**之后**的点号段：`dist/*` 里最后一个点号在通配符之前（或根本不存在），
  * 那不是后缀而是模式本身的一部分；按它切片会得到 `"*"` 这类永不命中的后缀，让该条模式
- * 一个文件都列不出来——门禁静默失效，悬空入口照样绿。`/` 结尾之外的空目录按包根算，
+ * 一个文件都列不出来——这条门禁静默失效，指向不存在文件的入口照样通过。`/` 结尾之外的空目录按包根算，
  * 且与 `dir/*` 一样只看单层，不递归扫进 node_modules。
  *
  * @param entry - `files` 数组里的一项
@@ -202,7 +202,7 @@ export function entryFiles(manifest: Manifest): readonly { label: string; file: 
   return [...scalars, ...flat];
 }
 
-/** 发布器无条件附带的文件：不受 `files` 约束，但也不该由门禁去断言它在 `files` 里。 */
+/** 发布器无条件附带的文件：不受 `files` 约束，但也不该由这条门禁去断言它在 `files` 里。 */
 const ALWAYS_SHIPPED = [
   "package.json",
   "README.md",
@@ -227,7 +227,7 @@ async function readSurface(): Promise<{ manifest: Manifest; shipped: Set<string>
 }
 
 /**
- * 递归收集该纳入注释门禁的源文件与文档（相对包根、`/` 分隔）。
+ * 递归收集该纳入注释门禁的源文件和文档（相对包根、用 `/` 分隔）。
  *
  * @param dir - 当前目录的绝对路径
  * @param prefix - 相对包根的前缀
@@ -257,11 +257,11 @@ async function collectSources(dir: string, prefix: string): Promise<string[]> {
 
 /**
  * 取一段文本里属于注释或文档的行。文档（`.md`）整体算；代码只取注释行，免得把字符串
- * 字面量里的数据（日期夹具、示例路径）误判成注释噪音。
+ * 字面量里的数据（日期类的夹具、示例路径）误判成注释里的干扰内容。
  *
- * @param file - 相对包根的文件名，用于决定判定口径
+ * @param file - 相对包根的文件名，用来决定按哪条规则判断
  * @param text - 文件全文
- * @returns 参与门禁的行
+ * @returns 参与这条门禁的行
  */
 function commentLines(file: string, text: string): string[] {
   if (file.endsWith(".md")) {
@@ -345,7 +345,7 @@ describe("外部 CLI 的版本声明与依赖边界", () => {
     // 曾经那枚 @alibaba-group/open-code-review 的 consequences 有两层：装本插件顺带改了
     // 用户的全局工具链，且解析出的随包绝对路径比 PATH 上用户自装那份更先命中，于是用户
     // 升级了 CLI、插件仍跑随包那份旧版，卡片报的版本与他终端里跑的永远对不上。
-    // 判据只断「这张表为空」：它守的是整类「装上本插件就顺带装别的东西」，不是某一个包名。
+    // 这里只断「这张表为空」：它防的是整类「装上本插件就顺带装别的东西」，不是某一个包名。
     const { manifest } = await readSurface();
     expect(manifest.optionalDependencies, "本包不随包分发外部 CLI").toBeUndefined();
   });
@@ -355,7 +355,7 @@ describe("版本与变更记录", () => {
   it("变更记录顶部版本与 package.json 的 version 一致", async () => {
     // 发布版本只从 package.json 取，但读者从 CHANGELOG 判断这一版改了什么。
     // 只改 version 不写条目时，npm 上会发出一个「没有变更记录」的新版本，而所有
-    // 既有门禁都是绿的；这条把两处版本标题钉在一起。
+    // 其余门禁都是通过的；这一条把两处的版本标题对上同一个值。
     const { manifest } = await readSurface();
     if (manifest.version === undefined) {
       throw new Error("package.json 没有 version");
@@ -371,7 +371,7 @@ describe("版本与变更记录", () => {
   });
 });
 
-/** 宿主 dsh 家族的包名前缀（本组三条判据都要按它筛，收常量）。 */
+/** 宿主 dsh 家族的包名前缀（这一组三条判断都要按它筛，所以收成常量）。 */
 const DSH_PREFIX = "@deepseek-ai/dsh-";
 
 describe("宿主依赖的版本形状（升级防线）", () => {
@@ -383,7 +383,7 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // 符号身份按模块实例计算：宿主的 dsh-agent-loop 用自己那份的 Symbol 去读由副本挂载出来的
     // ToolRuntime，拿到 `undefined`，于是**每一次原生工具调用都抛**
     // "Cannot read properties of undefined (reading 'prepare')"，整个 profile 的工具一起失效。
-    // 本包的构建、类型检查与测试在此之前全部照绿，判据只能落在 manifest 面。
+    // 本包的构建、类型检查和测试在此之前全部通过，能判断的依据只能落在 manifest 上。
     // 因此运行期真要用的那几枚走**非 optional 的 peer**（宿主在场，profile 不装 peer，
     // 所以不产生副本），编译要的再另列一份 dev。别把任何 @deepseek-ai/* "恢复"回 dependencies。
     const { manifest } = await readSurface();
@@ -397,31 +397,35 @@ describe("宿主依赖的版本形状（升级防线）", () => {
     // registry 上的 dist-tag 是实测出来的陷阱：`latest` 可能指向远早于宿主 ABI 的版本。
     // 精确钉是让「不带版本地装成远古版本」这件事不发生的最小条件；一旦放宽成 `^`/`~`，
     // 宿主某天发新 minor 就会自动跟上去，而插件与宿主 ABI 耦合，那等于让本包在没有测试的
-    // 情况下换掉编译用的宿主类型面。
-    // 只判 dev 这一侧：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
+    // 情况下换掉编译用的宿主类型声明。
+    // 只判 dev这一侧 段：它才是本包真正装下来的那一份。peer 记的是「运行期由宿主提供」，
     // 装什么版本由宿主决定，判据在下面那条。
     const { manifest } = await readSurface();
     const dshDev = Object.entries(manifest.devDependencies ?? {}).filter(([name]) =>
       name.startsWith(DSH_PREFIX),
     );
-    expect(dshDev.length, "至少要钉住一枚 dsh-* 开发依赖，否则下面两条都是空转").toBeGreaterThan(0);
+    expect(
+      dshDev.length,
+      "至少要有一个固定版本的 dsh-* 开发依赖，否则下面两条没有实际校验作用",
+    ).toBeGreaterThan(0);
     const ranged = dshDev.filter(([, range]) => !EXACT_VERSION.test(range));
     expect(ranged, "这些 dsh-* 开发依赖没有精确钉住版本").toStrictEqual([]);
   });
 
   it("devDependencies 里的 dsh-* 全部同版本（不许装出第二份宿主类型）", async () => {
-    // 宿主类型面被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
-    // nominal 类型（品牌串、投影状态）会开始互相不认，而那不报编译错、只报运行期
+    // 宿主类型被这些包以 type-only 方式消费；同一次安装里出现两枚 dsh-session 的拷贝，
+    // nominal 类型（带类型品牌的串、投影状态）会开始互相不认，而那不报编译错、只报运行期
     // 「认不出这个 callId」。同版本是让这件事不发生的最小条件。
     // 基准取自这张表自己，不取自 `@deepseek-ai/dsh`：本包一个符号都不从宿主主包导入
-    // （服务面全部来自 dsh-* 子包），拿它当基准只是在 manifest 里养一条没人读的条目。
+    // （用到的服务全部来自 dsh-* 子包），拿它当基准只是在 manifest 里养一条没人读的条目。
     const { manifest } = await readSurface();
     const dshDev = Object.entries(manifest.devDependencies ?? {}).filter(([name]) =>
       name.startsWith(DSH_PREFIX),
     );
-    expect(dshDev.length, "至少要钉住一枚 dsh-* 开发依赖，否则同版本这条无从校验").toBeGreaterThan(
-      0,
-    );
+    expect(
+      dshDev.length,
+      "至少要有一个固定版本的 dsh-* 开发依赖，否则同版本这一条无从校验",
+    ).toBeGreaterThan(0);
     const baseline = dshDev[0]?.[1];
     const drifted = dshDev.filter(([, range]) => range !== baseline);
     expect(drifted, `这些 dsh-* 与 ${baseline} 不同版本`).toStrictEqual([]);
@@ -443,7 +447,7 @@ describe("宿主依赖的版本形状（升级防线）", () => {
   });
 });
 
-describe("形状判据自身（files 通配、exports 三态、精确版本）", () => {
+describe("形状判断自身（files 通配、exports 三种形态、精确版本）", () => {
   it("无点号的通配模式不做后缀过滤，列出该目录下全部文件", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "ocr-publish-shape-"));
     try {
@@ -498,7 +502,7 @@ describe("形状判据自身（files 通配、exports 三态、精确版本）",
     ]);
   });
 
-  it("精确版本判据接受稳定版、拒绝范围算子与尾随文本", () => {
+  it("精确版本的判断接受稳定版、拒绝范围算子和尾随文本", () => {
     for (const pinned of ["0.3.0", "0.2.2-alpha.2"]) {
       expect(EXACT_VERSION.test(pinned), `${pinned} 应判为精确版本`).toBe(true);
     }

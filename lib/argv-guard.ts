@@ -1,11 +1,11 @@
-// lib/argv-guard.ts —— 交给 `ocr` CLI 的 argv 的**唯一闸门层**：转义、绝对路径校验、
+// lib/argv-guard.ts —— 交给 `ocr` CLI 的 argv 的**唯一把关处**：转义、绝对路径校验、
 // 逗号列表规范化、枚举与数值钳制。
 //
 // 为什么从 lib/cli.ts 拆出来：这几族东西共同回答一个问题——「这串用户可控输入能不能进最终
-// 命令」。判据本身与「命令长什么样」无关（cli.ts 的五条命令构造与回收守护只是逐槽位来问一
+// 命令」。这条判断本身与「命令长什么样」无关（cli.ts 里五条命令的构造和回收守护只是逐个槽位来问一
 // 次），故与 cli.ts 分家。
 //
-// 报错文案双语：与 lib/cli.ts 同一口径——消息表（lib/messages.ts 的一份）由调用点作入参
+// 报错文案两种语言：和 lib/cli.ts 用同一种做法——文案表（lib/messages.ts 里那一份）由调用点作为参数
 // 注入，纯函数不读设置；本模块的校验文本原样回显给模型（工具失败信息）。
 
 import { realpathSync, statSync } from "node:fs";
@@ -23,7 +23,7 @@ const TRAILING_PATH_SEPARATORS = /[\\/]+$/u;
  *
  * NUL 一律拒绝：POSIX 命令串根本无法表示 NUL 字节，含 NUL 的值经 `bash -c '<inner>'`
  * 会被截断或报错，产出「看起来成功但 argv 被截断」的不确定行为。当前各调用点恰好都先
- * 做了 NUL 拒绝，但那是靠调用顺序维持的隐式不变量；这里把闸下沉到实现自身，让
+ * 做了 NUL 拒绝，但那是靠调用顺序维持的隐式不变量；这里把这道判断放进实现自身，让
  * 「转义后的串一定能被 shell 完整读回」由本函数保证，而不是指望每个新调用点记得先查一遍。
  */
 export function shq(value: string): string {
@@ -47,12 +47,12 @@ export function shq(value: string): string {
  *
  * 归一（posix.normalize + 去尾随斜杠）的目的：同一个仓库只允许一种字符串形态到达下游。
  * `/repo//sub`、`/repo/./a`、`/repo/` 与 `/repo/sub` 是同一目录的几种写法，而会话目录
- * 等按路径派生的键会把这些写法各存一份；`..` 段按词法折叠成实际目标（`/repo/../..`
- * 落到 `/`）——折叠是 normalize 对绝对路径的既有行为，不存在「解析后仍含 ..」的形态。
+ * 等按路径派生的键会把这些写法各存一份；`..` 段按词法化简成实际目标（`/repo/../..`
+ * 落到 `/`）——化简是 normalize 对绝对路径的既有行为，不存在「解析后仍含 ..」的形态。
  *
- * 但**折叠到文件系统根必须拒绝**，这不是防御性噪音：/repo/../.. 与 / 都归一成 /，而下游
- * resolveRepoFile 的边界判据是 path.relative(rootReal, real) 不以 .. 开头——根为 / 时它对
- * /etc/passwd 给出 etc/passwd，判据恒成立，于是 --rule /etc/passwd 会被当成仓内文件读进
+ * 但**化简到文件系统根必须拒绝**，这不是防御性噪音：/repo/../.. 与 / 都归一成 /，而下游
+ * resolveRepoFile 的边界条件是 path.relative(rootReal, real) 不以 .. 开头——根为 / 时它对
+ * /etc/passwd 给出 etc/passwd，这个条件永远成立，于是 --rule /etc/passwd 会被当成仓内文件读进
  * OCR 并送给 LLM（子进程跑在 danger-full-access 下）。所以归一后落在根上的输入一律按
  * 「repo 给得太宽」拒绝；win32 用 path.win32.parse 解出的根与归一结果比较，覆盖盘符根
  * 与 UNC 共享根（两者的根形态各不止一种，不能只比字面量）。
@@ -97,7 +97,7 @@ export function assertAbsoluteRoot(root: unknown, messages: OcrReviewMessages): 
  * 这两个 flag 会把文件内容读进 OCR 并可能送给 LLM；OCR 子进程以
  * `danger-full-access` 运行，若放任 `../../.ssh/id_rsa` 之类的路径，一次工具调用就能
  * 把仓库外的文件送进模型。realpath 先解开符号链接再比较，`path.resolve` 的文本前缀
- * 判据挡不住指向仓库外的软链。
+ * 这个比较挡不住指向仓库外的软链接。
  *
  * @param root - 已校验为绝对路径的 repo 根
  * @param value - 模型给的路径（相对 repo 或绝对）
@@ -140,7 +140,7 @@ export function resolveRepoFile(
     throw new Error(format(messages.repoFileOutside, { name, path: text }));
   }
   // 两次路径解析之间文件可能被删掉/换掉（TOCTOU）：realpath 已经成功、stat 却拿到 ENOENT
-  // 时，裸 statSync 抛的是带绝对路径与 errno 的 fs 错误——用户看到的既不是双语文案，也
+  // 时，不带 throwIfNoEntry 的 statSync 抛的是带绝对路径与 errno 的 fs 错误——用户看到的既不是双语文案，也
   // 不说明「哪个参数坏了」。用 throwIfNoEntry: false 把它折成同一个「必须是普通文件」
   // 拒绝，既不起一条测不到的 catch 分支（本包覆盖率是四项 100%，写进去就是一条永远
   // 不执行的死语句），也把文案留在双语表里。
@@ -165,7 +165,7 @@ export function resolveRepoFile(
   return real;
 }
 
-/** limit 非法（NaN / ≤0 / 非整数）时的保守兜底上限：宁可比调用方的意图更严。 */
+/** limit 不合法（NaN、≤0、非整数）时保守使用的兜底上限：宁可比调用方想要的更严。 */
 const DEFAULT_LIST_LIMIT = 200;
 
 /** `auto` = 不传 `--effort`，让 OCR 自己的配置决定；工具 schema 仍只暴露三档。 */
@@ -203,7 +203,7 @@ function firstCommaInsideBraces(text: string): number {
  *  空洞本是「非字符串元素」这一条该拦的形态，跳过就等于静默少一项过滤条件。 */
 function listSourceItems(value: unknown, name: string, messages: OcrReviewMessages): string[] {
   if (typeof value === "string") {
-    // 与数组分支同一条口径：花括号内的逗号是 glob 语义的一部分，split(",") 会把它拆成
+    // 和数组那条分支用同一条规则：花括号里的逗号是 glob 语义的一部分，split(",") 会把它拆成
     // 多个无效模式（"src/**/*.{ts,tsx}" → "src/**/*.{ts" 与 "tsx}"），过滤条件失效、
     // 审查范围被无声扩大。逗号字符串形式同样表达不了这类模式，两条路径都明确拒绝。
     if (firstCommaInsideBraces(value) >= 0) {
@@ -269,8 +269,8 @@ function takeTrimmedItems(
 /** 入参 → 规范化条目数组（--exclude/--path 契约）。返回值是**条目数组**；把数组按逗号
  *  拼接成 flag 值由调用点负责（lib/cli.ts 的 `shq(excludes.join(","))`）。
  *  元素类型严格：`value.map(String)` 会把对象变成 `[object Object]` 静默混入
- *  模式串（过滤条件失效 = 审查范围被扩大），故非字符串元素一律抛错。
- *  防注入由调用点 shq() 兜底。 */
+ *  模式串（过滤条件失效 = 审查范围被扩大），所以非字符串元素一律抛错。
+ *  防注入由调用点的 shq() 负责。 */
 export function commaList(
   value: unknown,
   name: string,

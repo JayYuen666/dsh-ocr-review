@@ -1,13 +1,13 @@
-// host.ts 集成测试：注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote 方法。
+// host.ts 的集成测试：工具注册 + 7 个工具的执行路径 + 9 条 ocrReview Remote 方法。
 //
 // 关键约束：**绝不触碰外部 ocr 二进制与网络**。shell.execute 全是替身，
-// 断言的是「下发给宿主的命令串形态」与「结果映射」；--output 落盘文件由替身按
+// 断言的是「下发给宿主的命令串形态」与「结果映射」；--output 写到磁盘文件由替身按
 // 命令里的路径反写（这正是真实 OCR 的契约：exit 0 ⇒ 该路径有 JSON）。
 //
 // provider 清单与 key 状态同样走替身：本包不读宿主的私有配置文件与凭据文件，
 // 宿主替身给出 settings.describe() 的返回值与 ctx.credentials
 // 的 describe/resolve 回答。替身的 resolve 返回**明文样本**，用来断言它不会出现在
-// 任何 HTTP 回执 / 落盘配置里（官方通道的安全不变式）。
+// 任何 HTTP 回执 / 写到磁盘配置里（官方通道的安全不变式）。
 // HOME 指向临时目录之后才 import host.ts：插件按 os.homedir() 派生外部 ocr CLI 的
 // 默认配置位置，端点读写的就是那个沙箱路径（含原子写 + .bak 回归）。
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
@@ -77,28 +77,28 @@ const { format } = await import("../lib/messages.ts");
 
 const OCR_CONFIG = path.join(HOME, OCR_DIR_NAME, OCR_CONFIG_NAME);
 /** cordis.patch.yml 里本包那一行的裸条目 id（0.1.7 起也就是设置命名空间）。host.ts 里那份
- *  是私有常量，测试侧独立声明：命名空间与 schema 不同源这条判据才拦得住。 */
+ *  是私有常量，测试这边独立声明：命名空间和 schema 不一致时这一条才拦得住。 */
 const PLUGIN_ENTRY_ID = "ocr-review";
 /** 官方作业注册表里本包作业的 kind（宿主据此签发的 id 形如 `ocr-review-N`）。与条目 id
- *  同字但是两件事：一位是注册表的分类键，一位是 cordis 装配面的行 id，各自独立漂移。
- *  类型吃官方 `JobKind`（host.ts 的 JobKindMap 合并项）而不是裸字面量：object literal 的
+ *  同字但是两件事：一位是注册表的分类键，一位是 cordis 装配的行 id，各自独立漂移。
+ *  类型吃官方 `JobKind`（host.ts 的 JobKindMap 合并项）而不是写成字面量：object literal 的
  *  属性类型会被拓宽成 string，`jobs.start(spec)` 那道官方名义闸就白装了。 */
 const OCR_JOB_KIND: JobKind = "ocr-review";
-/** 明文 key 样本：任何出口（HTTP 回执/工具文本）出现即测试失败。 */
+/** 明文 key 的样本：在任何对外输出（HTTP 回执、工具返回的文本）里出现都算测试失败。 */
 const PLAIN_KEY = "sk-abcdefghijklmnopqrstuvwxyz012345";
 /** ctx.credentials 替身回答的活 key：同样绝不出宿主。 */
 const LIVE_KEY = "sk-live-from-credential-service-0001";
 /** fixture 里声明了 apiKeyEnv 的全部 ref（替身默认全都能解析）。 */
 const ALL_REFS = ["SENSENOVA_API_KEY", "XKIRO_API_KEY", "AMD_API_KEY", "ANTDIGITAL_API_KEY"];
 /** 👨‍👩‍👧‍👦 = 11 枚码元（4 对代理 + 3 枚 ZWJ）。截断用例的切点是照着这个长度算的，
- *  故 ZWJ 写成显式转义而不是裸字符：裸字符会被编辑器/格式化悄悄吃掉，一吃掉长度就
+ *  故 ZWJ 写成显式转义而不是写成实际字符：实际字符会被编辑器/格式化悄悄改掉，一改掉长度就
  *  从 11 变 8，切点落回合法配对边界，用例便对着空靶子打还一路绿灯。 */
 const FAMILY = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
 
 // ── shell 替身 ──────────────────────────────────────────────────────────────
 //
-// host.ts 的 shell / webServer / systemPrompt 三个服务面已绑官方声明（`Pick<ShellExecutor,
-// "resolve" | "execute">` 等），但官方那三面都是带 private/protected 成员的 `Service` 子类
+// host.ts 的 shell、webServer、systemPrompt 这三个服务已绑官方声明（`Pick<ShellExecutor,
+// "resolve" | "execute">` 等），但官方那三个服务都是带 private/protected 成员的 `Service` 子类
 // → 名义比 → 结构替身根本满足不了整个类类型，故替身经 applyPlugin 的 `as unknown as`
 // 边界接进去，只带本包真正读到的那几个字段（result() 交回 ShellRunResult 的子集）。
 // 断言的是「下发给宿主的请求形态」与「结果映射」，官方字段一变，编译错误落在 host.ts。
@@ -116,7 +116,7 @@ interface RunScript {
   output?: string;
   /** --output 文件按这个字节数截成**稀疏**文件：造「超上限」那一档而不真写这么多字节。 */
   sparseBytes?: number;
-  /** 把 --output 指到一个**目录**：让插件读回落盘结果时抛错（失败路径的降级分支）。 */
+  /** 把 --output 指到一个**目录**：让插件读回写到磁盘结果时抛错（失败路径的降级分支）。 */
   outputDirectory?: boolean;
   /** 前台 result() 直接抛出的值（含非 Error，覆盖 shared 的 errorText 两支）。 */
   throws?: unknown;
@@ -130,10 +130,10 @@ interface ResolveCall {
   onExpiry?: string;
   stdoutMaxBytes?: number;
   signal?: AbortSignal;
-  /** 按调用携带的沙箱策略（官方 `SandboxExecutionPolicy`，手抄形状以免测试引运行期包）。 */
+  /** 按调用携带的沙箱策略（官方 `SandboxExecutionPolicy`，照抄的形状以免测试引运行期包）。 */
   sandboxPolicy?: { mode: string; workspaceRoot: string };
   /** 按调用携带的普通环境变量（官方 `ShellExecRequest.env`，在凭据净化之后合并）。
-   *  状态探测靠它带 `OCR_NO_UPDATE=1`，这条断言就是那道副作用闸门。 */
+   *  状态探测靠它带 `OCR_NO_UPDATE=1`，这条断言钉的就是不许产生那条副作用。 */
   env?: Record<string, string>;
 }
 
@@ -151,7 +151,7 @@ interface FakeProc {
   kill: () => boolean;
   done: Promise<void>;
   settle: () => void;
-  /** 0.1.7 ShellExecution 的前台投影（旧 run() 的落点）；后台 job 从不 await 它。 */
+  /** 0.1.7 ShellExecution 的前台投影（旧 run() 的返回结构）；后台 job 从不 await 它。 */
   result: () => Promise<unknown>;
   /** 往某条流上追加输出（等价于子进程又吐了一段）。 */
   emit: (channel: "stdout" | "stderr", text: string) => void;
@@ -162,7 +162,7 @@ interface FakeProc {
   observed: { stdout: FakeReader; stderr: FakeReader };
 }
 
-/** 会话根归一化那条环境查询（`git rev-parse --show-toplevel`）的命令判据。 */
+/** 会话根归一化那一步的环境查询（`git rev-parse --show-toplevel`）要匹配的命令。 */
 const GIT_TOPLEVEL_RE = /git\s+rev-parse\s+--show-toplevel/u;
 
 interface FakeShell {
@@ -170,7 +170,7 @@ interface FakeShell {
   scripts: RunScript[];
   procs: FakeProc[];
   /** 模拟 shell 执行器自己那个 maxTimeoutMs 设置项的宿主上限：resolve 按
-   *  min(请求, 上限) 收口（官方 shell 契约：resolve「apply implementation-owned
+   *  min(请求, 上限) 收敛（官方 shell 的契约：resolve「apply implementation-owned
    *  defaults and caps」）。缺省 = 不设限，替身原样回传。 */
   maxTimeoutMs?: number;
   /** `git rev-parse --show-toplevel` 的应答：字符串 = 顶层在别处；null = 非 git
@@ -247,7 +247,7 @@ interface RegistryDefaults {
 
 /**
  * 宿主装载期怎么解析 `LocalJobRegistry.Config`，这里就怎么取默认值（实测
- * `validate({})` ⇒ `{10, 262144, 16384, 150}`，给部分覆盖会与默认合并）。手抄字面量的毛病
+ * `validate({})` ⇒ `{10, 262144, 16384, 150}`，给部分覆盖会与默认合并）。照抄字面量的毛病
  * 是"抄来的值印证抄来的行为"：宿主改了默认，测试仍绿而真宿主已经变了。
  */
 function registryDefaults(row: Partial<RegistryDefaults> = {}): RegistryDefaults {
@@ -344,7 +344,7 @@ function registryWithThrowingList(real: LocalJobRegistry): LocalJobRegistry {
 
 /**
  * 只抄 `wait` 的入参、其余读侧原样转给真件的那一枚注册表面：enforceOcrDeadline
- * 的兜底窗口现来自行 config，测试需要一个不复刻注册表行为就能看到「递了几毫秒」的位置。
+ * 的兜底窗口现在来自行 config，测试需要一个不复刻注册表行为、只看「传进去几毫秒」的位置。
  * @param real 真件
  * @returns 替身注册表 + 每次 wait 收到的第二个实参（毫秒，未给时为 undefined）
  */
@@ -470,17 +470,17 @@ function makeShell(): FakeShell {
       if (!GIT_TOPLEVEL_RE.test(spec.command)) {
         shell.resolveCalls.push(spec);
       }
-      // 宿主收口：min(请求, shell.maxTimeoutMs)。请求值原样留在 resolveCalls 里
-      // （那份断言的是「下发给宿主的请求形态」），收口只体现在回传的 spec 上。
+      // 宿主收敛：min(请求, shell.maxTimeoutMs)。请求值原样留在 resolveCalls 里
+      // （那里断言的是「下发给宿主的请求形态」），收敛只体现在返回的 spec 上。
       const cap = shell.maxTimeoutMs;
       if (cap !== undefined && spec.timeoutMs !== undefined && spec.timeoutMs > cap) {
         return { ...spec, timeoutMs: cap };
       }
       return spec;
     },
-    // 0.1.7：execute 是前后台唯一入口。分流判据沿用宿主自身的分工——前台带
+    // 0.1.7：execute 是前台和后台唯一的入口。怎么分流沿用宿主自己的分工——前台带
     // timeoutMs（deadline），后台（wait=false）不带、且从不 await result()。
-    // result() 即旧 run() 的落点：脚本队列仍按发起序 shift，抛点与输出落盘都不变。
+    // result() 即旧 run() 的返回结构：脚本队列仍按发起序 shift，抛点与输出写到磁盘都不变。
     async execute(spec) {
       const call = spec as ResolveCall;
       // `git rev-parse --show-toplevel` 是宿主环境查询，不是被测的 ocr 调用：
@@ -609,7 +609,7 @@ interface FakeHost {
   agents: Map<string, Context>;
   /** ctx.effect 登记的释放器（卸载用例要手动跑一遍）。 */
   effectDisposers: (() => void)[];
-  /** `reflect.provide` 收到的服务（Remote 读面是否上线、其依赖闭包能否取数）。 */
+  /** `reflect.provide` 收到的服务（Remote 的读取接口是否上线、它的依赖能不能取到数据）。 */
   provided: Map<string, unknown>;
   /** cordis `Service` 构造期的注册口：apply 里的 `installOcrRemote` 只认这一位。 */
   reflect: { provide: (name: string, service: unknown) => void };
@@ -681,7 +681,7 @@ function noop(): () => void {
 /** 会话被停止/关闭的宿主事件名：三处用例共用，避免重复字面量。 */
 const SESSION_DISPOSED = "session/disposed";
 
-/** 建过的替身先记下来，文件级 `afterEach` 统一收尾（判据见那里）。 */
+/** 建过的测试替身先记下来，文件级的 `afterEach` 统一收尾（依据写在那里）。 */
 const HOSTS: FakeHost[] = [];
 
 function makeHost(options: FakeHostOptions = {}): FakeHost {
@@ -851,13 +851,13 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
   return host;
 }
 
-// ── 0.1.7 设置面替身：Config schema → volatile 引用 ───────────────────────────
+// ── 0.1.7 设置服务的测试替身：Config schema → volatile 引用 ───────────────────────────
 //
 // 旧替身是 `settings.register(ns, schema, { base })` 交回一个 scope，本包再 scope.get()。
 // 0.1.7 三处都变了：命名空间由宿主按 profile 条目 id 隐式定、可编辑字段由 schema 上的
 // `.volatile()` 声明、行 config 与默认的合并发生在 cordis 装载期。下面这组 helper 就是
-// 照宿主真实的判据（settings/src/schema.ts 的 volatileForm + fiber.ts 的 resolveConfig）
-// 复刻出来的替身，不复刻语义的测试会在真宿主上假绿。
+// 按宿主真实的规则（settings/src/schema.ts 的 volatileForm 加 fiber.ts 的 resolveConfig）
+// 复刻出来的测试替身；不复刻这套语义的测试会在真实宿主上漏报。
 
 /** 导出 Config schema 的字段节点（读 meta/type/dict 用，不复制 schema 结构）。 */
 interface SchemaNode {
@@ -866,7 +866,7 @@ interface SchemaNode {
   dict?: Record<string, SchemaNode>;
 }
 
-/** 导出 Config schema 的 dict（单源：字段名与元数据都从宿主实际读的那份来）。 */
+/** 导出 Config schema 的 dict（唯一来源：字段名与元数据都从宿主实际读的那份来）。 */
 function configDict(): Record<string, SchemaNode> {
   return (plugin.Config as unknown as SchemaNode).dict ?? {};
 }
@@ -903,7 +903,7 @@ const DEPLOYMENT = [
  * 复刻 cordis 交进 apply 的那份 Config：**volatile** 字段是稳定引用、其 get() 现读
  * host.settingsValue（与真实 Volatile 的「引用不变、值可变」同构，cosmokit
  * createVolatile 也只有一个 get()，见 vendor/cosmokit/src/volatile.ts:39-45）；
- * **非 volatile** 字段是装载期定值（部署调优三字段走这一臂：行 config 改值要重启，
+ * **非 volatile** 字段是装载期定值（部署调优三字段走这一分支：行 config 改值要重启，
  * 与 cordis 对非 volatile 的语义一致，故这里快照而不是给引用）。
  */
 function liveConfig(host: Partial<FakeHost> | null | undefined): Record<string, unknown> {
@@ -963,12 +963,12 @@ function patchEntryId(): string {
     (row) => row.groups?.["id"] ?? "",
   ).find((candidate) => candidate !== "" && candidate !== "shared");
   if (typeof id !== "string" || id.length === 0) {
-    throw new Error("cordis.patch.yml 里没有本包的裸 `- id:` 条目");
+    throw new Error("cordis.patch.yml 里没有本包只写 `- id:` 的条目");
   }
   return id;
 }
 
-/** 默认现读口替身：本文件绝大多数用例只关心命令构造与输出契约，不该被「这台机器
+/** 默认的现场读取替身：本文件绝大多数用例只关心命令构造和输出的契约，不该被「这台机器
  *  装没装 ocr」这件事左右。前置短路那一档由专门的用例显式注入 `none` 来验。 */
 const presentProbe: OcrAvailabilityProbe = () => ({
   source: "bundled",
@@ -976,10 +976,10 @@ const presentProbe: OcrAvailabilityProbe = () => ({
   channel: "npm",
 });
 
-/** 前置短路那一档的现读口替身：两条路都没有候选。 */
+/** 前置短路那一档的现场读取替身：两条路都没有候选。 */
 const noneProbe: OcrAvailabilityProbe = () => ({ source: "none" });
 
-/** PATH 命中那一档的现读口替身：随包入口缺席，PATH 上有候选。 */
+/** PATH 命中那一档的现场读取替身：随包入口不在，PATH 上有候选。 */
 const pathProbe: OcrAvailabilityProbe = () => ({
   source: "path",
   path: "/usr/local/bin/ocr",
@@ -1030,11 +1030,11 @@ function outputSchemaOf(host: FakeHost, name: string): Record<string, unknown> {
   return toolOf(host, name).output.schema;
 }
 
-/** host.ts 的 ToolExec 投影（官方 `ToolRunContext` 的 signal/agent 两面）。
- *  从 `ocrRepo` 的参数位取类型，而不是在测试里再抄一份执行面形状——抄了就又会漂。 */
+/** host.ts 的 ToolExec 投影（官方 `ToolRunContext` 的 signal/agent 两处）。
+ *  从 `ocrRepo` 的参数位取类型，而不是在测试里再抄一份执行上下文形状——抄了就又会漂。 */
 type HostExec = Parameters<typeof ocrRepo>[1];
 
-/** 执行面替身：`agent` 给的是官方契约之外的脏数据（null、缺 session / 缺 header 的半装配）。 */
+/** 执行上下文替身：`agent` 给的是官方契约之外的脏数据（null、缺 session / 缺 header 的半装配）。 */
 function fakeExec(signal: AbortSignal, agent: unknown): HostExec {
   return { signal, agent } as HostExec;
 }
@@ -1109,7 +1109,7 @@ const REVIEW_JSON = JSON.stringify({
   ],
 });
 
-/** review/scan `--preview` 的裸 model.Preview 回执（键 files，不是摘要对象）。 */
+/** review/scan `--preview` 交回的 model.Preview 本身（键 files，不是摘要对象）。 */
 const PREVIEW_JSON = JSON.stringify({
   files: [
     { path: "src/a.ts", status: "modified", insertions: 2, deletions: 1, will_review: true },
@@ -1163,7 +1163,7 @@ const FAILED_ITEM_BUDGET = {
   classification: "budget",
   reason: "token budget",
 };
-describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote 方法）", () => {
+describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview Remote 方法）", () => {
   // ── 沙箱复位（每个用例只清外部 ocr CLI 的配置；宿主侧已无文件）────────────────
 
   beforeEach(() => {
@@ -1189,10 +1189,10 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
    * 每条用例离场时把它做过的 mock 进程全部落定。
    *
    * 为什么必须有这一位：官方注册表的周期泵只在**名册里有活作业**时按 `pumpPollMs` 自续
-   * （本仓替身是 25ms），而 `兜底 deadline` 那条用例要 `vi.useFakeTimers()` 后一次推进
+   * （本仓的测试替身是 25 毫秒），而「兜底 deadline」那条用例要 `vi.useFakeTimers()` 之后一次性推进
    * 2 小时。别条用例留下的活作业，它的泵**正好在假时间窗里重新挂上**时就会被当成那条用例
    * 自己的拍白刷掉整段假时间窗；挂不挂上看调度 ⇒ 整文件耗时跳档甚至判超时
-   * （本机实测）。用例内的断言都在落定之前跑完，这一位不改判据只收尾。
+   * （本机实测）。用例里的断言都在落定之前跑完，这一项不改变判断，只负责收尾。
    */
   afterEach(async () => {
     for (const one of HOSTS.splice(0)) {
@@ -1207,9 +1207,9 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     rmSync(HOME, { recursive: true, force: true });
   });
 
-  // ── 注册面 ──────────────────────────────────────────────────────────────────
+  // ── 工具注册 ──────────────────────────────────────────────────────────────────
 
-  describe("apply 注册面", () => {
+  describe("apply 的注册", () => {
     it("登记页面策略、7 个工具、路由段与 5 个端点", () => {
       const host = makeHost();
       applyPlugin(host);
@@ -1230,11 +1230,11 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(host.sections).toHaveLength(1);
       expect(host.sections[0]?.order).toBe(1555);
       expect(host.registeredRoutes, "HTTP 数据面已迁到官方 Remote").toStrictEqual([]);
-      // Remote 读面无条件上线：它的存在只由 apply 决定，与 webServer 是否到位无关。
+      // Remote 的读取接口无条件上线：它存不存在只由 apply 决定，和 webServer 到不到位无关。
       expect(host.provided.has(OCR_REMOTE_NAMESPACE)).toBe(true);
     });
 
-    it("行 config 的 undefined 字段落回 schema 默认（0.1.6 内置底座的等价面）", () => {
+    it("行 config 的 undefined 字段落回 schema 默认（0.1.6 内置底座的等价）", () => {
       // 0.1.7 里这层合并已归 cordis 装载期（fiber.ts resolveConfig 用导出的 Config 校验
       // 并填默认），插件只读引用。旧断言盯的是「插件把行 config 合进 BUILTIN_BASE 后交给
       // settings.register 的那份 base」，现在盯的是**真解析**出来的引用当前值。
@@ -1252,7 +1252,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(host.registeredRoutes).toHaveLength(0);
     });
 
-    it("remote 读面无 webServer 也上线，providers 走 apply 交进去的那组依赖", async () => {
+    it("remote 的读取接口没有 webServer 也上线，providers 用 apply 交进去的那组依赖", async () => {
       const host = makeHost({ webServer: false });
       applyPlugin(host);
       const service = host.provided.get(OCR_REMOTE_NAMESPACE) as
@@ -1262,11 +1262,11 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       const body = await service?.providers();
       expect(body?.["ok"]).toBeUndefined();
       expect(Array.isArray(body?.["providers"])).toBe(true);
-      // 读面不再下发会话内 token：卡片走官方网关，鉴权归网关。
+      // 读取接口不再下发会话内的 token：卡片走官方网关，鉴权由网关负责。
       expect(body !== undefined && "csrf" in body).toBe(false);
     });
 
-    it("宿主服务面缺一即抛（守卫名副其实，不运行到一半才炸）", () => {
+    it("宿主的服务缺一个就抛（这个检查名副其实，不会运行到一半才崩）", () => {
       const baseHost = makeHost();
       applyPlugin(baseHost);
       const missingGet = { ...baseHost } as Record<string, unknown>;
@@ -1310,7 +1310,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
   // `.volatile()` 不会报错，只会让那一项从设置卡上**静默消失**（宿主 describe() 只投影
   // volatileForm 的结果）；全漏则整条被跳过（settings/index.ts:308-309）、写入抛
   // `has no volatile fields`（:386）。这类退化在本文件其它用例里全绿——它们改的是
-  // host.settingsValue，替身根本不看 schema 的 meta。只有拿宿主同一个判据回头看 schema
+  // host.settingsValue，测试替身根本不看 schema 的 meta。只有按宿主的同一条判断回头看 schema
   // 才拦得住。
   //
   // ⚠ 它能拦住的：字段级 volatile 漏标/多标、字段名漂移、条目 id 与 schema 不同源。
@@ -1339,7 +1339,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
         // 路径**不给**默认：内置底座一旦写死绝对路径就又回到「作者机器布局」。
         ocrConfigPath: undefined,
         // 部署级那一组：llmTestTimeoutMs / stdoutMaxBytes 与原常量同值，
-        // ocrBackgroundMaxMs 的默认改为 0（无兜底窗口）。
+        // ocrBackgroundMaxMs 的默认改成 0（没有兜底窗口）。
         // 这里手写字面值而不引 host.ts 的常量——引常量就成了自证，常量改了该先红。
         llmTestTimeoutMs: 90_000,
         ocrBackgroundMaxMs: 0,
@@ -1397,11 +1397,11 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(() => requiredKeys({ required: [1] }, zh)).toThrow(/元素必须是字符串/u);
     });
 
-    it("output schema 与 render 一致（pretty-print 正常臂与三条降级兜底都覆盖）", () => {
+    it("output schema 与 render 一致（pretty-print 的正常分支和三条退化后的兜底都覆盖到）", () => {
       const { render } = toolOf(host, "ocr_review").output;
       // canonical 值直返后 ocr_review 的根是四分支 oneOf：后台回执 / 摘要对象 / 文件预览 / 解析失败字符串。
       expect(toolOf(host, "ocr_review").output.schema["oneOf"]).toHaveLength(4);
-      // 正常臂：能 JSON 化的结构化值按两层缩进 pretty-print 成 model-facing 文本（不是 String(value)）。
+      // 正常分支：能 JSON 化的结构化值按两层缩进 pretty-print 成 model-facing 文本（不是 String(value)）。
       expect(render({}, { jobId: "j-1", files: ["a.ts"] })[0]?.text).toBe(
         '{\n  "jobId": "j-1",\n  "files": [\n    "a.ts"\n  ]\n}',
       );
@@ -1538,7 +1538,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       // 而是**跑完的评审被丢掉**——同步调用在 finalize session 失败、对外整体报错。
       // 宿主侧确实采纳调用方的值（dsh-bash-sandbox 的 resolve 是
       // `request.sandboxPolicy ?? 默认`，且 execute 对 danger-full-access 直接绕过围栏），
-      // 所以这一栏写在这里就够了，不需要插件侧再做任何兜底。
+      // 所以这一栏写在这里就够了，插件这边不需要再做任何兜底处理。
       host.shell.gitTopLevel = MONO_TOP;
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_review").execute({ repo: MONO_SUB }, makeExec());
@@ -1580,7 +1580,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
   });
 
   describe("ocr_review 前台执行", () => {
-    // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+    // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
     // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
     const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
     let host: FakeHost;
@@ -1638,7 +1638,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     });
 
     it("partial（部分文件失败但整体有覆盖，exit 0）⇒ 正常返回摘要而不是解析失败", async () => {
-      // 回归钉：此前 status 白名单漏了 partial，整场已花费 token 的评审被报成
+      // 回归断言：此前 status 的白名单漏了 partial，整场已经花掉 token 的评审被报成
       // 「status 非法」并丢弃全部评论（输出 schema 的 enum 同步收 partial）。
       // 同一场里 coverage.failed 与 tool_calls 必须一起到模型手上：带 manifest 时 CLI
       // 会把子任务失败从 warnings 摘掉，只读 warnings 就看不见是哪个文件没审成。
@@ -1739,7 +1739,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(message).not.toContain(PLAIN_KEY);
     });
 
-    it("exit 0 却没写出 --output 文件 ⇒ 可行动错误而非裸 ENOENT", async () => {
+    it("exit 0 却没写出 --output 文件 ⇒ 可行动错误，而不是一句没有路径的 ENOENT", async () => {
       host.shell.scripts.push({});
       await expect(
         toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
@@ -1775,8 +1775,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     });
 
     it("ocr_scan 也走同一条失败详情路径（两处调用点各要一份回执）", async () => {
-      // withCoverageDetail 在 review 与 scan 各挂一次。只验 review 那一侧，等于让 scan 的
-      // 接线在无覆盖的情况下存在——改错了没有任何用例会红。
+      // withCoverageDetail 在 review 与 scan 各挂一次。只测 review 这一条，scan 的接线就没有覆盖——改错了没有任何用例会红。
       host.shell.scripts.push({
         exitCode: 1,
         stderrText: "scan failed: 1 of 1 selected item(s) failed",
@@ -1820,7 +1819,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
 
     it("非零退出但 --output 落在读不回来的位置 ⇒ 原样交回错误，不把「读不到」说成 OCR 的失败", async () => {
       // 裁剪分支：readFileSync 抛错时 withCoverageDetail 必须原样返回原错误。这条保证失败
-      // 详情里不会冒出第二层「读不到落盘结果」，把真正的 exit 原因盖住。
+      // 详情里不会冒出第二层「读不到写到磁盘结果」，把真正的 exit 原因盖住。
       // 制造方式：让 --output 指向一个**目录**——writeFileSync 会静默失败（替身里那句
       // 写在 try 外，所以这里改用 shell 替身的 throws 之外的手段：把目录预先建好）。
       host.shell.scripts.push({
@@ -1864,9 +1863,9 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     });
 
     it("maxComments 0（不截断）与非法值（回退 12）都按条数兑现", async () => {
-      // 评论数必须超过回退值 12，否则 0 与 12 两种截断口径会输出同一份清单，
-      // 「回退 12」这条标题就只剩恒绿。所有评论都锚定到行号，避免 includeZeroLine
-      // 的默认口径先把它们滤掉。
+      // 评论数必须超过兜底值 12，否则按 0 和按 12 截断会输出同一份清单，
+      // 「回退到 12」这条标题就只剩永远通过。所有评论都锚定到行号，免得 includeZeroLine
+      // 的默认设置先把它们滤掉。
       const many = JSON.stringify({
         status: "success",
         session_id: "sess-many",
@@ -1943,7 +1942,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       await expect(
         toolOf(host, "ocr_review").execute({ repo: "/repo", wait: "false" }, makeExec()),
       ).rejects.toThrow(/wait 必须是布尔值（true\/false），收到 false/u);
-      // null 与 undefined 同口径：按**缺省**处理，不抛。缺省现在是后台（see waitOf），
+      // null 和 undefined 一样：按**缺省**处理，不抛。缺省现在是后台（见 waitOf），
       // 所以这条走后台通道：没有 --output，但 --effort 仍按缺省 medium 下发。
       const bg = (await toolOf(host, "ocr_review").execute(
         { repo: "/repo", effort: null, wait: null },
@@ -1985,7 +1984,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
         makeExec(),
       )) as { jobId: unknown; polling: string };
       // 回执里必须有一个模型能直接喂给 job_output 的作业 id：polling 原本只把
-      // 模型导向 ocr_session(action=list)，而那条路要会话已落盘、--repo 又对得上，
+      // 模型导向 ocr_session(action=list)，而那条路要会话已写到磁盘、--repo 又对得上，
       // 启动早期两件事都可能还没成立。
       expect(receipt.jobId).toBeTypeOf("string");
       expect(String(receipt.jobId)).not.toBe("");
@@ -2032,7 +2031,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(real.list()).toStrictEqual([]);
     });
 
-    it("默认无兜底窗口（0）⇒ 不向注册表登记 jobs.wait", async () => {
+    it("默认没有兜底窗口（0）⇒ 不向注册表登记 jobs.wait", async () => {
       const host = makeHost();
       const spy = registryRecordingWaits(host.jobs);
       host.jobs = spy.registry;
@@ -2061,7 +2060,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       await settledTick();
       const [settled] = host.jobs.list(brandSessionId("s1"));
       expect(settled?.status).toBe("killed");
-      // detail 的组成钉死（生产者结局在前、注册表追加 reason），reason 本体取字典：
+      // detail 的组成固定（生产者的结局在前、注册表追加 reason），reason 本身取自文案表：
       // 字典改文案不该让这条契约用例红，改**拼接次序**才该。
       expect(settled?.detail).toBe(`killed before exit; ${zh.jobReasonSessionStopped}`);
     });
@@ -2120,7 +2119,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       }
       expect(
         host.jobs.get(onlyJob(job), brandSessionId("s1")).status,
-        "台账里的有主作业也要收",
+        "台账里有主人的作业也要收",
       ).toBe("stopping");
       expect(proc?.killCount).toBe(1);
       proc?.settle();
@@ -2203,19 +2202,19 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       });
       // 事件处理器里抛出的错误由 Node 以 `process.nextTick(() => { throw err })` 重抛 ⇒ 未捕获
       // 异常 ⇒ **整个宿主进程退出**（本机实跑复现）。会话结束时再炸一次宿主没有任何补救价值，
-      // 所以这一臂必须自己兜住。
+      // 所以这一分支必须自己处理。
       expect(uncaught, "会话回收链不许把异常交给 Node").toStrictEqual([]);
       // 注册表不认这些记录 ⇒ 手里没有进程句柄可杀，如实记录不假装收过。
       expect(proc?.killCount).toBe(0);
       expect(real.list(brandSessionId("s1"))[0]?.status, "名册归别人管时不假装收过了").toBe(
         "running",
       );
-      // 收尾把这条活作业落定，别把泵留给别人（判据统一写在文件级 `afterEach` 那一处）。
+      // 收尾把这条还在跑的作业落定，别把泵留给别人（依据统一写在文件级的 `afterEach` 那一处）。
       proc?.settle();
       await settledTick();
     });
 
-    it("proc.kill 自己抛（ESRCH 那一类）⇒ 被 cancel 兜住，名册照样推到 stopping", async () => {
+    it("proc.kill 自己抛（ESRCH 那一类）⇒ 被 cancel 覆盖，名册照样推到 stopping", async () => {
       const host = makeHost();
       applyPlugin(host);
       const exec = ownExec(host, "s1");
@@ -2239,7 +2238,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
         host.jobs.get(onlyJob(job), brandSessionId("s1")).status,
         "cancel 抛错不能把记录留在 running",
       ).toBe("stopping");
-      // 收尾落定（判据统一写在文件级 `afterEach` 那一处）。
+      // 收尾落定（依据统一写在文件级的 `afterEach` 那一处）。
       proc.settle();
       await settledTick();
     });
@@ -2355,7 +2354,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       applyPlugin(host);
       // 用**别的 kind**把未拥有那一桶占满（实测容量按 owner 桶计，未拥有共用一桶）：
       // 本包的 start 会被官方件在 preflight 阶段拒掉。宿主 bash 生产者自己挂 controller
-      // （本包起完就摘，不再替别人开着闸门），故这里也照它的样子挂一枚再摘。
+      // （本包起完就摘，不再替别人保持放行），故这里也照它的样子挂一枚再摘。
       const detachBash = host.jobs.attachController("test: host bash tool");
       for (let index = 0; index < 10; index += 1) {
         host.jobs.start({
@@ -2390,7 +2389,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(() => host.jobs.start(spec)).toThrow(/no job controller serves this agent/u);
       await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
       // 起完之后再裸 start 仍是拒：留一枚常驻 token 的后果是"宿主故意没装 job 工具"的
-      // 组成里，本包替全宿主开着 start 的大门。
+      // 组成里替全宿主开着 start 的大门。
       expect(() => host.jobs.start(spec)).toThrow(/no job controller serves this agent/u);
     });
 
@@ -2415,7 +2414,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     });
 
     it("卸载理由跟随官方 locale 偏好：en 会话里模型读到的是英文理由", async () => {
-      // 这一臂的理由在**效应里**现取（`localeMessages(ctx).jobReasonUnload`，host.ts:1671），
+      // 这一分支的理由在**效应里**现取（`localeMessages(ctx).jobReasonUnload`，host.ts:1671），
       // 不是注册表自己造的 ⇒ 前面那条只覆盖了中文默认值，语言接线没人钉：把 `localeMessages`
       // 换成固定 `MESSAGES.zh` 时全套件仍全绿，而英文会话的模型会收到中文理由。
       const host = makeHost({ locale: { preference: "en" } });
@@ -2457,7 +2456,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       ]);
       expect(host.shell.procs[1]?.killCount, "在跑那条由 cancel() 收到进程").toBe(1);
       expect(host.shell.procs[0]?.killCount, "自然落定的那条不该被再杀一遍").toBe(0);
-      // 收尾把停在 stopping 的那条落定（判据统一写在文件级 `afterEach` 那一处）。
+      // 收尾把停在 stopping 的那条落定（依据统一写在文件级的 `afterEach` 那一处）。
       host.shell.procs[1]?.settle();
       await settledTick();
     });
@@ -2466,12 +2465,12 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       // 服务被关掉那一档：卸载效应读到的就是 undefined。没有这条用例，那半个分支
       // 只在编译器里存在，v8 的块覆盖也看不见它。
       const host = makeHost({ jobs: false });
-      // 前提钉子：这一档替身交不出注册表，用例走的才确实是「安静跳过」那一臂。
+      // 前提钉子：这一档替身交不出注册表，用例走的才确实是「安静跳过」那一分支。
       expect(host.get("jobs")).toBeUndefined();
       applyPlugin(host);
       // 释放器确实登记了：主 fiber 上是作业回收两位（插件卸载、会话 dispose），
       // 五条端点的释放器挂在注入子 fiber 的 injectEffectDisposers 上；否则下面的循环
-      // 是空转、覆盖是假象。
+      // 没有实际校验、覆盖率是假象。
       expect(host.effectDisposers).toHaveLength(2);
       for (const dispose of host.effectDisposers) {
         dispose();
@@ -2484,7 +2483,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       const host = makeHost({ jobs: false });
       expect(host.get("jobs")).toBeUndefined();
       applyPlugin(host);
-      // 监听器确实挂上了：否则下面的 emit 是空转、覆盖是假象。
+      // 监听器确实挂上了：否则下面的 emit 没有实际校验作用、覆盖是假象。
       expect(host.listeners.has(SESSION_DISPOSED)).toBe(true);
       expect(() => {
         host.emit(SESSION_DISPOSED);
@@ -2492,11 +2491,11 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(host.jobs.list()).toStrictEqual([]);
     });
 
-    it("兜底 deadline 到点：挂死的评审被经注册表收掉，理由进 detail", async () => {
+    it("兜底 deadline 到点：挂死的评审经注册表被收掉，理由进 detail", async () => {
       // 假定时器必须**在起作业之前**装好：`wait` 的内部定时器是 start 那一刻建的，晚装
       // 就追不上它。泵拍顺带拉长到一小时，否则推进两小时会把它白刷几万拍。
       const host = makeHost();
-      // 默认窗口已是 0（不设时限），这条测的是「显式配了窗口时的兜底回收」，
+      // 默认窗口已经是 0（不设时限），这条测的是「显式配了窗口之后的兜底回收」，
       // 故显式把两小时写进 settingsValue。
       host.settingsValue["ocrBackgroundMaxMs"] = 120 * 60_000;
       host.jobs = makeJobRegistry(60 * 60_000);
@@ -2518,8 +2517,8 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       }
       proc?.settle();
       await settledTick();
-      // 与上面"取消经注册表收"那条同形：整串钉死（生产者结局 + 注册表追加的 reason），reason
-      // 按实际兜底窗口换算（这条用例自己配的 120 分钟，不写死文案里的"2 小时"）。原先只
+      // 和上面「取消经注册表收」那条形状相同：整串固定（生产者结局 + 注册表追加的 reason），reason
+      // 按实际的兜底窗口换算（这条用例自己配的 120 分钟，不把文案里的「2 小时」写死）。原先只
       // `toContain(...)` 是字典值的一段 ⇒ 拼接次序坏了也不会红。
       expect(host.jobs.get(onlyJob(job)).detail).toBe(
         `killed before exit; ${format(MESSAGES.zh.jobReasonTimeout, { minutes: "120" })}`,
@@ -2564,7 +2563,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       await pumpTick();
       // 断"latch 之后一次都不再敲"，而不是"总共不超过 N 次"：N 那一档量的是**坏掉之前**
       // 拍了几次，而拍数随负载漂（本仓加过几条用例之后它就从 4 漂到 5 判红）。latch 在
-      // host.ts 的 `if (failed) return`，它真正的可观测面是"撞坏之后读数不再增长"。
+      // host.ts 的 `if (failed) return`，它真正可观测的地方是"撞坏之后读数不再增长"。
       const knocked = proc?.readCount("stdout") ?? 0;
       await pumpTick();
       await pumpTick();
@@ -2664,7 +2663,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
         { repo: "/repo", path: ["src", "test"], wait: true },
         makeExec(),
       )) as { totalCommentCount: number };
-      // 命令词可能是 PATH 上的裸 `ocr`，也可能是随包 launcher 的绝对路径；
+      // 命令词可能是不带路径的 `ocr`（靠 PATH 解析），也可能是随包 launcher 的绝对路径；
       // 而 reaper 还要对整条内层再转义一次。故这里只钉子命令骨架与合并后的 path 列表，
       // 命令词的解析形态由 lib/cli.ts 自己的用例覆盖。
       const command = String(host.shell.resolveCalls[0]?.command);
@@ -2716,9 +2715,9 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       );
     });
 
-    it("宿主收口后 ⇒ 报收口值，不报请求值", async () => {
-      // 请求 60 分钟，宿主按 shell.maxTimeoutMs 收口到 10 分钟：文案自称
-      // 「实际生效」，就得印收口后的那个数——请求值只会把上限说成天文数字
+    it("宿主收敛之后 ⇒ 报收敛后的值，不报请求值", async () => {
+      // 请求 60 分钟，宿主按 shell.maxTimeoutMs 收敛到 10 分钟：文案自称
+      // 「实际生效」，就得打印收敛后的那个数——请求值只会把上限说成天文数字
       // （timeoutMinutes 留空时请求值是 2^31-1 ms，即 35791 分钟）。
       host.settingsValue["timeoutMinutes"] = 60;
       host.shell.maxTimeoutMs = 600_000;
@@ -2726,7 +2725,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /实际生效 10 分钟/u,
       );
-      // 下发给宿主的仍是请求值本身（收口是宿主 resolve 的事）。
+      // 下发给宿主的仍然是请求值本身（收敛是宿主 resolve 的事）。
       expect(host.shell.resolveCalls[0]?.timeoutMs).toBe(3_600_000);
     });
 
@@ -2780,7 +2779,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(error.message).not.toContain("sk-");
     });
 
-    it("stdout 截断 ⇒ 追加截断说明，有落盘路径时一并给出", async () => {
+    it("stdout 截断 ⇒ 追加截断说明，有写到磁盘路径时一并给出", async () => {
       host.shell.scripts.push({ stdoutText: "partial", stdoutTruncated: true });
       // "partial" 不是合法 JSON ⇒ preview 走解析失败分支，诚实值就是那段说明字符串。
       const result = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as string;
@@ -2804,13 +2803,13 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
 
     it("stdout 含 emoji 且被截断 ⇒ 工具结果不留孤立代理（会话日志会被永久毒化）", async () => {
       // 上游同缺陷：一个孤立高代理会让该会话之后的每次 Messages 请求都失败。
-      // 判据按码点整枚走（for...of 迭代器）：配对成功的代理对交出的是合成码点
+      // 这里是按码点逐个走的（for...of 迭代器）：配对成功的代理对交出的是合成的码点
       // （>0xFFFF，必在代理区之外），被切开的孤枚半代理才以 D800–DFFF 的原值现形。
       // 代理区写成十进制分隔符形态：十六进制字面量在本仓被 oxfmt 判小写、被 oxlint
       // 的 number-literal-case 判大写，两条 gate 互斥（shared/lib/text.ts 同款处置）。
       const cjkEmoji =
         "审查结论：此处需修正\u{1F6D1}并补充测试\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}".repeat(60);
-      // 自守一：那 3 枚 ZWJ 是裸字符（上面这条是 brief 的逐字 fixture），它们撑着
+      // 自守一：那 3 枚 ZWJ 是实际字符（上面这条是 brief 的逐字 fixture），它们撑着
       // 「周期 28 码元 ⇒ 500 = 17×28 + 24 正好切在 👧 的高代理上」这块地基。ZWJ 一旦被
       // 编辑器/format/sed 抹掉，周期变 25、500 % 25 === 0 ⇒ 切点落在合法对边界
       // （实测末枚变成配好的低代理 U+DC66），本用例就再也咬不住任何东西。
@@ -2820,7 +2819,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(cjkEmoji.slice(0, 500).isWellFormed()).toBe(false);
       host.shell.scripts.push({ stdoutText: cjkEmoji });
       const result = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as string;
-      // 自守三：另两条空转通道——回显原文这条路真走了吗？真截断了吗？（parseDelegatePreview
+      // 自守三：另两条无效通道——回显原文这条路真走了吗？真截断了吗？（parseDelegatePreview
       // 哪天收下这份输入就不进 echoRaw 分支；上限哪天形同不设也不留孤立代理。两种都白过。）
       expect(result).toContain("输出解析失败");
       expect(result.length).toBeLessThan(cjkEmoji.length);
@@ -2938,7 +2937,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(bad).toMatch(/rule 输出解析失败/u);
     });
 
-    it("session：空会话提示、超长透传截断、action 白名单", async () => {
+    it("session：空会话的提示、超长内容原样透传后截断、action 的白名单", async () => {
       const session = toolOf(host, "ocr_session");
       host.shell.scripts.push({ stdoutText: "null" });
       const empty = (await session.execute({ repo: "/repo" }, makeExec())) as {
@@ -3231,7 +3230,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       const review = toolOf(host, "ocr_review");
       expect(review.description).toBe(MESSAGES.en.reviewToolDescription);
       expect(JSON.stringify(review.parameters)).not.toMatch(/[\u4E00-\u9FFF]/u);
-      // tuningParams 的 {unit} 插值在两语下都被换成实际量词（不留下裸占位符）。
+      // tuningParams 的 {unit} 插值在两语下都被换成实际量词（不留下未替换的占位符）。
       const concurrency = (
         review.parameters as { properties: { concurrency: { description: string } } }
       ).properties.concurrency.description;
@@ -3268,7 +3267,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(failed).toMatch(
         /ocr output parsing failed: OCR output has an invalid or missing status: \(none\)/u,
       );
-      // 单位口径锁：{limit} 插的是 RAW_ECHO_LIMIT=500，而 echoRaw→truncateEnd 那一刀按
+      // 先把单位对齐：{limit} 插进去的是 RAW_ECHO_LIMIT=500，而 echoRaw 到 truncateEnd 那一刀按
       // **UTF-16 码元**数计（一张 emoji 占 2 枚）——写 "characters"/"字符" 会把给模型的说明
       // 夸大约一倍。故这里钉的是单位词本身：换成"码元"以外的任何写法这条就红。
       expect(failed).toContain("first 500 UTF-16 code units of the raw output (redacted)");
@@ -3363,7 +3362,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       expect(text).not.toContain("400000");
     });
 
-    it("行 config 覆盖：后台缓冲上限与 enforceOcrDeadline 的兜底窗口同一来源", async () => {
+    it("行 config 的覆盖：后台缓冲上限与 enforceOcrDeadline 的兜底窗口来自同一处", async () => {
       const host = makeHost();
       host.settingsValue["stdoutMaxBytes"] = 4321;
       host.settingsValue["ocrBackgroundMaxMs"] = 5000;
@@ -3398,7 +3397,7 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
     it("none ⇒ 七个工具一律拒绝，且连一次 resolve 都没发生", async () => {
       const host = makeHost();
       applyPlugin(host, noneProbe);
-      // 七个调用并发跑（用例面的 no-await-in-loop：串行 await 只是把同一批断言排成
+      // 七个调用并发跑（测试文件里的 no-await-in-loop：串行 await 只是把同一批断言排成
       // 一条更慢的链），失败原因逐个收成消息串再整体比对，免掉逐条 try/catch 留下的分支。
       const reasons = await Promise.all(
         Object.entries(TOOL_ARGS).map(([name, args]) =>
@@ -3445,13 +3444,13 @@ describe("host.ts（注册面 + 7 个工具执行路径 + 9 条 ocrReview Remote
       }).toThrow(format(zh.ocrBinaryMissing, { install }));
     });
 
-    it("生产现读口逐字等于 lib/cli.ts 那份 fs 判据", () => {
-      // 两次独立调用在同一进程里必须给出同一个判定：这条既把「默认口用的是那份判据」
-      // 钉住，又不需要用例去分支这台机器恰好装没装 ocr。
+    it("生产环境的现场读取逐字等于 lib/cli.ts 那份 fs 判断", () => {
+      // 两次独立调用在同一个进程里必须给出同一个判定：这一条既把「默认用的就是那份判断」
+      // 钉住下来，又不需要用例去判断这台机器恰好装没装 ocr。
       expect(productionProbe()).toStrictEqual(resolveOcrAvailability());
     });
 
-    it("入口形状：cordis 交两参，现读口在入口这一层接上", () => {
+    it("入口的形状：cordis 给两个参数，现场读取在入口这一层接上", () => {
       const host = makeHost();
       expect(plugin.apply).toHaveLength(2);
       (plugin as unknown as { apply: (ctx: unknown, config: unknown) => void }).apply(

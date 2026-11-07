@@ -1,4 +1,4 @@
-// parse 纯函数测试：用真实 ocr 输出 fixture 验证契约解析（严重度口径 lib/severity.ts
+// parse 的纯函数测试：用真实的 ocr 输出样本验证解析（严重度归一在 lib/severity.ts
 // 的聚合按同一边界直接取用）。
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
@@ -128,7 +128,7 @@ const mk = (category: string): OcrComment => ({
   severity: "medium",
 });
 
-/** severity 归一口径的四种输入（L11 四态 + classifySeverity 自身契约）。 */
+/** severity 归一时的四种输入（四种状态 + classifySeverity 自己那条契约）。 */
 const severityCase = (severity: string): OcrComment => ({
   ...mk("bug"),
   severity,
@@ -140,10 +140,10 @@ const sampleComment = (overrides: Partial<OcrComment> = {}): OcrComment => ({
   ...overrides,
 });
 
-describe("aggregateComments 的 unknownSeverityCount 与 category 归一口径", () => {
-  it("四种输入的 unknownSeverityCount 精确：自造/空白异形各按其判据计数", () => {
-    // "blocker"：白名单外 ⇒ unknown。"CRITICAL"：小写归一后命中 ⇒ known。
-    // "critical "：trim 后命中 ⇒ known（trim 在口径层做，空白异形不得降级）。
+describe("aggregateComments 的 unknownSeverityCount 与 category 的归一规则", () => {
+  it("四种输入的 unknownSeverityCount 精确：自造等级和空白异形各按自己的判断计数", () => {
+    // "blocker"：不在白名单里 ⇒ unknown。"CRITICAL"：转成小写后命中 ⇒ known。
+    // "critical "：trim 之后命中 ⇒ known（trim 在归一那一层做，带空白不该降级）。
     // ""：缺失字段的白值 ⇒ unknown。期望值独立写死，不从实现派生。
     const agg = aggregateComments([
       severityCase("blocker"),
@@ -158,7 +158,7 @@ describe("aggregateComments 的 unknownSeverityCount 与 category 归一口径",
 
   it("category trim 后入键，空/空白 category 不占键（键和允许小于 total）", () => {
     // trim 合并空白异形；大小写刻意保留（category 是自由标签，没有可对表的枚举，
-    // 与 severity 的白名单归一不是同一条判据）。
+    // 和 severity 的白名单归一不是同一条规则）。
     const agg = aggregateComments([mk(" Security"), mk("security"), mk("   "), mk("")]);
     // 用 entries 而不是 toStrictEqual(对象字面量)：后者比的是「可枚举键值」，读法更贴近
     // 消费方（JSON 序列化），且不依赖对象原型——byCategory 现在是 null 原型，见下一条。
@@ -172,8 +172,8 @@ describe("aggregateComments 的 unknownSeverityCount 与 category 归一口径",
   });
 });
 
-describe("classifySeverity：聚合与排序共用的唯一归一口径", () => {
-  it("known 标志与 level 按白名单精确给出；trim/大小写异形不降级", () => {
+describe("classifySeverity：聚合和排序共用的唯一一处归一", () => {
+  it("known 标志与 level 按白名单精确给出；trim 和大小写异形都不降级", () => {
     expect(classifySeverity("critical")).toStrictEqual({ level: "critical", known: true });
     expect(classifySeverity("CRITICAL")).toStrictEqual({ level: "critical", known: true });
     expect(classifySeverity(" critical ")).toStrictEqual({ level: "critical", known: true });
@@ -206,7 +206,7 @@ describe("aggregateComments 的 category 计数不被原型链污染", () => {
     expect(Object.hasOwn(agg.byCategory, "toString")).toBe(false);
     expect(Object.hasOwn(agg.byCategory, "constructor")).toBe(false);
     expect(Object.hasOwn(agg.byCategory, "__proto__")).toBe(false);
-    // 序列化面（摘要真正进模型的那条路）仍如实输出。
+    // 序列化这一步（摘要真正进模型的那条路）仍如实输出。
     expect(structuredClone(agg.byCategory)).toStrictEqual({ security: 1 });
   });
 
@@ -333,12 +333,12 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
     expect(parsed.comments[0]?.endLine).toBe(0);
   });
 
-  it("status 白名单：只有 error 字段的 exit 0 错误对象 ⇒ ok:false", () => {
+  it("status 的白名单：只有 error 字段的 exit 0 错误对象 ⇒ ok:false", () => {
     const bad = parseOcr('{"error":"auth failed"}');
     expect(bad.ok).toBe(false);
     expect(bad.status).toBe("invalid");
     expect(bad.message).toMatch(/status 非法或缺失/u);
-    // 非白名单字符串同样拒绝（不再凭空造出 status:"unknown"）
+    // 不在白名单里的字符串同样拒绝（不再凭空造出 status:"unknown"）
     expect(parseOcr('{"status":"weird"}').ok).toBe(false);
     expect(parseOcr('{"status":42}').message).toContain("42");
     // `failed` 要**认得出**（非零退出时那份 manifest 靠它取失败明细），但**不算成功**：
@@ -365,7 +365,7 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
   });
 
   it("partial（manifest 终态，exit 0）⇒ ok:true，评论与 summary 完整保留不丢弃", () => {
-    // 回归钉：此前白名单漏了 partial，整场已花费 token 的部分评审被误报
+    // 回归断言：此前白名单漏了 partial，整场已经花掉 token 的部分评审被误报
     // 「status 非法」并把全部评论丢掉。
     const parsed = parseOcr(
       JSON.stringify({
@@ -429,7 +429,7 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
     expect(full.topComments).toHaveLength(2);
   });
 
-  it("未知 severity 的排序位与聚合口径一致（都按 medium，不再排在 critical 前）", () => {
+  it("未知 severity 的排序位置和聚合结果一致（都按 medium，不再排在 critical 之前）", () => {
     const parsed = parseOcr(
       JSON.stringify({
         status: "complete",
@@ -469,7 +469,7 @@ describe("parseReviewOutput — 契约收紧（finding 1/2/9 回归钉）", () =
   });
 });
 
-describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
+describe("warnings、数值字段与失败骨架的完整形状", () => {
   it("warnings 按 OCR 的 {file,message,type} 解码；读不出的条目留占位而非静默丢弃", () => {
     // 回归钉：照 {file,error} 读时 message 永远取不到，交给模型的是只剩文件名的告警，
     // 而 completed_with_warnings 这类状态下失败细节本来只有这一个来源。
@@ -532,7 +532,7 @@ describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
     ]);
   });
 
-  it("数值字段：数字字符串、带空格、1e999（JSON 里的非有限数）、布尔与对象各自的落点", () => {
+  it("数值字段：数字字符串、带空格、1e999（JSON 里的非有限数）、布尔与对象各自的位置", () => {
     const parsed = parseOcr(
       [
         '{"status":"success","summary":{"files_reviewed":" 3 ","comments":true,',
@@ -569,7 +569,7 @@ describe("warnings / 数值字段 / 失败骨架的完整口径", () => {
 });
 
 describe("诊断字段：tool_calls / manifest.coverage / summary.budget_exceeded", () => {
-  it("真实 complete 夹具：调用数与覆盖度一起带出，模型能证明「这一场审完了」", () => {
+  it("真实的 complete 输出样本：调用数和覆盖度一起带出来，模型能证明「这一场审完了」", () => {
     const parsed = parseOcr(read("ocr-review-complete.json"));
     expect(parsed.toolCalls).toStrictEqual({ total: 5, failure: 0, failures: [] });
     expect(parsed.coverage).toStrictEqual({
@@ -626,7 +626,7 @@ describe("诊断字段：tool_calls / manifest.coverage / summary.budget_exceede
   it("计数字符串超出安全整数域也判读不出（与 num 落进同一道闸，不被折成 0）", () => {
     // 只查 ^\\d+$ 时 "99999999999999999999" 判可读，而 num() 的 nonNegativeInt 把它
     // 折成 0：tool_calls 于是以 {total:0,failure:0} 的形态报「零失败」，preview 的计数
-    // 也回退成本地长度。两条口径必须一起落到 Number.isSafeInteger 上。
+    // 也退回成本地长度。这两条必须一起落在 Number.isSafeInteger 上。
     const huge = "99999999999999999999";
     const parsed = parseOcr(
       JSON.stringify({ status: "complete", tool_calls: { total: huge, failure: "0" } }),
@@ -1036,7 +1036,7 @@ describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume 
     expect(parsed.limitReached).toBe(false);
     expect(parsed.llm).toBeNull();
     expect(parsed.resume).toBeNull();
-    // 边界另一侧：恰好 4000 字符不截断，钉住判据是 `>` 而不是 `>=`。
+    // 边界的另一侧：恰好 4000 字符不截断，钉住条件是 `>` 而不是 `>=`。
     const exact = parseOcr(
       JSON.stringify({ status: "complete", project_summary: "x".repeat(4000), comments: [] }),
     );

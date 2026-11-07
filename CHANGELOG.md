@@ -8,23 +8,23 @@
 
 ## 0.1.12
 
-外部 `ocr` 契约抬到 `1.13.5`，宿主开发基线抬到 `0.2.2-rc.1`、支持窗口由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 滚到 `^0.2.1-rc.5 || ^0.2.2-alpha.3`，`engines.node` 地板抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。对外工具与 Remote 方法名单不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。
+外部 `ocr`契约抬到 `1.13.5`，宿主开发基线抬到 `0.2.2-rc.1`、支持窗口由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 滚到 `^0.2.1-rc.5 || ^0.2.2-alpha.3`，`engines.node` 下限抬到 `>=24.9.0`；卡片组件改由 shared 的 `./client` 供。对外工具与 Remote 方法名单不变，需要留意的是 `engines.node` 抬高后 node 22 装不上本包。
 
 ### Changed
 
 - **shared 抬到 0.2.4**：catalog、生成物与 lockfile 随之同步；shared 新增的 `apply_patch` 目标解析由它自己的普通依赖 `@deepseek-ai/dsh-fs-patch` 提供，本包不需要重复声明。
 - **OCR 契约抬到 `1.13.5`**：`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION` 与 `package.json` 的 `ocrCliVersion` 同值，两份 README、四份安装文档里钉版本的装法行、`THIRD_PARTY_NOTICES.md` 的验证版本与运行期依赖行都由 `test/readme-parity.test.ts` 核到同一枚数字——期望版本改了而装法行停在旧版时，用户照着装完会永远收到「实测与核对版本不一致」，而两侧文档各自自洽。
 - **宿主开发基线**：`devDependencies` 的 dsh 家族抬到 `0.2.2-rc.1`，`@deepseek-ai/cordis` 抬到 `4.1.0`，cordis 插件组两枚抬到 `1.1.0`，`@deepseek-ai/schemastery` 抬到 `3.19.0`；`@deepseek-ai/dsh-ptc-runtime` 从 devDependencies 移除（源码与测试都不再引用它）。根 catalog 与 overrides 的投影同步，`pnpm-lock.yaml` 随之重解。
-- **支持窗口与 Node 地板**：`engines.dsh` 与四枚 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3`；`@deepseek-ai/schemastery` 的 peer 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，与两条宿主线各自的实装版本对齐；`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`（宿主 `0.2.2` 线自己的地板）。
+- **支持窗口与 Node 下限**：`engines.dsh` 与四枚 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.3 || ^0.2.2-alpha.2` 改为 `^0.2.1-rc.5 || ^0.2.2-alpha.3`；`@deepseek-ai/schemastery` 的 peer 放宽为 `^3.18.5 || ^3.18.6-alpha.1`，与两条宿主线各自的实装版本对齐；`engines.node` 由 `>=22.12.0` 抬到 `>=24.9.0`（宿主 `0.2.2` 线自己声明的下限）。
 - **卡片组件改由 shared 的 `./client` 供**：`src/client-entry.ts` 与 `src/remote.ts` 的运行期值导入迁到 `./client`，`package.json` 新增 `dsh.bundle.client.external`，`build-client.mjs` 的外置清单同步；`cordis.patch.yml` 因此插入一条**不写 id** 的 `@jayyuen66/dsh-plugin-shared` 组件行（写 id 会在插件页多出一个可关闭的组件，关掉后设置卡失去组件供应）。
 - **`js-yaml` 抬到 5.5.0**：本包唯一直接消费它的解析路径不变，取值随伞根 catalog 与 overrides 同源。
 - **CI 的 node 矩阵收敛**：`ci.yml` 的 `node: [22, 24]` 加 macOS 排除改为单格 `node: [24.9]`，两份 workflow 的 `node-version` 由 `24` 改为 `24.9`，与 `engines.node` 同值。
-- **文档纠偏**：dsh 徽章由 `^0.2.1-rc.3` 抬到 `^0.2.1-rc.5`，与 `engines.dsh` 首条同值；`cordis.patch.yml` 的注册行由「唯一一行」改写为「两条条目」并说明 shared 那行为何不写 id；「本地目录安装需要 Node ≥ 22.18」那句原文推论成「`>= 24.9` 只约束发布产物」，而 `engines.node` 是 manifest 字段、不分安装路线，改为两条并列陈述（读源码需 ≥22.18，本包地板是 `>=24.9.0`），中文侧此前完全没有这一句；`THIRD_PARTY_NOTICES.md` 指向的 README 小节名 `External CLI status and version` 在两份 README 里都不存在，改为实际标题 “The external CLI”；`docs/DETAIL.zh.md` 的 `startupVerify` 补上「同时门控版本测量」那半，此前只有英文侧写了。
+- **文档纠偏**：dsh 徽章由 `^0.2.1-rc.3` 抬到 `^0.2.1-rc.5`，与 `engines.dsh` 首条同值；`cordis.patch.yml` 的注册行由「唯一一行」改写为「两条条目」并说明 shared 那行为何不写 id；「本地目录安装需要 Node ≥ 22.18」那句原文推论成「`>= 24.9` 只约束发布产物」，而 `engines.node` 是 manifest 字段、不分安装路线，改为两条并列陈述（读源码需 ≥22.18，本包声明的下限是 `>=24.9.0`），中文侧此前完全没有这一句；`THIRD_PARTY_NOTICES.md` 指向的 README 小节名 `External CLI status and version` 在两份 README 里都不存在，改为实际标题 “The external CLI”；`docs/DETAIL.zh.md` 的 `startupVerify` 补上「同时门控版本测量」那半，此前只有英文侧写了。
 
 ## 0.1.11
 
 这一版把宿主开发基线抬到 `0.2.2-alpha.3`，同步 shared `0.2.3`，并把外部 `ocr`
-契约抬到 `1.13.4`；随包文档的版本声明改由门禁与 manifest / catalog 对齐，测试补上
+对外声明抬到 `1.13.4`；随包文档里的版本声明改由一条门禁与 manifest、catalog 对齐，测试补上
 平台桩与几处会随环境变脸的断言。对外工具与 Remote 方法名单不变。
 
 ### Changed
@@ -37,7 +37,7 @@
   THIRD_PARTY_NOTICES 的依赖表同步。
 - **OCR 契约抬到 `1.13.4`**：`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的
   `EXPECTED_OCR_CLI_VERSION`、两侧 README、两份 DETAIL 与 THIRD_PARTY_NOTICES 的验证
-  版本/运行期依赖行都由门禁核对到同一枚数字。
+  版本和运行期依赖那几行都由同一条核对检查对上同一个数字。
 - **发布链**：CI 与 publish 的 pnpm 固定到 `12.11.2`；registry 预检的包名与 shared
   依赖名改从 `package.json` 读取，不再维护第二份字面量。
 - **测试**：新增 `test/fixtures/platform-stub.ts`，平台相关用例统一走它；Windows
@@ -58,22 +58,22 @@
 
 ## 0.1.10
 
-一轮跨面审查修复：路径闸、MCP 配置写面与并发覆盖、provider 面与解析判据收口；设置卡与工具出口同步加固。对外工具与 Remote 方法名单不变。
+一轮跨模块的审查修复：路径的把关、MCP 配置的写入与并发覆盖、provider 数据与解析后的统一处理处理；设置卡和工具出口同步加固。对外的工具与 Remote 方法名单不变。
 
 ### Changed
 
-- **MCP 写面加 revision 基线**：`mcp()` 回执新增 `revision`，`saveMcp` 入参加可选 `revision`——带基线时锁内比对，过期整笔拒绝回 `mcpSaveConflict`；不带基线沿用旧的后写覆盖语义（旧客户端兼容）。双开卡片或手改 config.json 时后保存者不再静默抹掉他人更新。
+- **MCP 写入增加 revision 基线**：`mcp()` 的回执新增 `revision`，`saveMcp` 的入参增加可选的 `revision`——带基线时在锁内比对，过期就整笔拒绝并返回 `mcpSaveConflict`；不带基线沿用原来的后写覆盖行为（兼容旧客户端）。同时开着两张卡或手改 config.json 时，后保存的人不再静默抹掉别人的更新。
 - **发布链加固**（`.github/workflows/publish.yml`）：发布步 `pnpm install --ignore-scripts`、构建移至无凭据步、`pnpm publish --ignore-scripts`，生命周期脚本不再能接触发布凭据；`prepack` 删除改 `prepare`（同为双构建）。
 - **依赖与元数据**：js-yaml 改精确钉 `5.4.3`；`@deepseek-ai/schemastery` peer 放宽为 `^3.18.6-alpha.1`；catalog 的 shared 抬到 0.2.2；author 改对象形（name+url）。
 
 ### Fixed
 
 - **路径闸**（`lib/argv-guard.ts`）：归一后落在文件系统根（`/`、盘符根、UNC 根）一律拒绝，堵 `--rule /etc/passwd` 被当仓内文件读进 OCR；`statSync` 改 `throwIfNoEntry: false`；会话根判定改 `path.isAbsolute`（Windows `C:/…` 不再落相对分支）。
-- **Remote 拒绝判据**（`lib/remote-shape.ts`）：`isRemoteRefused` 收 `unknown`，须同时满足 `ok===false`、非空 `error`、整数 `status`，null/NaN/原始值不再误判；状态码集中为导出常量 `OCR_REFUSE_STATUS`。
-- **MCP 配置**（`lib/mcp-config.ts`）：写失败独立文案；输出容器改 null 原型（`__proto__` 键不再丢失/污染）；写侧把盘上同条目的未知字段接回；providers.chatgpt 非法改显式报错；读侧加 64 KiB 上限；URL 判据拒空主机。
+- **Remote 拒绝回执的判断条件**（`lib/remote-shape.ts`）：`isRemoteRefused` 接受 `unknown`，要同时满足 `ok===false`、`error` 非空、`status` 是整数，null、NaN 和原始值不再误判；状态码集中成导出常量 `OCR_REFUSE_STATUS`。
+- **MCP 配置**（`lib/mcp-config.ts`）：写失败独立文案；输出容器改 null 原型（`__proto__` 键不再丢失/污染）；写入那侧把磁盘上同一条目里的未知字段接回来；providers.chatgpt 不合法时改成显式报错；读取那侧加 64 KiB 上限；URL 的判断会拒绝空主机。
 - **OCR config 迁移**（`lib/ocr-config.ts`）：不覆写已有非空 `api_key_cmd`；provider/model 入口一次 trim；空白 `language` 不落键；迁移写回统一走 `renderConfigDoc`。
-- **provider 面**（`lib/provider-projection.ts`、`lib/provider-source.ts`）：baseURL 禁内嵌 `user:pass@`、空白/控制字符与无主机；`apiKeyEnv` 按导出白名单收口，非法 ref 单独暴露；health 与探测异常收口，失败出口统一 `settingsFailed()`。
-- **解析与聚合**（`lib/parse.ts`、`lib/severity.ts`）：`isCount` 限安全整数域、`toolCallsOf` 总数口径、warnings 限流；`hitsContract` 只认 reviewable 文件/组，`{"error":…}` 载荷不再假报 0 文件；`byCategory` 落 null 原型。
+- **provider 面**（`lib/provider-projection.ts`、`lib/provider-source.ts`）：baseURL 禁内嵌 `user:pass@`、空白/控制字符与无主机；`apiKeyEnv` 按导出的白名单统一处理，非法的 ref 单独暴露出来；health 和探测的异常统一处理，失败的出口都走 `settingsFailed()`。
+- **解析与聚合**（`lib/parse.ts`、`lib/severity.ts`）：`isCount` 限制在安全整数范围、`toolCallsOf` 统一总数的算法、warnings 限流；`hitsContract` 只认可审查的文件和分组，`{"error":…}` 的载荷不再误报成 0 个文件；`byCategory` 用 null 原型。
 - **工具出口守卫**（`lib/output.ts`）：新增容器形状闸；违规收集改 `ViolationSink`，收集期截断 20 条/2000 字，不再先攒几十万条。
 - **host**（`host.ts`）：后台作业剪枝与取文案包 try 并先 killProc（不留无主 OCR 进程）；saveMcp/chatGpt 加外层 try 回可读回执；装载期 fire-and-forget 自检包 try（防未处理 rejection 终止宿主）；effort 未知值回落设置卡值。
 - **设置卡**（`src/client-entry.ts`）：channel 改逐值比对；MCP 未读成功时禁编辑/保存；llmTest 失败按失败着色；refresh 并发只认最后一次。
@@ -85,26 +85,26 @@
 
 ## 0.1.9
 
-这一版把后台评审的作业归属钉到发起会话，并把设置卡与读面校验统一到 shared 组件和 zod；
-插件页展示面进包，宿主开发线抬到 0.2.2-alpha.2。对外工具与 Remote 方法名单不变，后台作业的可见性按发起会话收紧。
+这一版把后台评审的作业归属绑到发起它的会话，并把设置卡与读取结果的校验统一到 shared 组件和 zod；
+插件页展示进包，宿主开发线抬到 0.2.2-alpha.2。对外工具与 Remote 方法名单不变，后台作业的可见性按发起会话收紧。
 
 ### Changed
 
 - **后台作业按会话归属**：能解析到活 Agent 时，`jobs.start` 带 `owner`；`job_list` / `job_output` /
   `job_kill` 对该作业只在所属会话可见。会话销毁只回收它自己的作业（活的 kill、已落定的 remove），
   不再按 kind 全量回收别的会话的评审；解析不到活 Agent 的调用仍起无主作业，只在插件卸载时统一收。
-- **作业台账**：新增 id → 发起会话的最小台账。注册表对没有 caller 的视图隐藏有主作业，卸载时靠它
+- **作业记录**：新增一份 id → 发起会话的最小记录。注册表会向没有 caller 的视图隐藏有主人的作业，卸载时靠它
   枚举；已落定记录的裁剪按 caller 可见面（无主桶 + 自己的）计算。
 - **设置卡迁到 shared 组件与 zod**：`src/remote.ts` 的三个 strict codec 改由 zod schema 生成；
   `src/client-entry.ts` 的枚举、计数与 providers 载荷改 zod 逐层校验，控件改用 shared 的
   `CARD_UI_CSS` / `CardForm` / `Field` 等。`zod` 进 `dependencies`，client 产物按宿主
   `PLATFORM_MODULES` 外置。
-- **插件页展示面进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、
+- **插件页展示进包**：新增 `locale/en.json`、`locale/zh.json` 与 `docs/DETAIL.md`、
   `docs/DETAIL.zh.md`；`exports` 增加 `./locale/*.json`，`files` 收进 locale 与 docs。
 - **宿主开发线抬到 `0.2.2-alpha.2`**：devDependencies 与 catalog/overrides 同值；`engines.dsh`
   与 peer 写支持窗口 `^0.2.1-rc.3`，README 补滚动窗口说明。
 - **正则常量提升**：argv-guard / config-store / mcp-config / output / parse / provider-projection
-  的内联正则提取为命名常量，行为不变，满足 lint 的重复字面量门禁。
+  的内联正则提取成命名常量，行为不变，满足 lint 的重复字面量检查。
 
 ### Fixed
 
@@ -116,13 +116,13 @@
 ### Docs
 
 - README 双语补后台作业的归属、容量桶、清理与残留暴露面，改正 `ocrReview` 方法数与 peer 枚数；
-  DETAIL 改正无 key 的 provider（列出但禁用）与 `timeoutMinutes` 的取值口径；`THIRD_PARTY_NOTICES`
+  DETAIL 改正了没有 key 的 provider（列出但禁用）和 `timeoutMinutes` 的取值规则；`THIRD_PARTY_NOTICES`
   同步 zod 依赖与 dsh 0.2.2-alpha.2 的核对基线。
 
 ## 0.1.8
 
-这一版把外部 OCR 契约从 1.13.0 抬到 **1.13.3**，并把模型工具面从「审查/扫描/委托/会话」扩到
-文件预览、会话比较、规则与 LLM 诊断；设置卡同时补上 MCP servers 与 ChatGPT 两块人工管理面。
+这一版把外部 OCR 约定从 1.13.0 抬到 **1.13.3**，并把模型工具清单从「审查/扫描/委托/会话」扩到
+文件预览、会话比较、规则与 LLM 诊断；设置卡同时补上 MCP servers 与 ChatGPT 两块人工管理区。
 所有新增参数仍遵守原有纪律：错类型、越界与互斥组合在起进程之前拒绝，不静默改范围。
 
 ### Added
@@ -143,10 +143,10 @@
 - **摘要字段**：`limitReached`、`llm`、`projectSummary`（4000 字符上限）、`resume`、
   cache tokens、`groupCount`、`retry`、`traceId`；`review_limit_reached` 与
   `token_budget_reached` 不再只藏在 warnings 文本里。
-- **MCP 管理面**：设置卡新增 `mcp_servers` 编辑器，Remote 新增 `mcp()` / `saveMcp({json})`。
+- **MCP 管理区**：设置卡新增 `mcp_servers` 编辑器，Remote 新增 `mcp()` / `saveMcp({json})`。
   写侧只改 `mcp_servers`，整体 64 KiB、最多 100 个 server；stdio/remote 按各自字段校验，
   未知字段、非法 URL、坏 `KEY=VALUE` 与超长数组都拒绝。
-- **ChatGPT 管理面**：Remote 新增 `auth()`（只读 `ocr auth status --provider chatgpt`）与
+- **ChatGPT 管理区**：Remote 新增 `auth()`（只读 `ocr auth status --provider chatgpt`）与
   `chatGpt({model})`（写 provider/model、清理同条目 key、不写明文）。卡片显示登录命令与模型
   输入；OAuth 登录本身仍留在终端，因为需要浏览器与本地回调。
 - **`effort` 新增 `auto`**：auto 时不传 `--effort`，让 OCR 自己的配置生效；卡片默认改为 auto。
@@ -155,9 +155,9 @@
 
 - **外部 OCR 契约从 1.13.0 抬到 1.13.3**：`ocrCliVersion`、代码常量、双语 README 与
   `THIRD_PARTY_NOTICES` 同步；1.13.3 的 scan path、provider 点号、grace round 与
-  `review_limit_reached` 行为纳入夹具。
+  `review_limit_reached` 的行为纳入夹具。
 - **宿主开发线从 rc.2 抬到 rc.3**：`engines.dsh`、peer/dev 依赖与 README 徽标/正文一致。
-- **工具数 5 → 7，Remote 方法 5 → 9**：README、routing、parity/publish 门禁与包描述同步；
+- **工具数 5 → 7，Remote 方法 5 → 9**：README、routing、parity 和 publish 那几条检查与包描述同步；
   输出 schema 抽到 `lib/tool-schemas.ts`，`host.ts` 只保留注册与执行。
 - **写配置统一走严格读**：`readExistingText` 把 ENOENT 与 EACCES/EIO 分开，读不动时中止写入，
   不再用空文档覆盖既有 providers/keys/mcp_servers。
@@ -180,7 +180,7 @@
 - **脱敏补齐环境变量与 GitHub token**：`DEEPSEEK_API_KEY=` 这类下划线形态与 `ghp_` /
   `github_pat_` 都会被抹掉，同时保留 kebab 路径可读性。
 - **output schema 守卫校验取值形态**：`type` 数组、单分支 `oneOf`、`enum` 字符串等写法在
-  插件侧当场报错，而不是拿错误判据继续校验模型数据。
+  插件侧当场报错，而不是拿一份过时的判据继续校验模型数据。
 - **大数组违规不再爆调用栈**：守卫改为逐条 push，几十万条违规也能给出可读结论。
 - **Windows 矩阵首跑暴露的平台假设**：工具根路径现在接受盘符/UNC 绝对路径（POSIX 形
   仍按 `/` 归一）；POSIX 分支的 PATH 候选改用相对 cwd 的目录，避免 Windows 盘符里的
@@ -205,13 +205,13 @@
   那个键不存在，`str()` 把缺失读成空串，于是「被排除文件及原因」永远只有文件没有原因，
   而 schema 与工具描述都在承诺后者。`reason` 留作旧形态回退。
 - **REVIEW_STATUSES 补 `failed`**：真回执里有这个状态，漏了它会让整份回执判为不可解析。
-- CLI 参数校验、argv 转义与消息表同步收口。
+- CLI 参数校验、argv 转义和消息表统一整理。
 
 ## 0.1.6
 
 ### Changed
 
-- **数据面迁移收尾**：五条 `/_dsh/ocr-review/*` HTTP 端点改为官方 Typert Remote 的
+- **数据那一栏迁移收尾**：五条 `/_dsh/ocr-review/*` HTTP 端点改为官方 Typert Remote 的
   `ocrReview` 命名空间（providers/select/migrate/test/probe）；README 的「Public endpoints」
   改为「Public methods」，readme-parity 门从端点路径改为方法名 + 命名空间。
 
@@ -227,8 +227,8 @@
 
 ### Changed
 
-- **外部 ocr CLI 改由用户自装**：判据先扫 PATH、其次才是随包兜底，装法由用户自选；版本声明
-  一处（package.json 的 `ocrCliVersion`，初值 1.13.0；此前的随包 CLI 不记版本），代码镜像与两侧 README 由门禁对齐。按安装来源
+- **外部 ocr CLI 改由用户自己安装**：先看 PATH，其次才是随包那一份，装法由用户自选；版本声明
+  一处（package.json 的 `ocrCliVersion`，初值 1.13.0；此前的随包 CLI 不记版本），代码里的镜像常量和两侧 README 由同一条门禁对齐。按安装来源
   （brew / npm）给对应的那条安装命令；来源判不出来时退回部署项 `ocrInstallHint` 的偏好。
 - **实测版本与声明不符时不只说给人听**：probe 端点回 `expectedVersion`/`consistent`，工具回执
   的 hint 也带上那句不一致说明。
@@ -245,9 +245,9 @@
 
 ### Added
 
-- **外部 ocr CLI 的可得性与版本状态**：判据只有一处（`resolveOcrAvailability` 用纯文件系统
+- **外部 ocr CLI 的可得性与版本状态**：判断只有一处（`resolveOcrAvailability` 只读文件系统
   事实回答「装没装、从哪条路来」，绝不起进程）；五个工具起任何进程之前现读它并短路，四处
-  显示面共用同一条 `ocrBinary`。版本号只在按下「检测版本」时经 probe 端点跑一次
+  界面显示共用同一条 `ocrBinary`。版本号只在按下「检测版本」时经 probe 端点跑一次
   `ocr version`（15 秒墙钟、恒定带 `OCR_NO_UPDATE=1`），回执把上游原文附在版本行之下供
   选中复制。部署级开关 `ocrNoAutoUpdate` 拦住上游 npm 包装层在评审中途执行的 `npm i -g`。
 
@@ -265,13 +265,13 @@
 ### Fixed
 
 - **select/migrate 按 `credentials.resolve` 的 source 层判定 OCR 运行时可达性**：
-  env/project-env 层的 key 写盘前拒绝，消灭「select 成功 → OCR 401」的假绿；get-cred 与
+  env 和 project-env 层的 key 在写到磁盘之前就拒绝，消掉「select 成功 → OCR 401」这种漏报；get-cred 与
   双语 README 的「继承环境层」说法一并纠正。
 - **webserver host 判定改为非回环 IP 字面量**：宿主 config 拒绝通配地址，旧的
   `=== "0.0.0.0"` 是永假死分支，LAN IP 绑定此前被信任闸整批 403。
-- **后台兜底回收理由按 `ocrBackgroundMaxMs` 实际窗口换算**，不再写死 2 小时；
-  delegate/session 回显补上 spill 落盘路径。
-- **Windows**：`ocrCommand` 恒走 PATH 裸 `ocr`（shebang launcher 不可直执行）；
+- **后台兜底回收的理由按 `ocrBackgroundMaxMs` 的实际窗口换算**，不再写死 2 小时；
+  delegate/session 回显补上 spill 写到磁盘路径。
+- **Windows**：`ocrCommand` 恒取不带路径的 `ocr`（shebang launcher 不可直执行）；
   `api_key_cmd` 双引号转义（ocr 经 cmd.exe 跑凭据命令）；`parseApiKeyCmd` 双形态反解。
 
 ### Changed
@@ -282,7 +282,7 @@
 
 ### Added
 
-- `THIRD_PARTY_NOTICES.md`：随包分发的第三方内容边界（图标改绘归属 / ocr CLI 接口面 /
+- `THIRD_PARTY_NOTICES.md`：随包分发的第三方内容边界（图标改绘归属 / ocr CLI 接口 /
   运行期依赖许可表 / dsh peer 不随包分发）。
 - `test/readme-parity.test.ts`：双语 README 结构闸（互链/章节/工具/部署键/声明）。
 - `publish.yml`：action 钉 commit SHA，发布步 `--provenance` 与 `--publish-wait-timeout`
@@ -330,11 +330,11 @@ OCR 自审缺陷修复。
   profile 即悬空，五个工具一起挂且错误与真因毫无关系。执行前校验并重建指向已不存在目录的
   路径，路径一律取自 `PLUGIN_DIR`；当前脚本自己缺失、旧脚本还活着、命令串读不懂这三种
   不越界。
-- **契约闸假阴性**：preview/rule 的清单此前只查「键在不在」，类型不对时一律放过并产出
+- **约定闸假阴性**：preview/rule 的清单此前只查「键在不在」，类型不对时一律放过并产出
   ok:true + 空清单；warnings 条目被 `filter(Boolean)` 静默丢弃。argv 闸收紧（NUL 拒绝、
   数组项含逗号拒绝、limit NaN 回落保守默认）；severity 与协议映射表的原型污染改走 Map。
 - **`build-client.mjs` 包名缺失改为 fail loud**：退化成 `unknown` 会让产物 id 与宿主模块表
-  键对不上——设置卡静默不渲染，而新鲜度门禁用同一段退化逻辑做比对，门禁照样绿。
+  键对不上——设置卡静默不渲染，而产物一致性检查用同一段退化逻辑做比对，检查照样报通过。
 
 ### Changed
 
@@ -351,7 +351,7 @@ OCR 自审缺陷修复。
   monorepo。
 - **超时文案报实际生效值**：改报 `spec.timeoutMs` 而非请求值——后者留空时是 2^31-1，照它算
   会把「实际生效 N 分钟」印成 35791 这种天文数字。
-- **后台回执带上官方作业 id**：此前回执无任何句柄，polling 把模型导向可能还没落盘的
+- **后台回执带上官方作业 id**：此前回执无任何句柄，polling 把模型导向可能还没写到磁盘的
   session list。jobId 按 id 寻址、启动即可读且一定有结果。
 
 ## 0.1.2
@@ -365,12 +365,12 @@ OCR 自审缺陷修复。
 - **provider 协议映射改三值**：llm-pi-ai 的 anthropic-messages 映射为 OCR 的 anthropic
   （此前一律写成 openai，按 OpenAI 线协议打 Anthropic 端点必失败）；api 缺省按上游
   openai-completions 兜底；表外值透传给写侧白名单拒绝，绝不静默降级。
-- **`ocr llm test` 与五个工具同一命令词解析源**：随包 launcher 装法下 PATH 无裸 ocr，
+- **`ocr llm test` 与五个工具同一命令词解析源**：随包 launcher 装法下 PATH 上解析不到 ocr，
   autoVerify/测试连接不再恒 exit 127。
 - **`ocrConfigPath` 真正生效**：自定义值须呈 `<X>/.opencodereview/config.json` 布局（OCR
   无文件级路径覆盖），插件给 ocr 子进程注入 `HOME=<X>`（POSIX 赋值前缀，win32 放行）；
   `api_key_cmd` 增加宿主 `resolveDshHome()` 第三段；布局外路径在设置层直接报错。
-- **入参闸严格化**：resume+workspace 前置拒绝（OCR 契约 workspace 禁恢复）；effort/wait
+- **入参闸严格化**：resume+workspace 前置拒绝（OCR 约定 workspace 禁恢复）；effort/wait
   错类型抛错；session limit 越界抛错而非静默钳制（0 不再钳成 1）；action=list+id 抛错而非
   静默改写 show。
 
@@ -378,7 +378,7 @@ OCR 自审缺陷修复。
 
 - README 拆分为英文主文档与 `README.zh-CN.md`（顶部互链、14 节对照），补部署级调优值
   （llmTestTimeoutMs / ocrBackgroundMaxMs / stdoutMaxBytes）、「开发」与「许可证」两节；
-  中文版不进 npm 发布面。
+  中文版不进 npm 发布清单。
 
 ## 0.1.1
 

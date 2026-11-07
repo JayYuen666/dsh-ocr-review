@@ -3,7 +3,7 @@
 /// <reference types="node" />
 // 构建 host.js：rolldown 把 host.ts 及其 `./lib/*` 依赖打成单文件 ESM，落在**包根**
 // （与源码同目录，故 `import.meta.dirname` 的语义与源码态完全一致）。
-// 编排（依赖段外部化、输出守卫、region 正典化、moduleIds 结构性判据）统一住在
+// 编排（依赖段外部化、输出守卫、region 规范化、moduleIds 的结构性检查）统一实现在
 // @jayyuen66/dsh-plugin-shared/lib/build-host，一处可改；本文件只声明本仓的入口、产物
 // 与生成头。为什么必须有打包这一步、为什么外部化按包名段判——见 shared 同名切面的
 // 文件头。不产 .d.ts：插件包对外没有 TS API——dsh 按包名载入运行，没有人 import 它。
@@ -13,7 +13,7 @@ import { buildHostEntries } from "@jayyuen66/dsh-plugin-shared/lib/build-host";
 import { invokedDirectly, writeArtifact } from "@jayyuen66/dsh-plugin-shared/lib/build-artifacts";
 
 const root = import.meta.dirname;
-/** 产物名只写一处：entries 声明、产物查找与落盘路径都从这里派生。 */
+/** 产物名只写一处：entries 声明、产物查找与写到磁盘路径都从这里派生。 */
 const HOST_OUTPUT = "host.js";
 
 /** 生成 host.js 的完整文本。 */

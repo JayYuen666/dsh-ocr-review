@@ -1,4 +1,4 @@
-// 设置卡读面（Typert Remote）的宿主侧直测：注册、九个方法的成功/拒绝分支，以及客户端
+// 设置卡的读取接口（Typert Remote）在宿主这边的直接测试：注册、九个方法的成功与拒绝分支，以及客户端
 // descriptor 与宿主 `@Remote` 标记的对质。客户端读取器的装配在文件末单独一组。
 import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -80,7 +80,7 @@ function gatewayOf(over: Partial<DshConfigGateway> = {}): DshConfigGateway {
   };
 }
 
-/** 外部 CLI 可用性现读口的替身：PATH 上一份 brew 装的。 */
+/** 外部 CLI 可用性现场读取的测试替身：PATH 上有一份 brew 装的。 */
 const AVAILABILITY: OcrAvailabilityProbe = () => ({
   source: "path",
   path: "/usr/local/bin/ocr",
@@ -132,7 +132,7 @@ interface DepsOptions {
   availability?: OcrAvailabilityProbe;
 }
 
-/** 一套完整的读面依赖 + 本次用例可断言的侧效应。 */
+/** 一整套读取接口的依赖 + 本次用例可以断言的副作用。 */
 function depsOf(options: DepsOptions = {}): {
   deps: OcrReviewRemoteDeps;
   commands: string[];
@@ -168,7 +168,7 @@ function serviceOf(deps: OcrReviewRemoteDeps): OcrReviewRemoteService {
   return service;
 }
 
-/** 未用到的命名空间方法一律抛：读取器若调错位，失败面比返回值更早暴露。 */
+/** 未用到的命名空间方法一律抛：读取器若调错位，失败比返回值更早暴露。 */
 const unusedRemoteMethod = async (): Promise<never> => {
   throw new Error("unused");
 };
@@ -188,14 +188,14 @@ function namespaceStub(): Record<string, unknown> {
   };
 }
 
-describe("设置卡 Remote（宿主读面与客户端消费侧）", () => {
+describe("设置卡的 Remote（宿主的读取接口与客户端的消费侧）", () => {
   afterAll(() => {
     for (const home of TEMP_HOMES.splice(0)) {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
-  describe("设置卡读面（官方 Typert Remote 源模式）", () => {
+  describe("设置卡的读取接口（官方 Typert Remote 的源模式）", () => {
     it("装进真 Context：九个方法都带 @Remote 标记，客户端 descriptor 逐项对质", () => {
       const service = serviceOf(depsOf().deps);
       const markers = remoteMethods(service)
@@ -237,7 +237,7 @@ describe("设置卡 Remote（宿主读面与客户端消费侧）", () => {
       }
     });
 
-    it("注册口缺席时返回 false（可选读面，不让 apply 下线）", () => {
+    it("注册的入口不在时返回 false（这是可选的读取接口，不该把整个 apply 拖下线）", () => {
       assert.equal(installOcrRemote({} as never, depsOf().deps), false);
       assert.equal(installOcrRemote(null as never, depsOf().deps), false);
     });
@@ -494,7 +494,7 @@ describe("设置卡 Remote（宿主读面与客户端消费侧）", () => {
       ).mcp();
       assert.deepEqual([badPath.ok, badPath.ok ? 0 : badPath.status], [false, 500]);
       // 写侧同样要回可读回执：设置项坏掉是服务侧故障（500），不能让 Remote 直接 reject
-      // ——卡片只会显示一句裸栈，而同一张卡上的读面已经会说人话了。
+      // ——卡片只会显示一句原始调用栈，而同一张卡上的读取接口已经能给出看得懂的说法。
       const badSavePath = await serviceOf(
         depsOf({ config: { ocrConfigPath: BAD_CONFIG_PATH } }).deps,
       ).saveMcp({ json: "{}" });
@@ -891,7 +891,7 @@ describe("设置卡 Remote（宿主读面与客户端消费侧）", () => {
   describe("isRemoteRefused：判别「请求被拒」与「结论不理想」", () => {
     it("ok 不能当判别式：test 的 ok 两态都取得到，与拒绝回执的 ok=false 重叠", () => {
       // 两者都是 { ok: false, ... }，靠 ok 判会把「LLM 测试没过」说成「请求被拒」，
-      // 用户看到的文案与接下来该做什么完全不同。判据是拒绝回执独有的 status。
+      // 用户看到的文案和接下来该做什么完全不同。判断依据是拒绝回执独有的那个 status。
       const refused: OcrTestReply = { ok: false, error: "boom", status: 400 };
       const testFailed: OcrTestReply = { ok: false, output: "auth failed" };
       const testPassed: OcrTestReply = { ok: true, output: "ok" };

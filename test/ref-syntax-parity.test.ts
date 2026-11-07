@@ -1,8 +1,8 @@
-// ref 语法的**层间一致**门禁：ref 名在三处被校验——宿主官方 isCredentialRefName
+// ref 语法的**跨层一致**门禁：ref 名在三处被校验——宿主的官方 isCredentialRefName
 // （宽：^[A-Za-z_][A-Za-z0-9_]*$，小写也过）、本包投影/命令构造与 get-cred.mjs
 // （严：^[A-Z0-9_]+$，ref 名要当环境变量名用）。历史上小写 ref 能过官方语法、卡片显示
 // configured，却到 buildApiKeyCmd 才抛——报错离用户动作隔了两层。本文件钉：
-// ① 两层严语法逐样本同判；② applyProviderSelection 在 select 时就用严语法收口。
+// 一条是两层严格语法逐个样本判定相同；另一条是 applyProviderSelection 在 select 时就用严格语法统一处理。
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -18,7 +18,7 @@ import { MESSAGES } from "../lib/messages.ts";
 
 const { zh } = MESSAGES;
 
-/** 投影层源码面探针：apiKeyEnvInvalid 字段是否已带出。 */
+/** 投影层源码探测脚本：apiKeyEnvInvalid 字段是否已带出。 */
 function sourceIncludes(needle: string): boolean {
   const source = readFileSync(
     path.resolve(import.meta.dirname, "../lib/provider-projection.ts"),
@@ -27,7 +27,7 @@ function sourceIncludes(needle: string): boolean {
   return source.includes(needle);
 }
 
-/** get-cred.mjs 的 ref 白名单独立副本（.mjs 不便值导入；逐样本对表由本测试承担）。 */
+/** get-cred.mjs 的 ref 白名单的独立副本（.mjs 不方便值导入；逐样本对表由这个测试负责）。 */
 const GET_CRED_REF_PATTERN = /^[A-Z0-9_]+$/u;
 
 const SAMPLES = {
@@ -70,7 +70,7 @@ function makePaths(): OcrPaths {
 }
 
 describe("ref 语法的层间一致", () => {
-  it("本包投影白名单与 get-cred.mjs 白名单对同一组样本同判", () => {
+  it("本包投影用的白名单与 get-cred.mjs 的白名单对同一组样本判定相同", () => {
     for (const sample of SAMPLES.accepts) {
       assert.equal(CREDENTIAL_ENV_KEY.test(sample), true, `投影层拒绝了合法样本 ${sample}`);
       assert.equal(GET_CRED_REF_PATTERN.test(sample), true, `get-cred 形状拒绝 ${sample}`);
@@ -87,11 +87,11 @@ describe("ref 语法的层间一致", () => {
     const source = readFileSync(scriptPath, "utf8");
     assert.ok(
       source.includes("/^[A-Z0-9_]+$/u"),
-      "get-cred.mjs 的 ref 白名单改了形状——同步更新本文件的独立副本与两层对表",
+      "get-cred.mjs 的 ref 白名单改了形状——要同步更新本文件的独立副本和两层对表",
     );
   });
 
-  it("applyProviderSelection 在 select 时就用严语法收口（小写 ref 不再等到评审运行时）", async () => {
+  it("applyProviderSelection 在 select 时就用严格语法统一处理（小写的 ref 不再等到评审运行时）", async () => {
     const gateway = makeGateway({ descriptors: descriptorsWithLowercaseRef() });
     const paths = makePaths();
     try {
@@ -108,9 +108,9 @@ describe("ref 语法的层间一致", () => {
           return text.includes("myKey") && text.includes("A-Z0-9_");
         },
       );
-      // 语法先拦：凭据解析面不应被问到（报错离动作最近的那次交互就给出原因）。
+      // 语法先拦：凭据解析这一步不应被问到（报错离动作最近的那次交互就给出原因）。
       assert.equal(gateway.resolvedRefs.length, 0);
-      // 投影面带出无效 ref 原值：修复前它被无声置 null，报错谎称「未声明」。
+      // 投影结果带出无效 ref 原值：修复前它被无声置 null，报错谎称「未声明」。
       assert.ok(
         sourceIncludes("apiKeyEnvInvalid"),
         "投影层缺 apiKeyEnvInvalid 面（无效 ref 又会被无声吞掉）",

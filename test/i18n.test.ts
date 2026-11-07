@@ -5,7 +5,7 @@
 //   1. 值非空、en 那份真不含中文（漏翻会在这里红，而不是在英文界面上露出一句中文）；
 //   2. 模板两侧的 `{占位符}` 集合一致——翻译时漏掉一个插值，运行时只会看到空白，
 //      没有任何报错，所以这条必须有测试；
-//   3. host 半自带的 format() 行为（缺键退空串，绝不在文案里留下裸占位符）。
+//   3. host 半自带的 format() 行为（缺键退空串，绝不在文案里留下未替换的占位符）。
 import { describe, expect, it } from "vitest";
 import { MESSAGES, format } from "../lib/messages.ts";
 import { UI_MESSAGES } from "../src/ui-messages.ts";
@@ -100,7 +100,7 @@ describe("模板两侧的 {占位符} 集合一致", () => {
 });
 
 describe("host 半 format()（host 侧没有官方插值，自带同语法）", () => {
-  it("按 {name} 替换，缺键退空串（绝不留裸占位符）", () => {
+  it("按 {name} 替换，缺键退空串（绝不留未替换的占位符）", () => {
     const params = { count: "3", namespace: "llm-pi-ai" };
     expect(format("共 {count} 个 · {namespace}", params)).toBe("共 3 个 · llm-pi-ai");
     expect(format("缺一个 {miss} 键", { here: "x" })).toBe("缺一个  键");
@@ -120,8 +120,8 @@ describe("host 半 format()（host 侧没有官方插值，自带同语法）", 
   });
 });
 
-describe("文案与实现口径对齐", () => {
-  it("后台完成判据按 coverage 的四桶划分，不写成 completed == selected", () => {
+describe("文案与实现的说法对齐", () => {
+  it("后台是否审完按 coverage 的四个桶判断，不写成 completed == selected", () => {
     // session list 的 selected 是 completed/reused/failed/waived 的并集（OCR
     // internal/session/list.go 的 manifest 分支），只比 completed 会把续扫复用过的
     // 已完成作业判成未完成。

@@ -2,7 +2,7 @@
 //
 // 各自防的回归：
 //   1. 跨包依赖必须保持 external（尤其 `@jayyuen66/dsh-plugin-shared/lib/record` 这类**子路径**
-//      说明符：external 的字符串项是精确匹配，匹配不到子路径 → 必须按包名段判定）；
+//      的模块说明符：external 的字符串项是精确匹配，匹配不到子路径 → 必须按包名段判定）；
 //   2. Config schema 用的是宿主 fork 的 `@deepseek-ai/schemastery`（0.1.7 的 `.volatile()`
 //      解析只在它有实现），产物里既不能被内联、也不能退回公共 schemastery；
 //   3. 产物里不得残留 `from "./x.ts"`（Node 载入 node_modules 内的 .ts 直接抛
@@ -22,7 +22,7 @@ import { hostFreshnessEvidence } from "./host-freshness.ts";
 const PKG_ROOT = path.dirname(import.meta.dirname);
 
 /**
- * 一次内存构建、多用例共读：`buildHost()` 每调一次都完整跑一遍 rolldown（该切面没有
+ * 一次内存构建、多用例共读：`buildHost()` 每调一次都完整跑一遍 rolldown（这个构建入口没有
  * 缓存），七个用例各构建一次是本文件最重的固定开销，而它们判的是同一份产物的文本。
  */
 let builtHost: Promise<string> | undefined;
@@ -33,7 +33,7 @@ async function hostText(): Promise<string> {
 
 /**
  * 官方 `dsh-credentials` 实现体里的稳定特征：`credentialRef` 抛错文案的前半段。
- * 取不到就直接判红——依赖挪了位置或被改名时，这条判据不能静默通过。
+ * 取不到就直接失败——依赖挪了位置或被改名时，这一条不能静默放过。
  */
 async function officialCredentialMarker(): Promise<string> {
   const source = await readFile(
@@ -42,7 +42,7 @@ async function officialCredentialMarker(): Promise<string> {
   );
   const marker = /throw new TypeError\(`(?<text>[^`]*must match)/u.exec(source)?.groups?.["text"];
   if (marker === undefined) {
-    throw new Error("官方 dsh-credentials 里没有取到 credentialRef 的特征文案，判据要跟着改");
+    throw new Error("官方 dsh-credentials 里没有取到 credentialRef 的特征文案，这一条要跟着改");
   }
   return marker;
 }
@@ -65,8 +65,8 @@ async function sharedSubpaths(): Promise<string[]> {
 
 describe("ocr-review host 构建", () => {
   it("host.js 与最新构建逐字节一致（改 host.ts / lib/*.ts 后必须 node build-host.mjs）", async () => {
-    // 本文件其余用例读的是**内存**构建产物，过期态在它们里全是绿的；只有逐字节比对磁盘
-    // 那份才钉得住「改源必须重建」（判据见 test/host-freshness.ts）。
+    // 本文件其余用例读的是**内存**里构建的产物，产物过期时它们全都通过；只有逐字节比对磁盘
+    // 上那一份才管得住「改了源必须重建」（判据见 test/host-freshness.ts）。
     const { pkgName, pkgDir, onDisk, built } = await hostFreshnessEvidence(import.meta.url);
     expect(
       onDisk,
@@ -74,26 +74,27 @@ describe("ocr-review host 构建", () => {
     ).toBe(built);
   });
 
-  it("跨包依赖保持 external（shared 子路径按源码现量逐条钉）", async () => {
+  it("跨包依赖保持 external（shared 子路径按源码当场读出来逐条固定）", async () => {
     const text = await hostText();
-    // 清单从宿主侧源码现量：写死五名的表只证明「这五条在」，host.ts 新增一条
-    // `lib/format` 并被内联时产物照样全绿，而注释担心的正是「shared 的模块级状态
-    // 被复制成第二份」。派生式判据让新增子路径无需人工同步。
+    // 清单从宿主侧源码当场实测：写死五名的表只证明「这五条在」，host.ts 新增一条
+    // `lib/format` 而被内联时产物照样全部通过，而注释担心的正是「shared 的模块级状态
+    // 被复制成第二份」。从 manifest 推导这份名单，新增子路径就不需要人工同步。
     const subpaths = await sharedSubpaths();
-    expect(subpaths.length, "宿主侧至少要有一条 shared 说明符，否则这条判据在空转").toBeGreaterThan(
-      0,
-    );
+    expect(
+      subpaths.length,
+      "宿主侧至少要有一条 shared 的说明符，否则这一条没有实际校验作用",
+    ).toBeGreaterThan(0);
     for (const subpath of subpaths) {
       expect(text).toContain(`from "@jayyuen66/dsh-plugin-shared/${subpath}"`);
     }
     expect(text).toContain('from "node:path"');
   });
 
-  it("host.js 保留宿主 fork schemastery 的裸说明符（external 未被内联）", async () => {
+  it("host.js 保留宿主 fork schemastery裸说明符（external 未被内联）", async () => {
     const text = await hostText();
     expect(text).toContain('from "@deepseek-ai/schemastery"');
     // 反向锁：不得退回公共 schemastery——它没有 `.volatile()`，解析出的 volatile 字段
-    // 仍是普通值，设置卡写进去的值永远读不到（0.1.7 迁移的根因）。
+    // 仍是普通值，设置卡写进去的值永远读不到（0.1.7 迁移的真正的原因）。
     expect(/(?:from|import)\s*\(?\s*["']schemastery["'/]/u.test(text)).toBe(false);
   });
 
@@ -105,15 +106,15 @@ describe("ocr-review host 构建", () => {
     expect(text).not.toContain("js-yaml");
   });
 
-  it("除宿主 fork 的 schemastery 与凭据 branded-string 构造器外，@deepseek-ai/* 只有类型面", async () => {
+  it("除宿主 fork 的 schemastery 与凭据 branded-string 构造器外，@deepseek-ai/* 只有类型", async () => {
     // 文件形态插件的运行时值导入只留两样：Config schema 用的 @deepseek-ai/schemastery，
     // 和 credentialRef / isCredentialRefName 所在的 @deepseek-ai/dsh-credentials
     // （值导入落 **peerDependencies**，绝不落 dependencies——后者会被消费方的 profile 装成
-    // 真实目录、在宿主进程里物化出第二份，判据见 test/publish-manifest.test.ts 那条门禁）。
+    // 真实目录、在宿主进程里多出一份，原因见 test/publish-manifest.test.ts 里那条门禁）。
     // cordis / dsh-settings / dsh-tools / dsh-shell / dsh-host-webserver / dsh-system-prompt
-    // 仍必须 type-only——它们的运行时面由 ctx 注入（服务走 ctx.credentials，不是这个包），
+    // 仍必须 type-only——它们的运行时实现由 ctx 注入（服务走 ctx.credentials，不是这个包），
     // 漏一个值导入就会让本包在源码态装载失败或把宿主的服务单例复制成第二份。dsh-tools 与
-    // 后三条同时钉住「服务面绑官方声明」：绑的是类型，产物里一个字都不留。
+    // 后三条同时钉住「服务类型绑官方声明」：绑的是类型，产物里一个字都不留。
     const text = await hostText();
     for (const name of [
       "cordis",
@@ -122,11 +123,11 @@ describe("ocr-review host 构建", () => {
       "dsh-shell",
       "dsh-host-webserver",
       "dsh-system-prompt",
-      // 注册表实例由宿主注入，本包只借它的类型面（连同只进 test/ 的实现件）。
+      // 注册表实例由宿主注入，本包只借它的类型上（连同只进 test/ 的实现件）。
       "dsh-jobs",
       "dsh-jobs-local",
     ]) {
-      // 子路径值导入、`export … from`、动态 import 三种写法都会把宿主的服务面变成运行期
+      // 子路径值导入、`export … from`、动态 import 三种写法都会把宿主的服务变成运行期
       // 依赖，所以按包名段命中即可，不要求说明符正好等于裸包名。
       expect(
         text,
@@ -135,10 +136,10 @@ describe("ocr-review host 构建", () => {
     }
   });
 
-  it("dsh-credentials 以裸说明符外部化，且官方构造器不再被内联（口径 A）", async () => {
-    // 两条要一起看：只钉"说明符在"会在有人把依赖挪回 devDependencies 时被上次构建的产物
-    // 蒙过去；只钉"函数体不在"则可能它压根没被用到。本包用的是两枚纯 branded-string
-    // 构造器（credentialRef / isCredentialRefName），服务面仍走 ctx.credentials。
+  it("dsh-credentials 以裸说明符形式外部化，且官方构造器不再被内联", async () => {
+    // 两条要一起看：只断"说明符在"会在有人把依赖挪回 devDependencies 时被上一次构建的产物
+    // 蒙过去；只断"函数体不在"则可能它压根没被用到。本包用的是两个纯 branded-string
+    // 构造器（credentialRef、isCredentialRefName），凭据服务仍然走 ctx.credentials。
     const text = await hostText();
     expect(text).toContain('from "@deepseek-ai/dsh-credentials"');
     // 按函数名加行首判「没被内联」，在改名（credentialRef2）、折成 const 箭头或
@@ -154,10 +155,10 @@ describe("ocr-review host 构建", () => {
     expect(text).not.toMatch(/from\s*["']@deepseek-ai\/dsh-brand["']/u);
   });
 
-  it("产物里没有本地 .ts 说明符残留", async () => {
+  it("产物里没有本地 .ts说明符残留", async () => {
     const text = await hostText();
-    // 覆盖 from / 副作用 import / 动态 import：Node 在 node_modules 里对这三种 .ts 说明符
-    // 都会抛 ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING。
+    // 覆盖 from / 副作用 import / 动态 import：Node 在 node_modules 里对这三种 .ts 形式的
+    // 说明符都会抛 ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING。
     expect(text).not.toMatch(/(?:from|import)\s*\(?\s*["'][^"']*\.ts["']/u);
   });
 
@@ -165,8 +166,8 @@ describe("ocr-review host 构建", () => {
     const text = await hostText();
     expect(text).toContain("const PLUGIN_DIR = import.meta.dirname;");
     // 构建脚本的写入目标 = 脚本自身目录（= 包根）；改这一行必须同步改本断言。
-    // 原子落盘与构建编排已移到 @jayyuen66/dsh-plugin-shared 的统一构建切面
-    // （写盘手法的判据由 shared 自己的测试钉）；这里只钉目标路径仍在本仓声明。
+    // 原子的写入磁盘与构建编排已经移到 @jayyuen66/dsh-plugin-shared 的统一构建实现里
+    // （怎么写盘的验证由 shared 自己的测试负责）；这里只断目标路径仍然按本仓的声明。
     const builder = await readFile(path.join(PKG_ROOT, "build-host.mjs"), "utf8");
     expect(builder).toContain("const root = import.meta.dirname;");
     expect(builder).toContain('const HOST_OUTPUT = "host.js";');

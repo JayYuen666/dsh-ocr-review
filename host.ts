@@ -1,7 +1,7 @@
 // ocr-review dsh 插件 Host 半。
 //
 // 职责：
-//   1. 声明设置面（effort/language/autoVerify/maxComments/timeoutMinutes/
+//   1. 声明设置项（effort、language、autoVerify、maxComments、timeoutMinutes、
 //      ocrConfigPath）。命名空间是**隐式**的：宿主把本包导出 `Config` 里标了
 //      `.volatile()` 的字段投影成设置表单，ns = profile 条目 id（`ocr-review`，见
 //      cordis.patch.yml），没有 `settings.register(ns, schema, { base })` 这一层；
@@ -10,7 +10,7 @@
 //   2. 注册 7 个模型工具：ocr_review（自驱 diff 审查）、ocr_scan（全文件扫描）、
 //      ocr_delegate_preview / ocr_delegate_rule（委托模式脚手架）、ocr_session（会话内复查）、
 //      ocr_rules_check（规则解析诊断）、ocr_llm（LLM 配置只读诊断）。
-//   3. 设置卡的官方读面（Typert Remote，namespace `ocrReview`）：providers / select /
+//   3. 设置卡的官方读取接口（Typert Remote，namespace `ocrReview`）：providers / select /
 //      migrate / test / probe / mcp / saveMcp / auth / chatGpt 九个方法经宿主网关暴露给本 profile 的客户端。
 //   4. 注册 systemPrompt 路由段（order 1555，紧邻 zg 1550 之后；不与 lesson-loop 1560 撞车）。
 //
@@ -18,7 +18,7 @@
 //   - 清单：ctx.settings.describe() 里 llm-pi-ai 那条的 value.providers。本包不读宿主
 //     的私有配置文件，也不假设私有键路径。
 //   - key：ctx.credentials 的 describe(ref)/resolve(ref)。本包不再读 .credentials.yaml。
-//   - 两个服务都可能缺席（非 web profile、未装配 base bundle）→ 读面回可读的降级
+//   - 两个服务都可能缺席（非 web profile、没装配 base bundle）→ 读取那侧返回能读懂的降级
 //     原因，卡片显示「为什么不可用」；任何一条都不许在会话热路径抛穿。
 //
 // 安全要点：
@@ -29,8 +29,8 @@
 //     resolve() 拿到值也只用于确认「解析得到」，当场丢弃。
 //     OCR 原始 stdout/stderr（错误详情、llm test、解析失败回显、session 透传）
 //     出宿主前统一过 redactKeyMaterial()。
-//   - Remote 读面只经官方网关暴露给**本 profile 的客户端**，来源校验与鉴权由网关承担；
-//     provider/model 必须命中 settings 服务返回的列表（白名单），这条闸门护的是动作本身，
+//   - Remote 的读取接口只经官方网关暴露给**本 profile 的客户端**，来源校验与鉴权由网关承担；
+//     provider 和 model 必须命中 settings 服务返回的列表（那份白名单），这道闸护的是动作本身，
 //     与传输方式无关。
 //   - 评审/扫描输出统一走 --output 临时文件（防宿主 stdout 截断），解析后即删。
 //   - review/scan 命令经 wrapWithHostReaper 包装（lib/cli.ts）：dsh 任何方式退出
@@ -46,40 +46,40 @@
 // @deepseek-ai/dsh-typert-protocol（Remote 的 Service 基类与装饰器工厂，同在
 // peerDependencies）、@deepseek-ai/dsh-home-paths 与 @deepseek-ai/dsh-atomic-write
 // （lib/ocr-config.ts 与 lib/config-store.ts 取 resolveDshHome/expandHomePath 与
-// writeFileAtomic/withFileLock——外部 config.json 的定位与落盘锁都归官方件，这两件也在
+// writeFileAtomic/withFileLock——外部 config.json 的定位与写到磁盘锁都归官方件，这两件也在
 // peerDependencies）以及 @jayyuen66/dsh-plugin-shared；
 // cordis / dsh-settings / dsh-tools / dsh-shell / dsh-system-prompt
-// 一律 type-only（运行时服务由 ctx 注入，见 plugins/README.md 的解耦原则；工具面与
-// shell/systemPrompt 两面的类型绑官方见下面 import 段）。dsh-credentials 是
-// **值导入且在 peerDependencies**，但只取它两枚纯语法件（见下面的 import 注释），凭据读写仍走
-// ctx.credentials——服务面没有因此开口。
+// 一律 type-only（运行时服务由 ctx 注入，见 plugins/README.md 的解耦原则；工具那边与
+// shell/systemPrompt 两处的类型绑官方见下面 import 段）。dsh-credentials 是
+// **值导入且在 peerDependencies**，但只取它两枚纯语法件（见下面的 import 注释），凭据的读写仍走
+// ctx.credentials——需要注入的服务并没有因此多出几个。
 
 import Schema from "@deepseek-ai/schemastery";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Context, Fiber, Volatile } from "@deepseek-ai/cordis";
-// 设置卡的官方读面：`TypertRemoteService` 是**类**（要 `extends`），`Remote` 是装饰器
+// 设置卡的官方读取接口：`TypertRemoteService` 是**类**（要 `extends`），`Remote` 是装饰器
 // 工厂，二者都没有 type-only 的造法，故落 peerDependencies（`dependencies` 是禁区，由
 // test/publish-manifest.test.ts 钉着），产物里保持裸说明符（build-host.mjs 的外部化
-// 名单读 dependencies ∪ peerDependencies）。
+// 名单读 dependencies ∪ peerDependencies。
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 // 类型侧绑定官方声明：describe() 的字段名（ns/value）与凭据读的返回形状一旦在上游
 // 改动，typecheck 立刻报错，而不是运行时静默读不到 provider。
 import type { SettingsDescriptor, SettingsForms } from "@deepseek-ai/dsh-settings";
-// 值导入：`isCredentialRefName` / `credentialRef` 是凭据包自己交出的**官方**校验与
-// 品牌构造（installed lib/index.js:13 `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`、
-// :21-36），本包原先自己抄了同一条正则当 ref 语法——抄一条规则就多一处会跟着宿主漂移的
-// 判据。两者都是纯字符串函数；官方品牌没有 type-only 的构造方式，故落
+// 值导入：`isCredentialRefName` / `credentialRef` 是凭据包自己交出的**官方**校验函数与
+// 类型品牌构造函数（installed lib/index.js:13 `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/`、
+// :21-36），本包原先自己抄了同一条正则当 ref 语法——多抄一条规则就多一处会跟着宿主变化的
+// 判断。两者都是纯字符串函数；官方的 branded type 没有 type-only 的构造方式，所以落
 // `peerDependencies`（值导入必须由宿主在场提供，而 profile 不装 peer，所以不产生第二份；
 // `dependencies` 是禁区，理由见 `test/publish-manifest.test.ts`）、产物留裸说明符
 // （`test/build-host.test.ts` 同时钉"说明符在"与"函数体不在"，
 // 并钉 `dsh-brand` 不得出现在本包产物里——brand 是 credentials 自己的依赖）。
 import { credentialRef, isCredentialRefName } from "@deepseek-ai/dsh-credentials";
 import type { CredentialProvider } from "@deepseek-ai/dsh-credentials";
-// 工具注册/执行面绑官方声明（devDependency @deepseek-ai/dsh-tools，与运行宿主同版本）：
-// 注册面直接 `Pick` 官方服务类 `ToolRuntime` 的成员（不再重述 register 的签名），
-// 执行面/输出面载荷（ToolRunContext / ToolOutputDefinition / JsonSchemaNode）一旦在上游
+// 工具的注册和执行用到的类型绑官方声明（devDependency @deepseek-ai/dsh-tools，与运行的宿主同版本）：
+// 注册那侧直接 `Pick` 官方服务类 `ToolRuntime` 的成员（不再重述 register 的签名），
+// 执行与输出用到的载荷（ToolRunContext、ToolOutputDefinition、JsonSchemaNode）一旦在上游
 // 改名或换形状，typecheck 立刻在本包报错，而不是运行时静默注册不上。仍是 type-only——
 // 产物里不留说明符（锁见 test/build-host.test.ts）。
 import type {
@@ -88,7 +88,7 @@ import type {
   ToolRunContext,
   ToolRuntime,
 } from "@deepseek-ai/dsh-tools";
-// shell / jobs / systemPrompt 这几面同批绑官方声明（各自的 devDependency 与运行宿主
+// shell / jobs / systemPrompt 这几处同批绑官方声明（各自的 devDependency 与运行宿主
 // 同版本）。服务成员一律经 `Pick<官方类, "方法名">` 投影而不是重抄签名：载荷与返回
 // （resolve 的 ShellExecRequest、execute 的 ShellExecSpec / ShellExecution、
 // section 的 PromptSection、result() 的 ShellRunResult）由官方
@@ -101,12 +101,12 @@ import type {
   ShellRunResult,
 } from "@deepseek-ai/dsh-shell";
 // 沙箱策略按调用携带（官方 `SandboxExecutionPolicy` 定义在 dsh-sandbox，dsh-shell 自己
-// 只内部 import、并不再导出，所以取类型必须直引）。同样是 type-only，产物里不得出现该
+// 只内部 import、并不再导出，所以取类型必须直引）。同样是 type-only，产物里不得出现这条
 // 说明符（锁见 test/build-host.test.ts）；包本身已在 devDependencies 声明，不需要进运行时。
 import type { SandboxExecutionPolicy } from "@deepseek-ai/dsh-sandbox";
-// 后台评审的子进程登记为官方作业（ctx.jobs）。口径与上面几面一致——type-only +
+// 后台评审的子进程登记为官方作业（ctx.jobs）。做法和上面几处一致——type-only +
 // `Pick<官方类, 方法>` 投影，注册表实例由宿主注入（dsh-base 默认装载 dsh-jobs-local），
-// 产物里不得出现这两个说明符（针在 test/build-host.test.ts）。
+// 产物里不得出现这两个说明符（锁见 test/build-host.test.ts）。
 import type {
   JobId,
   JobOutcome,
@@ -116,8 +116,8 @@ import type {
   JobSpec,
   JobStatus,
 } from "@deepseek-ai/dsh-jobs";
-// 落定进程 → 作业结局的映射与收子进程的 killProc 都取 shared 那一份（口径抄的是宿主 bash 工具；
-// killProc 吞掉的那条异常为什么承重，看 startBackground 里 cancel 那一臂的注释）。
+// 进程落定 → 作业结局的映射，以及收子进程的 killProc 都取 shared 那一份（规则来自宿主的 bash 工具；
+// killProc 吞掉的那条异常为什么承重，看 startBackground 里 cancel 那一分支的注释）。
 import { jobOutcomeOf, killProc } from "@jayyuen66/dsh-plugin-shared/lib/job-outcome";
 import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt";
 // host 侧文案语言跟官方 locale 插件的偏好同源：读它拥有的 settings 命名空间（未注册即中文）。
@@ -126,7 +126,7 @@ import {
   messagesFor,
   resolveLocalePreference,
 } from "@jayyuen66/dsh-plugin-shared/lib/locale";
-// 代理对安全的定长截断（前切面已交官方 output-retention，后切面仍在本仓；
+// 代理对安全的定长截断（截去前半已交官方 output-retention，截去后半仍在本仓；
 // 语义与官方件的实测差异见 shared/lib/text.ts 头注释）：
 // 进会话日志的自制切点一律走这里，裸 slice 会在切点留下孤立高/低代理。
 import { truncateEnd, truncateStart } from "@jayyuen66/dsh-plugin-shared/lib/text";
@@ -197,8 +197,8 @@ import type {
   OcrTestReply,
 } from "./lib/remote-shape.ts";
 import { applyChatGptModel, readMcpServers, saveMcpServers } from "./lib/mcp-config.ts";
-// provider 清单的来源层与外部 config.json 的落点层各自成模块（判据分家，见那两个文件的头
-// 注释）：命名空间常量在 lib/provider-source.ts，脚本落点在 lib/config-store.ts。
+// provider 清单的来源层和外部 config.json 的写入层各自成模块（判据分在两侧，见那两个文件的头
+// 注释）：命名空间常量在 lib/provider-source.ts，脚本落在 lib/config-store.ts。
 import { PI_AI_NAMESPACE } from "./lib/provider-source.ts";
 import { defaultCredScriptPath } from "./lib/config-store.ts";
 import type { DshConfigGateway, ProviderDescriptor } from "./lib/provider-source.ts";
@@ -221,13 +221,13 @@ declare module "@deepseek-ai/dsh-jobs" {
 
 const PLUGIN_DIR = import.meta.dirname;
 // 前台超时语义（宿主 shell = bash-local）：resolve 以
-// clampTimeout(请求, timeoutMs, maxTimeoutMs) = min(请求 ?? 120s, maxTimeoutMs) 收口，
+// clampTimeout(请求, timeoutMs, maxTimeoutMs) = min(请求 ?? 120s, maxTimeoutMs) 收敛，
 // maxTimeoutMs 是 shell 执行器插件自己的 volatile 设置项（bash-local 缺省
 // 600000 = 10 分钟），在它的设置行/设置页上改，没有配置文件级的段落可写。foreground
 // 不存在"不限时"：本插件 0/未设置 = 请求宿主上限（下发本常量，被 clamp 到
 // maxTimeoutMs）；后台通道（wait=false）不给进程挂宿主 deadline（resolve 里显式带
 // onExpiry:"none"，官方缺省是 'kill'），但本包给它加了 OCR_BACKGROUND_MAX_MS 那一档
-// 兜底回收——所以"真不限时"这句在文案里也不许再写（连卡片与工具参数说明都钉住了）。
+// 兜底回收——所以"真不限时"这句在文案里也不许再写（卡片和工具参数说明都已经这么写了）。
 // 2^31-1 = 宿主 timer 上限。
 const MAX_TIMEOUT_REQUEST_MS = 2_147_483_647;
 const LLM_TEST_TIMEOUT_MS = 90_000;
@@ -237,7 +237,7 @@ const LLM_TEST_TIMEOUT_MS = 90_000;
  *  人按下「检测」时跑，不进任何热路径，因此不做成设置项。 */
 const VERSION_PROBE_TIMEOUT_MS = 15_000;
 const STDOUT_MAX_BYTES = 400_000;
-/** `--output` 落盘结果的读取上限（字节）。**刻意不取 STDOUT_MAX_BYTES**：`--output` 存在的
+/** `--output` 写到磁盘结果的读取上限（字节）。**刻意不取 STDOUT_MAX_BYTES**：`--output` 存在的
  *  理由正是「结果比 stdout 缓冲大」，用 400 KB 卡它等于把正常的大仓评审判死。这一枚只是
  *  护栏，把「整份读进内存」的失败形态从 OOM 换成一条点名文件的错误。 */
 const OUT_FILE_MAX_BYTES = 64 * 1024 * 1024;
@@ -249,30 +249,30 @@ const RAW_ECHO_LIMIT = 500;
  *  「读到坏值时的回退」（readMaxComments）共用这一个数，两处不许各写一份字面量。 */
 const MAX_COMMENTS_DEFAULT = 12;
 
-// ── 宿主服务面（运行时由 ctx 注入，一律 type-only）──────────────────────────
-// 工具面（`ToolRuntime` 的成员面 + ToolRunContext / ToolOutputDefinition / JsonSchemaNode）
-// 与 shell / jobs / systemPrompt 等服务面都已绑 `@deepseek-ai/*` 官方声明，本文件不再
-// 手抄它们的形状：字段可选性过去是「一律对齐 harness 声明」的手工纪律
+// ── 宿主的各个服务（运行时由 ctx 注入，一律 type-only）────────────────────────
+// 工具相关（`ToolRuntime` 的成员 + ToolRunContext、ToolOutputDefinition、JsonSchemaNode）
+// 和 shell、jobs、systemPrompt 这些服务都已绑 `@deepseek-ai/*` 的官方声明，本文件不再
+// 照抄它们的形状：字段可选性过去是「一律对齐 harness 声明」的手工纪律
 // （packages/shell/shell/src/types.ts、packages/subprocess/subprocess/src/types.ts），
 // 现在由 `Pick` 保证——官方把必有字段改成可选、或给载荷添一个必填字段，这里立刻是编译错误，
 // 而不是调用点静默放过 undefined。
 //
-// 这些官方服务面都是 `Service` 子类（`ShellExecutor` 还是 abstract）：基类的 protected
+// 这些官方服务都是 `Service` 的子类（`ShellExecutor` 还是 abstract）：基类的 protected
 // `ctx` 加各自的 private 字段（SystemPrompt 的 layers，
 // ToolRuntime 的 deferredContexts/layers/…），
 // TS 对带这类成员的类按名义比 → 结构替身永远满足不了整个类类型（test/host.test.ts 的
-// 替身就是结构替身）。故服务成员只取 `Pick<官方类, "方法名">` 的**方法面投影**：投影本身
+// 替身就是结构替身）。故服务成员只取 `Pick<官方类, "方法名">` 的**方法子集投影**：投影本身
 // 是结构类型，被 Pick 的那个方法的入参与返回仍是官方类型（载荷/返回一律不复述）。
 //
 // 官方名与旧镜像名的差异（绑定后以官方名为准）：前台结果 `ShellResult` →
 // `ShellRunResult`；带 result() 的执行句柄 `ShellProcess` → `ShellExecution`（官方
-// `ShellProcess` 只有后台进程面，没有 result()）；`CollectedOutput` 与旧手抄逐字段一致
+// `ShellProcess` 只有后台进程那几个方法，没有 result()）；`CollectedOutput` 与旧抄本逐字段一致
 // （text 是截断后的尾部、truncated 必有布尔、spillPath 可选），故不再本地声明。
-// 旧手抄还整体偏窄：`ShellRunResult` 另有 signal / timeoutMs / sandbox?，
+// 旧抄本还整体偏窄：`ShellRunResult` 另有 signal / timeoutMs / sandbox?，
 // `ShellExecRequest` 另有 stdin / dshEnv / sandboxPolicy，`ShellExecution` 另有
 // readOutput() / observed / signal，`PromptSection` 另有 interpolate / complete。
 
-/** shell 执行面的方法投影。官方 `ShellExecutor` 只有 `resolve`/`execute` 两个抽象方法，
+/** shell 执行服务的方法投影。官方 `ShellExecutor` 只有 `resolve` 和 `execute` 两个抽象方法，
  *  且二者**收的不是同一个类型**：`resolve` 调用方给 `ShellExecRequest`（workdir/timeoutMs
  *  可选，由实现方按自己的 volatile 设置项填默认并 clamp），`execute` 只收 `resolve`
  *  交回的已解析 `ShellExecSpec`。唯一的执行入口：前台 await 句柄的 result()（仅基础
@@ -283,7 +283,7 @@ export type ShellService = Pick<ShellExecutor, "resolve" | "execute">;
 
 /**
  * 官方 JobRegistry（@deepseek-ai/dsh-jobs，abstract Service + protected ctx → 名义比较）
- * 的方法面投影：本包用这五位，缺一位都跑不通——
+ * 的方法子集投影：本包用这五位，缺一位都跑不通——
  *  - `start`：把后台评审的子进程登记成作业（`kind: "ocr-review"` ⇒ id `ocr-review-<16 位 hex>`，
  *   注册表按 randomUUID 截短发号，不是递增序号）；
  *  - `kill`：工具调用被中止时经注册表收，而不是绕过它直接杀进程（否则官方名册里那条
@@ -291,7 +291,7 @@ export type ShellService = Pick<ShellExecutor, "resolve" | "execute">;
  *  - `attachController`：实测官方件在「没有 controller 服务这个 owner」时**拒绝 start**，
  *   而本包的作业是**未拥有**的（受有作业要 dsh-agent 注册表）。web 面上宿主自己的
  *   `tool-jobs` 被移进了各 preset realm（packages/bundle/web-app/cordis.patch.yml 把它
- *   在宿主平面 disabled）⇒ 未拥有那一桶只有从无作用域上下文 attach 的 controller 服务得到，
+ *   在宿主那一层被 disabled）⇒ 未拥有那一桶只有从无作用域上下文 attach 的 controller 服务得到，
  *   本包必须自己挂一枚——但**只在 start 那一瞬**（见 `startUnderOcrController`）；
  *  - `list` / `remove`：登记新作业前剪掉本 kind 最老的**已落定**记录。注册表不替生产者
  *   回收记录（官方契约："A settled record stays listed until its owner's disposal,
@@ -306,7 +306,7 @@ type JobsService = Pick<
 /** 官方注册表里本包作业的 kind；宿主据此签发的 id 形如 `ocr-review-<16 位 hex>`。 */
 const OCR_JOB_KIND = "ocr-review";
 
-/** 本插件起过的作业台账：id → 发起会话（无主作业记 undefined）。 */
+/** 本插件起过的作业台账：id → 发起它的会话（没有主人的记成 undefined）。 */
 type JobLedger = Map<JobId, SessionIdFace | undefined>;
 
 /**
@@ -360,12 +360,12 @@ function pruneOcrJobHistory(
 }
 
 /**
- * 在 controller 闸门下起一条未拥有作业，起完立刻摘掉。
+ * 起一条受 controller 记录的未拥有作业，起完立刻摘掉。
  *
  * 实测：挂上即放行、摘掉即恢复"没有 controller 服务这个 owner"的拒绝、可反复；而 global 层
  * 那串 token 只被 `servesOwner` 读（installed dsh-jobs-local 全文唯一消费点），作业后续的
  * read/kill/落定都不依赖它。所以常驻一枚等于在"宿主故意没装 job 工具"的组成里替全宿主
- * 开着那道闸门——官方契约写的是"生产者不能起一台 owner 收不掉、停不掉的作业"。
+ * 一直保持放行——官方契约写的是"生产者不能起一台 owner 收不掉、停不掉的作业"。
  */
 function startUnderOcrController(jobs: JobsService, spec: JobSpec): JobId {
   const detach = jobs.attachController("ocr-review: background");
@@ -377,18 +377,18 @@ function startUnderOcrController(jobs: JobsService, spec: JobSpec): JobId {
 }
 
 /**
- * 等到兜底 deadline 到点，然后把仍在跑的那条经注册表收掉。
+ * 等到兜底的 deadline 到点，然后把仍在跑的那条经注册表收掉。
  *
- * 用注册表自己的 `wait(id, ms)` 而不是宿主 timer，也不是裸 `setTimeout`：前者要把
- * `timer` 写进 HostCtx 的**必需**服务面（装载守卫一扩，没装那件的宿主连前台评审都装载
+ * 用注册表自己的 `wait(id, ms)` 而不是宿主 timer，也不是一个不加清理的 `setTimeout`：前者要把
+ * `timer` 写进 HostCtx 的**必需**服务清单（装载守卫一放宽，没装那件的宿主连前台评审都装载
  * 不了），后者会活过插件卸载。实测 `wait` 只等不杀、作业一落定就解掉它内部的定时器，
  * 也不推进输出游标（模型侧 job_output 的读数不受影响）——所以落定时这里看一眼状态就返回。
  * @param jobs 官方注册表
  * @param id 这次后台评审的作业 id
  * @param reason 到点回收时写进模型可见 detail 的理由
  * @param backgroundMaxMs 窗口毫秒数；`<= 0`（部署级设置项 `ocrBackgroundMaxMs` 的默认值）
- *   表示这条不设兜底窗口，直接返回、不去敲 `wait`
- * @returns 等完这一条的兜底窗口；抛错一律就地收敛（记录没了就等于无事可做）
+ *   表示这一条不设兜底窗口，直接返回、不去调用 `wait`
+ * @returns 等完这一条的兜底窗口；抛错一律就地接住（记录没了就等于无事可做）
  */
 async function enforceOcrDeadline(
   jobs: JobsService,
@@ -405,7 +405,7 @@ async function enforceOcrDeadline(
       jobs.kill(id, undefined, reason);
     }
   } catch {
-    // 这条已经不在了（记录被窗口裁剪收走、或服务被重载）⇒ 兜底本来就无事可做。
+    // 这一条已经不在了（记录被窗口裁剪收走、或者服务被重载）⇒ 兜底处理本来就无事可做。
   }
 }
 
@@ -437,10 +437,10 @@ function reclaimSessionJobs(
   }
 }
 
-/** 卸载时收一条有主作业：id 只有台账知道，kill/remove 必须带 owner 作 caller。 */
+/** 卸载时收一条有主人的作业：id 只有本包那份台账知道，kill/remove 必须带 owner 当 caller。 */
 function reclaimOwnedJob(jobs: JobsService, id: JobId, owner: SessionIdFace, reason: string): void {
   try {
-    // 台账只记本包起过的 id，故这里不再判 kind：那个判据在构造上恒真，只会逼出一条假用例。
+    // 那份台账里只有本包起过的 id，所以这里不再判 kind：这个条件在构造上永远成立，只会逼出一条没有内容的用例。
     const job = jobs.get(id, owner);
     if (isLiveOcrStatus(job.status)) {
       jobs.kill(id, owner, reason);
@@ -453,7 +453,7 @@ function reclaimOwnedJob(jobs: JobsService, id: JobId, owner: SessionIdFace, rea
 }
 
 /**
- * 卸载时收掉本包起过的全部作业：无主的经 `list()` 枚举，有主的只有台账知道 id
+ * 卸载时收掉本包起过的全部作业：没有主人的经 `list()` 枚举，有主人的只有这份台账知道 id
  * （注册表对没有 caller 的视图隐藏它们，且 kill/remove 必须带 owner 作 caller）。
  */
 function reclaimAllJobs(jobs: JobsService, reason: string, ledger: JobLedger): void {
@@ -477,18 +477,18 @@ function reclaimAllJobs(jobs: JobsService, reason: string, ledger: JobLedger): v
   }
 }
 
-/** ctx.tools 的方法面投影。官方 `ToolRuntime` 是带私有字段的 `Service` **类**（installed
+/** ctx.tools 的方法子集投影。官方 `ToolRuntime` 是带私有字段的 `Service` **类**（installed
  *  `@deepseek-ai/dsh-tools/lib/types/index.d.ts:512`，`Context.tools: ToolRuntime` 的增强在
- *  同文件 `:34`），结构替身不可能满足它（TS 对类按名义比），故与上面 `ShellService` / 下面
- *  `SystemPromptService` 同一口径：只 `Pick` 本包要调的那一个方法，不再复述它的签名。
- *  载荷与 disposer 自此全部由官方成员交出（installed 同文件 `:619`
+ *  同文件里那个抽象声明），结构的测试替身不可能满足它（TS 对类按名义比较），所以和上面 `ShellService`、
+ *  下面 `SystemPromptService` 用同一种做法：只 `Pick` 本包要调的那一个方法，不再复述它的签名。
+ *  载荷与 disposer 从此全部由官方成员交出（dsh-tools 同文件的 ToolDefinition 声明
  *  `register(definition: ToolDefinition): () => void`——`ToolDefinition` 的
  *  name/description/parameters 来自 ToolSchema，output 是 ToolOutputDefinition，execute 收
  *  ToolRunContext）：旧镜像把这一位重抄了一遍，官方改参数名/加必填参数时镜像照样编译通过、
  *  调用点静默拿到错形状；绑上去后那就是本文件的一枚编译错误。 */
 export type ToolsService = Pick<ToolRuntime, "register">;
 
-/** systemPrompt 的 `section` 方法面投影：载荷绑官方 `PromptSection`（name/order 必填，
+/** systemPrompt 的 `section` 方法子集投影：载荷绑官方 `PromptSection`（name/order 必填，
  *  text 除字符串外还可以是逐次装配求值的 provider，另有 interpolate/complete 两个本包
  *  不用的可选旗标），disposer 按官方的 `() => void` 收——旧镜像把返回写成 `unknown`，
  *  等于宣称宿主可能交不出撤销句柄。 */
@@ -497,7 +497,7 @@ export type SystemPromptService = Pick<SystemPrompt, "section">;
 /**
  * 官方 `SettingsForms`（installed `@deepseek-ai/dsh-settings/lib/types/index.d.ts:62`，
  * `Service` 子类 + private `ownerContext/revisions/closed/scheduled/presentations`
- * → 名义比较）的方法面投影。命名空间由宿主按导出的 `Config` 隐式投影，插件侧不调
+ * → 名义比较）的方法子集投影。命名空间由宿主按导出的 `Config` 隐式投影，插件侧不调
  * `settings.register`，所以本包只用两位：`configure`（登记本页的页面策略）与
  * `describe`（跨命名空间读）。
  * 旧镜像有两处自己裁定：`owner?: unknown`（把官方 `owner?: Fiber` 放宽，好让
@@ -517,13 +517,13 @@ export interface InjectedCtx {
 
 /**
  * 官方凭据服务（installed `@deepseek-ai/dsh-credentials/lib/types/index.d.ts:99` 的
- * `Context.credentials: CredentialProvider`）的方法面投影：本包只 `describe`（探一眼
+ * `Context.credentials: CredentialProvider`）的方法子集投影：本包只 `describe`（探一眼
  * 记录种类）与 `resolve`（取值）。返回值 `CredentialInfo` / `ResolvedCredential` 原本
  * 就已绑官方，两位**方法签名**改由官方成员交出，不再本地裁定入参与可选性。
- * 官方签名收的是品牌类型 CredentialRef；credentialRef() 只做「语法校验 + 编译期 brand」，
+ * 官方签名收的是带 `brand` 标记的 CredentialRef；credentialRef() 只做「语法校验 + 编译期 brand」，
  * 运行时值就是字符串（credentials-local 的 resolve/describe 直接拿它当 Map 键，
  * index.ts:617-639），所以本包按 string 收参并在调用前用官方语法自行校验，换掉一次值导入
- * （见文件头：服务面 cordis/dsh-settings/dsh-tools 等仍一律 type-only，值导入的只有宿主
+ * （见文件头：cordis、dsh-settings、dsh-tools 这些服务仍一律 type-only，值导入的只有宿主
  * fork 的 schemastery 与凭据包的两枚 branded-string 语法件）。
  */
 type CredentialsService = Pick<CredentialProvider, "describe" | "resolve">;
@@ -538,21 +538,21 @@ export type ToolRunSessionHeader = ToolRunSession["header"];
  * `dsh-agent/lib/types/runtime-types.d.ts:143` `readonly session: Session`、
  * `dsh-session/lib/types/index.d.ts:119` `readonly header: SessionHeader`），
  * 只有**可空性**按运行时事实放宽：递给工具的那位是跨进程装配出来的对象，
- * 官方必填的 `session`/`header` 实测可能缺席（test/host.test.ts 钉住这些 fail-closed
+ * 官方必填的 `session`、`header` 实测可能缺席（test/host.test.ts 钉住了这些判不合格就
  * 路径）。上游改名照样红在编译期，而 `sessionHeaderCwd` 的逐层 `?.` 从此是真守卫。
  */
 export type SessionHeaderWire = Pick<ToolRunSessionHeader, "cwd">;
 export type SessionWire = Omit<ToolRunSession, "header"> & { readonly header?: SessionHeaderWire };
 export type AgentWire = Omit<ToolRunAgent, "session"> & { readonly session?: SessionWire };
 
-/** harness 执行面里本包真正读到的两个成员，`signal` 直接 `Pick` 官方 `ToolRunContext`
+/** harness 的执行上下文里本包真正读到的两个成员，`signal` 直接 `Pick` 官方 `ToolRunContext`
  *  （= `ToolDefinition.execute` 的第二参）：必填性由官方决定，不再本地裁定——
  *  `signal` 必填（ToolExecutionInput 注释 "Required caller-owned cancellation for this
  *  invocation"，声明成可选等于把取消能力在 5 个调用点静默降级）。`agent` 走上面的
  *  走线投影。 */
 export type ToolExec = Pick<ToolRunContext, "signal"> & { readonly agent?: AgentWire };
 
-/** 官方会话 id 的面（与 `JobSpec.owner` 同源：都来自 dsh-session 的品牌串）。 */
+/** 官方会话 id 的类型（与 `JobSpec.owner` 同源：都是 dsh-session 里带 `brand` 标记的串）。 */
 type SessionIdFace = NonNullable<AgentWire["session"]>["id"];
 
 /** 工具调用发起时的会话 id；形状不对就当没有（agentless）。 */
@@ -572,8 +572,8 @@ function ownerOf(host: HostCtx, exec: ToolExec): SessionIdFace | undefined {
 
 /** 当前会话工作区（repo 缺省回退源）；非字符串视为缺。
  *  官方形状：`agent?: Agent` → `session: Session` → `header: SessionHeader` →
- *  `cwd?: string`。下面的逐层 `?.` 与 `typeof` 复核是跨进程契约的运行时闸：宿主半装配
- *  递来的 agent 可能是 `null`、也可能没有 `session`/`header`（test/host.test.ts 钉住
+ *  `cwd?: string`。下面的逐层 `?.` 和 `typeof` 复核是跨进程数据交换的运行时闸：宿主只装配了一半
+ *  递来的 agent 可能是 `null`、也可能没有 `session`/`header`（test/host.test.ts 钉住了
  *  这两条 fail-closed 路径），值一律经 `unknown` 读，绝不只信声明。 */
 function sessionHeaderCwd(exec: ToolExec): string | undefined {
   const raw: unknown = exec.agent?.session?.header?.cwd;
@@ -590,13 +590,13 @@ export interface HostCtx {
   fiber: Fiber;
   /** 隐式注册后本包不再持有 scope，只经子上下文挂页面策略（宿主 client-locale 同款）。 */
   inject: (deps: readonly string[], callback: (child: InjectedCtx) => void) => unknown;
-  /** 服务读取面取官方 `Context["get"]`（installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:14`
+  /** 读取服务的类型取官方 `Context["get"]`（installed `@deepseek-ai/cordis/lib/types/reflect.d.ts:14`
    *  `get<K extends string & keyof this>(name: K, strict?: boolean): undefined | this[K]`），
    *  本地不再重述一枚 `get`。本包读的 `settings` / `credentials` 两个名字**都**是官方声明进
    *  `Context` 的成员（`@deepseek-ai/dsh-settings/lib/types/index.d.ts:24-29`、
-   *  `@deepseek-ai/dsh-credentials/lib/types/index.d.ts:98-102`），故走泛型臂拿到
-   *  `undefined | 官方服务类`，**不走**那条 `get(name: string): any` 兜底（reflect.d.ts:17）。
-   *  旧镜像尾臂 `(name: string): unknown` 是「还会读别的名字」的占位，实际没有——删它不减防御，
+   *  `@deepseek-ai/dsh-credentials/lib/types/index.d.ts:98-102`），故走泛型那一条重载拿到
+   *  `undefined | 官方服务类`，**不走**那条 `get(name: string): any` 的兜底（cordis 的 reflect.d.ts 里 Context 增强的 get）。
+   *  旧镜像尾分支 `(name: string): unknown` 是「还会读别的名字」的占位，实际没有——删它不减防御，
    *  少的是一个人人都能塞名字的自由入口。
    *  返回整类而不是本包的 `Pick` 投影也不是加宽：投影留在**使用点**上（`createGateway`
    *  里那两个 `usableService` 的返回类型）。
@@ -605,8 +605,8 @@ export interface HostCtx {
   get: Context["get"];
 }
 
-/** host 是否为本插件所需服务面（settings/shell/tools/systemPrompt/get/inject 及
- *  其上要调用的方法）。守卫仅压缩类型面、避开 `as unknown as HostCtx` 断言。
+/** host 是否带着本插件需要的这些服务（settings、shell、tools、systemPrompt、get、inject 以及
+ *  其上要调用的方法）。守卫仅压缩类型上、避开 `as unknown as HostCtx` 断言。
  *  settings 这里点名的两个方法都会被调用：configure 登记本页的页面策略、describe
  *  跨命名空间读（provider 清单 + 官方 locale 偏好）；inject 挂那条页面策略的 effect。
  *  settings 面没有 register/get，多点名一个就是永不成立的死分支。 */
@@ -625,7 +625,7 @@ function isOcrReviewHost(value: unknown): value is HostCtx {
   );
 }
 
-/** 从插件 Context 解析宿主服务面（守卫收窄，不做 `as unknown as` 断言）。 */
+/** 从插件 Context 里取出宿主的服务（用守卫收窄，不做 `as unknown as` 断言）。 */
 function resolveHost(ctx: Context): HostCtx {
   if (!isOcrReviewHost(ctx)) {
     // 装载期守卫：此刻连 settings 面都还没验过，语言偏好无从读取，故这条只以中文报出。
@@ -659,20 +659,20 @@ function localeMessages(host: HostCtx): OcrReviewMessages {
 // ── 工具输出：canonical JSON 值 ─────────────────────────────────────────────
 
 /** 官方 `output.render` 的返回类型（`ContentBlock[]`）：从 `ToolOutputDefinition` 取，
- *  不再手抄 `{ type: "text"; text: string }` ——抄的那份不会随官方块类型演化而漂。 */
+ *  不再照抄 `{ type: "text"; text: string }` ——抄的那份不会随官方块类型演化而漂。 */
 type RenderedContent = ReturnType<ToolOutputDefinition["render"]>;
 
 /**
  * render 只做 model-facing 展示：把 canonical value 本身 pretty-print 成文本块。
  * execute 直返结构化对象（不再 stringify 进 `{ text }`），所以这里 stringify 的是
- * 第一层也是唯一一层 JSON；循环结构/不可序列化值的两级兜底是防御，不是常规路径。
+ * 第一层也是唯一一层 JSON；对付循环结构和不可序列化值的那两级兜底是防御，不是常规路径。
  */
 function textBlock(value: unknown): RenderedContent {
   let text: string;
   try {
     // 官方 lib 把 `JSON.stringify` 的返回写成 `string`，规范上却允许返回 `undefined`
     //（值为 undefined / 函数 / Symbol 时 step 1 直接给 undefined）⇒ 这里显式收成
-    // `unknown` 再判类型，兜底那一臂才是真守卫而不是恒假条件。
+    // `unknown` 再判类型，那条兜底分支才是真正的守卫，而不是永远不成立的条件。
     const json: unknown = JSON.stringify(value, null, 2);
     text = typeof json === "string" ? json : String(value);
   } catch {
@@ -707,7 +707,7 @@ function textBlock(value: unknown): RenderedContent {
  *
  * 为什么不给 `workspace-write` + 重定向 HOME 兜着：那样得把 `config.json` 搬进 workspace，
  * 密钥与状态管理跟着进仓，且换发布形态就要再搬一次——为绕开一条策略把用户目录写进用户仓。
- * owner 口径是「状态归 ocr 自己，围栏由本包显式放开」，故直接要 `danger-full-access`。
+ * 归属的约定是「状态归 ocr 自己，围栏由本包显式放开」，所以直接要 `danger-full-access`。
  *
  * **「能不能只放开需要写的那一条路径」：不能。** 两样东西一起锁死了这条路：
  * 按调用携带的 `SandboxPolicyRequest` 只有 `session` 与 `mode` 两个字段，**没有**附加可写
@@ -715,7 +715,7 @@ function textBlock(value: unknown): RenderedContent {
  * `read-only | workspace-write | danger-full-access` 三档，中间那一档的可写根就是
  * `workspaceRoot` 一枚。两处声明都取自本包实际解析到的 dsh-sandbox-policy 与
  * dsh-sandbox 的 `lib/types/index.d.ts`。
- * 可选的收紧路径只有「改 ocr 自己的状态落点」或「等上游加字段」，两者都不是本包能在
+ * 可选的收紧路径只有「改 ocr 自己的状态存放位置」或「等上游加字段」，两者都不是本包能在
  * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
  * 文件系统写权限，不是宿主其它能力；且 ocr 读什么、写什么仍由上面那条 argv 闸与
  * 凭据链约束。
@@ -732,7 +732,7 @@ function ocrSandboxPolicy(workspaceRoot: string): SandboxExecutionPolicy {
  *  只把中间的连接标记换成当前语言的那一份。两半各用一个函数，因为它们是两种缺陷：
  *  前切点会留下孤立**高**代理（`truncateEnd` 丢掉它），后切点会留下孤立**低**代理
  *  （`truncateStart` 丢掉它）。把两个函数对调同样不留孤立代理，只是头尾内容掉头
- *  ——故 test/host.test.ts 里另有一组哨兵断言钉住顺序。 */
+ *  ——所以 test/host.test.ts 里另有一组哨兵断言钉住这个顺序。 */
 function failureDetail(result: ShellRunResult, messages: OcrReviewMessages): string {
   const raw = result.stderr.text === "" ? result.stdout.text : result.stderr.text;
   const detail = redactKeyMaterial(raw);
@@ -758,7 +758,7 @@ interface RunTuning {
 
 /** 前台执行的一手结果：stdout 文本与截断事实。
  *  截断说明刻意**不**拼进 text：delegate/session 的 text 是载荷本体，拼进去会破坏
- *  JSON，而解析失败只回显前 500 码元（头部）——尾部的说明连同 spill 落盘路径会一起
+ *  JSON，而解析失败只回显前 500 码元（头部）——尾部的说明连同 spill 写到磁盘路径会一起
  *  变得不可见（被截断的 JSON 恰恰必然解析失败，说明必须另有出口）。载荷型调用方用
  *  stdoutTruncationNote 按各自形态把说明拼进自己的回显；review/scan 走 --output，
  *  stdout 恒空，截断位对它们只是形式上存在。 */
@@ -766,11 +766,11 @@ interface ForegroundRun {
   text: string;
   /** stdout 触到 `stdoutMaxBytes` 上限被截断。 */
   truncated: boolean;
-  /** 完整输出的落盘位置（截断且执行器给得出落盘路径时才有）。 */
+  /** 完整输出的写到磁盘位置（截断且执行器给得出写到磁盘路径时才有）。 */
   spillPath: string | undefined;
 }
 
-/** 截断说明（stdoutTruncated 文案 + 可选的落盘位置），判据见 ForegroundRun 的注释。 */
+/** 截断说明（stdoutTruncated 的文案 + 可选的写到磁盘的位置），判断依据见 ForegroundRun 的注释。 */
 function stdoutTruncationNote(
   limitBytes: number,
   run: ForegroundRun,
@@ -785,7 +785,7 @@ function stdoutTruncationNote(
 }
 
 /** 前台执行：失败抛错（含给模型的行动提示），成功返回 stdout 的一手结果。
- * timeoutMs 恒有值（tuningOf(config)），宿主按 min(请求, shell.maxTimeoutMs) 收口。
+ * timeoutMs 总是有值（tuningOf(config)），宿主按 min(请求, shell.maxTimeoutMs) 收敛。
  * signal 必传：harness ToolExecution.signal 是必填的调用方取消权。 */
 async function runForeground(
   host: HostCtx,
@@ -810,7 +810,7 @@ async function runForeground(
   if (failed) {
     if (result.timedOut) {
       // 报 spec.timeoutMs 而不是 run.timeoutMs：resolve 已按
-      // min(请求, shell.maxTimeoutMs) 收口，spec 里那个才是**实际生效**的值。
+      // min(请求, shell.maxTimeoutMs) 收敛，spec 里那个才是**实际生效**的值。
       // run.timeoutMs 是请求值，timeoutMinutes 留空时为 MAX_TIMEOUT_REQUEST_MS
       // (2^31-1)，照它算会把「实际生效 N 分钟」印成 35791 这种天文数字。
       const minutes = Math.round(spec.timeoutMs / 60_000);
@@ -841,7 +841,7 @@ interface BackgroundJob {
   owner?: SessionIdFace | undefined;
   /** 执行器 stdout 缓冲上限（entry config `stdoutMaxBytes`，与前台同一字段）。 */
   stdoutMaxBytes: number;
-  /** 兜底回收窗口（entry config `ocrBackgroundMaxMs`；0 = 无窗口，判据见 OCR_BACKGROUND_MAX_MS）。 */
+  /** 兜底回收窗口（entry config `ocrBackgroundMaxMs`；0 = 无窗口，规则见 OCR_BACKGROUND_MAX_MS）。 */
   backgroundMaxMs: number;
   /** 与前台同一份 `ocrNoAutoUpdate` 落地值（`| undefined` 同 RunTuning 的理由）。 */
   env?: Record<string, string> | undefined;
@@ -885,7 +885,7 @@ function reviewSources(proc: ShellExecution, messages: OcrReviewMessages): JobOu
 /**
  * 作业生产者的 `done`：等子进程落定，再把终态折算成注册表结局。
  * 注册表在 `start` 那一刻就要拿到这个 Promise，所以由 async 函数现造一个，
- * 而不是在 spec 字面量里挂 `.then`（本仓口径见 lint 基线 `promise/prefer-await-to-then`）。
+ * 而不是在 spec 字面量里挂 `.then`（本仓的规则见 lint 基线 `promise/prefer-await-to-then`）。
  */
 async function outcomeWhenSettled(proc: ShellExecution): Promise<JobOutcome> {
   await proc.done;
@@ -906,7 +906,7 @@ interface BackgroundReceipt {
 /**
  * 后台启动：resolve 显式带 `onExpiry: "none"`，故不套宿主 deadline（宿主
  * bash-local 缺省是 'kill'，不传就会被缺省 timeoutMs 杀掉），启动准备完成即返回，不等
- * 运行结束、不写 --output。结果以 OCR 会话记录为准（增量落盘），由模型经
+ * 运行结束、不写 --output。结果以 OCR 会话记录为准（增量写到磁盘），由模型经
  * ocr_session 工具轮询。dsh 无论优雅退出（teardown 组 TERM→KILL）还是硬退出
  * （kill -9/崩溃后被 launchd 收养），命令里的宿主回收守护（cli.ts
  * wrapWithHostReaper）都会把 OCR 一并结束，不留孤儿进程烧 token。
@@ -914,7 +914,7 @@ interface BackgroundReceipt {
  * 那次子进程现在同时是一枚**官方作业**（kind `ocr-review`）：官方 `job_list` /
  * `job_output` / `job_kill` 从此看得见它，本包不再需要为"起完就没人管"负责。
  * 工具的返回值是下面的结构化回执对象（canonical 值直返，不包一层 `{ text }` 字符串；
- * 作业面只管"谁能看见并停掉它"，不改这份回执的内容）。
+ * 官方作业服务只管"谁能看见并停掉它"，不改这份回执的内容）。
  *
  * 生命周期（任何模式下都可后台运行）：
  *  - 不接工具调用的中止信号：program 模式在程序结束时会对活跃调用发 abort，
@@ -923,7 +923,7 @@ interface BackgroundReceipt {
  *  效应）、插件卸载、或显式 `job_kill`；
  *  - 可选时限由 `ocrBackgroundMaxMs` 给（0 = 无窗口，默认），到点经注册表 kill。
  *
- * @param host 宿主服务面
+ * @param host 宿主的服务
  * @param job 这次后台评审的描述
  * @returns 后台启动回执（canonical 对象，模型侧契约）
  */
@@ -973,7 +973,7 @@ async function startBackground(
       run: () => ({
         // 这层吞异常不是风格：官方契约明写生产者的 `cancel` 会往上抛（dsh-jobs 的
         // types.d.ts "throws propagate"），注册表的 `killJob` 裸调 `job.cancel(reason)`、
-        // 只有 teardown 那一臂逐条 try/catch。而本包的 `cancel` 是从 `AbortSignal` 监听器里
+        // 只有 teardown 那一分支逐条 try/catch。而本包的 `cancel` 是从 `AbortSignal` 监听器里
         // 被回调的，Node 对监听器抛出的处理是 `process.nextTick(() => { throw err })`
         // ⇒ **未捕获异常、宿主进程退出**（本机实跑复现）。一次取消杀掉整个 dsh 不是可接受
         // 的失败形态，所以这里走 `killProc` 而不是裸调 `proc.kill()`。
@@ -990,7 +990,7 @@ async function startBackground(
     throw error;
   }
   ledger.set(jobId, job.owner);
-  // 兜底 deadline（时长来自 entry config；kill 理由按实际窗口换算，别把可配置的
+  // 兜底的 deadline（时长来自 entry config；kill 的理由按实际窗口换算，别把可配置的
   // 窗口说成写死的"2 小时"——理由是模型可见的 detail）。
   const backstopMinutes = Math.round(job.backgroundMaxMs / 60_000);
   void enforceOcrDeadline(
@@ -1047,7 +1047,7 @@ async function runCollect(
 // 校验并填过默认的那份 config 交进 apply，其中 volatile 字段是 **引用**——每读一次
 // 取一次当前值，所以设置卡改完下一次工具调用/端点请求即生效（语义同旧 scope.get()）。
 // 引用背后的类型由 schema 保证，但**不保证它是唯一写入者**（profile 补丁里的裸 YAML
-// 手改同样进得来），故下面每个读数仍按 unknown 复核形态再落回安全默认。
+// 同样进得来），故下面每个读数仍按 unknown 复核形态再落回安全默认。
 
 function readEffort(config: Config): "auto" | "low" | "medium" | "high" {
   const raw: unknown = config.effort.get();
@@ -1076,7 +1076,7 @@ function readMaxComments(config: Config): number {
 
 /**
  * 外层墙钟超时（分钟）→ 实际请求毫秒。0/未设置 = 请求宿主上限（宿主按
- * min(请求, shell.maxTimeoutMs) 收口，见 MAX_TIMEOUT_REQUEST_MS 注释）；
+ * min(请求, shell.maxTimeoutMs) 收敛，见 MAX_TIMEOUT_REQUEST_MS 的注释）；
  * >0 = 指定分钟（同样被宿主 clamp）。非法值按 0 处理。
  */
 function readTimeoutMinutes(config: Config): number {
@@ -1195,15 +1195,15 @@ function define(host: HostCtx, spec: ToolSpec): void {
   });
 }
 
-// ── 输出收口 ────────────────────────────────────────────────────────────────
+// ── 输出收尾 ────────────────────────────────────────────────────────────────
 
-/** 原始输出回显给模型/卡片前的两道收口：截断 + 明文 key 脱敏。 */
+/** 原始输出回显给模型或卡片之前的两道处理：截断 + 明文 key 脱敏。 */
 function echoRaw(text: string, limit: number): string {
   return redactKeyMaterial(truncateEnd(text, limit));
 }
 
-/** 读 --output 落盘结果。OCR exit 0 却没写出文件（版本漂移/被中途 kill）时给
- *  可行动的错误，而不是把裸 ENOENT 栈丢给模型。
+/** 读 --output 写到磁盘结果。OCR exit 0 却没写出文件（版本漂移/被中途 kill）时给
+ *  可行动的错误，而不是把一条没有路径信息的 ENOENT 栈丢给模型。
  *  超过 OUT_FILE_MAX_BYTES 的先拒掉：`readFileSync` + `JSON.parse` 是两倍内存的整份读，
  *  病理级的大回执只该换回一条点名文件的错误。大小探测失败（文件不在）不在这里报——
  *  交给下面那条 `outputFileMissing` 统一说话。 */
@@ -1242,7 +1242,7 @@ function readOutFile(outPath: string, messages: OcrReviewMessages): string {
  * 哪一类失败。读不出或没有失败明细时原样交回那个错误，不改变既有失败形态。
  *
  * 这里刻意不复用 `readOutFile`：那条路会给「文件缺失/过大」抛错，而失败详情里再加一层
- * 「读不到落盘结果」的错误只会盖住 OCR 自己的报错。
+ * 「读不到写到磁盘结果」的错误只会盖住 OCR 自己的报错。
  */
 function withCoverageDetail(error: unknown, outPath: string, messages: OcrReviewMessages): unknown {
   let text: string;
@@ -1299,7 +1299,7 @@ function tuningParams(
  *  开关，故标 `.volatile()`；一个都不标会让整条从 describe() 消失、写入抛
  *  `has no volatile fields`。volatile 字段以引用形态交进来，读当前值一律 `.get()`。
  *  下面另三项是**部署级**调优值，刻意不标 volatile：它们不进设置卡，改值随重启
- *  生效，以普通值形态交进来（官方 config.md:78-92 的判据是「行 config 能否不改代码改值」，
+ *  生效，以普通值的形态交进来（官方 config.md 里区分 volatile 与普通值的标准是「行 config 能不能不改代码改值」，
  *  不是「能不能在页面上改」）。 */
 export interface Config {
   /** 评审强度（透传 OCR `--effort`）；auto = 跟随 OCR 自己的配置。工具入参可逐次覆盖。 */
@@ -1322,7 +1322,7 @@ export interface Config {
   /** 装载期是否跑一次端点自检（`ocr llm test`）：部署值，改值要重启。默认开——端点配错
    *  时让卡片早点看到，而不是等逐文件 400；不想让装载期起进程的部署可以关掉。 */
   startupVerify: boolean;
-  /** 后台评审的兜底回收窗口（毫秒）：0 = 无窗口（默认，评审可一直跑到宿主退出或会话停止）。 */
+  /** 后台评审的兜底回收窗口（毫秒）：0 = 无窗口（默认，评审可以一直跑到宿主退出或会话停止）。 */
   ocrBackgroundMaxMs: number;
   /**
    * 关掉被封装的 OCR 那层自动更新：true 时本包起的每个 ocr 子进程都带
@@ -1344,7 +1344,7 @@ export interface Config {
   stdoutMaxBytes: number;
 }
 
-/** settings 命名空间与 loader 行 config 共用同一 schema（单源，防漂移）。
+/** settings 命名空间与 loader 行 config 共用同一 schema（唯一来源，防漂移）。
  *  值名退避为 configSchema：避免与同名 interface Config 触发 no-redeclare；
  *  外部仍以 `Config` 名导入（export as），公开 API 不变。 */
 const configSchema = Schema.object({
@@ -1360,7 +1360,7 @@ const configSchema = Schema.object({
   // 下面这几枚都是**部署级**值（不标 volatile ⇒ 不进设置卡，只能写在 profile 注册行的
   // config: 上，改值随重启生效）。llmTestTimeoutMs / stdoutMaxBytes 的 min(1) 挡掉 0 ——
   // 0 会让 resolve 收到「零毫秒 deadline」或零字节输出上限。ocrBackgroundMaxMs
-  // 相反：0 是合法语义「不设兜底窗口」，故只保留 natural。
+  // 相反：0 是合法语义「不设兜底窗口」，所以只保留 natural。
   llmTestTimeoutMs: Schema.natural().min(1).default(LLM_TEST_TIMEOUT_MS),
   // 装载期端点自检：默认开（端点配错时卡片早点看到），部署可关。
   startupVerify: Schema.boolean().default(true),
@@ -1397,7 +1397,7 @@ function pluginPaths(config: Config, messages: OcrReviewMessages): OcrPaths {
  * ocr 子进程的 HOME 重定向值（工具执行侧专用，**不抛错**）：设置项命中
  * `<X>/.opencodereview/config.json` 布局 → X；未设置/坏设置 → undefined。工具不
  * 走 pluginPaths（那会在坏设置下把七个工具一并拖死），坏设置的错误由端点侧的
- * resolveOcrConfigPath 报给卡片——「工具与设置照常可用」的口径不变。
+ * resolveOcrConfigPath 报给卡片——「工具与设置照常可用」这个行为不变。
  */
 function ocrHome(config: Config): string | undefined {
   return ocrHomeOverride(readOcrConfigPath(config));
@@ -1414,7 +1414,7 @@ function ocrHome(config: Config): string | undefined {
  * 当前路径一律取自 PLUGIN_DIR（import.meta.dirname），与 profile 命名
  * 无关，故 desktop / browser / 自定义名走的是同一条路径。
  *
- * 与 ocrHome 同一口径：**不抛错**。pluginPaths 在坏设置下会抛，而那正是「工具照常
+ * 和 ocrHome 一样：**不抛错**。pluginPaths 在设置有问题时会抛，而那正是「工具照常
  * 可用、错误由端点侧报给卡片」的分工，不能因为一次自愈把工具拖死。
  */
 async function healKeyScriptPointer(host: HostCtx, config: Config): Promise<void> {
@@ -1458,7 +1458,7 @@ function probeFailureReason(
 /**
  * 跑一次 `ocr version`，把外部 CLI 的自述取回来给设置页。
  *
- * 两条必须写死的口径：
+ * 两条必须写死的规则：
  *  - 带 `OCR_NO_UPDATE=1`。不加这一条，「查一下版本」就顺带触发了 CLI 那层 npm 包装的
  *    **全局安装**（`scripts/update.js` 见到更新版本就 spawnSync `npm i -g <pkg>@<latest>`，
  *    默认 18 分钟冷却一次）。状态读侧不该有写侧副作用，所以这条不受 `ocrNoAutoUpdate`
@@ -1466,7 +1466,7 @@ function probeFailureReason(
  *  - HOME 与七个工具走同一个重定向口。launcher 那句「自动更新没成功，请手工执行」的
  *    提示写在 `$HOME/.opencodereview/` 下，不带重定向就会去读另一个世界的状态，
  *    卡片报的与评审实际吃到的就不是同一份。
- * @param host 宿主服务面
+ * @param host 宿主的服务
  * @param config 本次 apply 的配置
  * @param messages 文案表（回执里给人看的理由）
  * @returns 是否取到版本、版本串（取不到为 null）、一手输出（已脱敏、已截断、已去色）、失败理由。
@@ -1519,11 +1519,11 @@ const INSTALL_HINT_KEYS = {
 /**
  * 「怎么把外部 CLI 装/换成核对过的这一版」那一句文案。
  *
- * 两条判据的分工是刻意的：本机已有一份候选时**按那份的真实来源说**（brew 装的提示 brew，
+ * 两条判断各自负责什么是刻意安排的：本机已经有一份候选时**按那份的实际来源说**（brew 装的提示 brew，
  * npm 装的提示 npm），因为用户要执行的是替换他手上那一份的命令；判不出来源（unknown）或
  * 压根没装时才退到部署偏好 `ocrInstallHint`。反过来让偏好盖来源，就会给 brew 装的用户端出
  * 一条 `npm i -g`，装完机器上出现第二份 ocr 而 PATH 上那条还是旧的。
- * @param status - 现读口交回的可用性判定（来源、命中路径与那份的渠道）。
+ * @param status - 现场读回来的可用性判定（来源、命中的路径与那份的渠道）。
  * @param config - 本次 apply 的配置（取 `ocrInstallHint`）。
  * @param messages - 文案表。
  * @returns 给人照抄的那一句（含命令原文）。
@@ -1545,8 +1545,8 @@ function ocrInstallText(
 
 /**
  * GET providers 里 `ocrBinary` 那半份载荷：文件系统的事实 + 版本核对所需的两样 + 装法文案。
- * 三个显示面（卡片状态行、详情页徽标/区块、启用指引）都读这一份，凑不出两处口径差。
- * @param status - 现读口交回的可用性判定。
+ * 三个显示位置（卡片状态行、详情页的徽标和区块、启用指引）都读这一份，凑不出两种说法。
+ * @param status - 现场读取回来的可用性判定。
  * @param config - 本次 apply 的配置（装法文案的部署偏好）。
  * @param messages - 文案表。
  * @param measured - 最近一次实测到的版本；null = 还没测过。
@@ -1707,7 +1707,7 @@ export function createGateway(host: HostCtx): DshConfigGateway {
     credentialConfigured: async (envKey: string): Promise<boolean> => {
       const svc = credentialsService();
       // 不合官方 ref 语法的名根本不是一个 ref：按「未配置」处理而不是抛错
-      // （官方 isCredentialRefName 的既定语义，见文件头）。过了这道判据才 brand。
+      // （官方 isCredentialRefName 的既定语义，见文件头）。过了这条判断才 brand。
       if (svc === undefined || !isCredentialRefName(envKey)) {
         return false;
       }
@@ -1716,23 +1716,23 @@ export function createGateway(host: HostCtx): DshConfigGateway {
         return info.configured;
       } catch {
         // 凭据服务 reject 与「未配置」是同一类结论：都拿不到值。让它冒到卡片上
-        // 会变成 500，而本包对 settings 不可用早已走 ProviderSourceStatus 降级面——
-        // 两侧口径必须一致，否则一个宿主侧故障就把整张 provider 卡打死。
+        // 会变成 500，而本包对 settings 不可用早已用 ProviderSourceStatus 表示降级——
+        // 两侧的处理必须一致，否则一个宿主侧的故障就把整张 provider 卡打死。
         return false;
       }
     },
     credentialSource: async (envKey: string): Promise<string | undefined> => {
       const svc = credentialsService();
       // 不合官方 ref 语法的名根本不是一个 ref：按「未配置」处理而不是抛错
-      // （官方 isCredentialRefName 的既定语义，见文件头）。过了这道判据才 brand。
+      // （官方 isCredentialRefName 的既定语义，见文件头）。过了这条判断才 brand。
       let resolved: Awaited<ReturnType<CredentialsService["resolve"]>> | undefined;
       if (svc !== undefined && isCredentialRefName(envKey)) {
         try {
           resolved = await svc.resolve(credentialRef(envKey));
         } catch {
           // 凭据服务 reject 与「未配置」是同一类结论：都拿不到值。让它冒到卡片上
-          // 会变成 500，而本包对 settings 不可用早已走 ProviderSourceStatus 降级面——
-          // 两侧口径必须一致，否则一个宿主侧故障就把整张 provider 卡打死。
+          // 会变成 500，而本包对 settings 不可用早已用 ProviderSourceStatus 表示降级——
+          // 两侧的处理必须一致，否则一个宿主侧的故障就把整张 provider 卡打死。
           resolved = undefined;
         }
       }
@@ -1779,7 +1779,7 @@ function realpathOrSelf(root: string): string {
  * 为什么不统一提升所有工具：scan 靠 workdir 限定子目录（OCR 的 scan 路径
  * requireGit=false，保留 CWD 以免 `git ls-files` 走遍整个仓库），一并提升会把扫描
  * 范围扩到整个 monorepo。scan 又不落会话（只有 review 经 agent.New → session.New
- * 建会话），所以它保持原样即可，两侧口径本来就一致。
+ * 建会话），所以它保持原样就行，两侧本来就用同一套处理。
  *
  * 非 git 目录（归档后的 checkout 等）回退到 realpath：会话仍按同一路径寻址。
  *
@@ -1793,7 +1793,7 @@ async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string>
       stdoutMaxBytes: 4096,
     });
     const top = exitCode === 0 ? output.trim() : "";
-    // 只用平台自己的绝对路径判据：Windows 上 git 交回的是 C:/…，POSIX 专用的
+    // 只用平台自己判断绝对路径的办法：Windows 上 git 交回的是 C:/…，POSIX 专用的
     // startsWith("/") 会把它当相对路径，于是 review 与 ocr_session 的会话根分叉。
     if (path.isAbsolute(top)) {
       return top;
@@ -1804,7 +1804,7 @@ async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string>
   return realpathOrSelf(root);
 }
 
-/** select 读面的依赖（对象化以受 max-params 约束）。 */
+/** select 这个读取方法的依赖（打包成对象以满足 max-params）。 */
 interface SelectEndpointDeps {
   config: Config;
   gateway: DshConfigGateway;
@@ -1846,12 +1846,12 @@ async function selectReply(
   }
 }
 
-/** probe 读面的依赖（与 select 同一取舍：>5 参数会撞 max-params）。 */
+/** probe 这个读取方法的依赖（和 select 一样的取舍：超过 5 个参数会撞 max-params）。 */
 interface ProbeEndpointDeps {
   config: Config;
   host: HostCtx;
   messages: () => OcrReviewMessages;
-  /** 外部 CLI 可用性的现读口（与七个工具同一个）：换版命令要按那份候选的真实来源说。 */
+  /** 外部 CLI 可用性的现场读取（与七个工具用的是同一个）：换版命令要按那份候选的实际来源说。 */
   availability: OcrAvailabilityProbe;
   /** 实测版本的落态口：检测一次就覆盖装载期那一次，卡片与工具回执从此读同一份。 */
   versionSink: { value: string | null };
@@ -1862,7 +1862,7 @@ interface ProbeEndpointDeps {
  *
  * `reason` 与 `output` 的分工：`output` 是外部 CLI 的一手回执（`runCollect` 已脱敏、
  * 已按码元截断），那句「自动更新没成功，请手工执行 npm i -g …」就原样活在里面——本包
- * 不去正则它，因为那句措辞归上游改，抄一份判据就多一处会跟着漂的地方；卡片把整段
+ * 不去为它写正则，因为那句措辞由上游改，多抄一份判断就多一处会跟着变的地方；卡片把整段
  * 显示出来供人选中文本复制即可。`reason` 只说这一路为什么没取到版本。
  *
  * `consistent` 是三态而不是布尔：`null` = 压根没读出版本（未发布构建、超时、没装），
@@ -1892,19 +1892,19 @@ async function probeReply(deps: ProbeEndpointDeps): Promise<OcrProbeReply> {
   }
 }
 
-/** 读面额外现读的三口：装载期自检结论、外部 CLI 可用性、最近一次实测版本。收成对象是因为
+/** 读取那侧另外三处现场读取：装载期的自检结论、外部 CLI 可用性、最近一次实测的版本。收成对象是因为
  *  逐项平铺会撞 max-params；这几口本来就是同一类东西。 */
 interface EndpointExtras {
-  /** 装载期端点自检结果的现读口（apply 的闭包变量，见 probeEndpointAtApply）。 */
+  /** 装载期端点自检结果的现场读取（apply 的闭包变量，见 probeEndpointAtApply）。 */
   readonly verifyOf: () => EndpointVerify | null;
-  /** 外部 CLI 可用性的现读口（与七个工具同一个），设置页据此显示装没装。 */
+  /** 外部 CLI 可用性的现场读取（与七个工具用的是同一个），设置页据此显示装没装。 */
   readonly availability: OcrAvailabilityProbe;
   /** 实测版本的落态口（本包只有跑过 `ocr version` 才有值：装载期自检或人按下「检测」）。
-   *  给对象而不是给读口，是因为 POST probe 这一侧要往里写。 */
+   *  给对象而不是给一个只读函数，是因为 POST probe 那一步要往里写。 */
   readonly versionSink: { value: string | null };
 }
 
-/** providers 读面的依赖（与 select/probe 同一取舍：>5 参数会撞 max-params）。 */
+/** providers 这个读取方法的依赖（和 select、probe 一样的取舍：超过 5 个参数会撞 max-params）。 */
 interface ProvidersEndpointDeps {
   config: Config;
   gateway: DshConfigGateway;
@@ -1913,7 +1913,7 @@ interface ProvidersEndpointDeps {
 }
 
 /**
- * 组好设置页那份载荷（**不含 csrf**：本包不再持有任何写侧闸门，鉴权归宿主网关）。
+ * 组好设置页那份载荷（**不含 csrf**：本包不再持有任何写侧校验，鉴权归宿主网关）。
  *
  * `ocrBinary` 只用文件系统的事实（不起进程），卡片据此显示「装没装、走的哪条路、那一份是什么
  * 装法」。实测版本不在这里 spawn——这里只交最近一次检测落在闭包里的那个值（没测过就是 null）；
@@ -2012,7 +2012,7 @@ async function saveMcpReply(request: unknown, deps: SelectEndpointDeps): Promise
       : { ok: false, error: result.error, status: OCR_REFUSE_STATUS.invalid };
   } catch (error) {
     // 设置项里的路径不合形态时 pluginPaths 会抛：这是**服务侧**故障，不是请求体错
-    // （400 已在上面按 json 形态说过）。与 mcp / auth 两条口径一致地回可读回执，
+    // （400 已经在上面按 json 的形态说过）。和 mcp、auth 那两条一样返回能读懂的回执，
     // 而不是让 Remote 直接 500——卡片显示一句人话比裸栈有用。
     return { ok: false, error: errorText(error), status: OCR_REFUSE_STATUS.internal };
   }
@@ -2060,7 +2060,7 @@ async function chatGptReply(model: unknown, deps: SelectEndpointDeps): Promise<O
   }
 }
 
-/** 卡片读面（官方 Typert Remote）的全部依赖。 */
+/** 卡片的读取接口（官方 Typert Remote）的全部依赖。 */
 export interface OcrReviewRemoteDeps {
   host: HostCtx;
   config: Config;
@@ -2075,7 +2075,7 @@ export interface OcrReviewRemoteDeps {
  *
  * ⚠ 服务在**构造时**注册（cordis `Service` 的契约：`ctx.reflect.provide`，随所属 fiber
  * 卸载自动撤），所以调用方拿实例没有任何用处——装入口 `installOcrRemote` 说明了这一点。
- * 九个方法都不依赖可选宿主服务（gateway 与取用口都由 apply 交进来），故它跟着 apply
+ * 九个方法都不依赖可选宿主服务（gateway 与取用入口都由 apply 交进来），故它跟着 apply
  * 无条件上线：宿主没有 web 层（TUI）时这九条照样在。
  */
 export class OcrReviewRemoteService extends TypertRemoteService {
@@ -2144,12 +2144,12 @@ export class OcrReviewRemoteService extends TypertRemoteService {
 
 /**
  * 标准装饰器的**程序化调用**：`@Remote` 的全部作用就是往类原型写一枚描述符，而标准装饰器
- * 语法需要一条 tsc 降级管线（本仓的测试/构建解析器都不降级它）。这里直接按 TC39 的
+ * 语法需要一条 tsc 降级流水线（本仓的测试/构建解析器都不降级它）。这里直接按 TC39 的
  * `ClassMethodDecoratorContext` 形状调同一个 decorator 函数，把标记落到真正的原型上。
  */
 function markRemote(prototype: OcrReviewRemoteService, methodName: string): void {
   // 官方 `Remote` 的运行时只读 name/private/static 与 addInitializer（TC39 的 access/metadata
-  // 它一概不读），故这里只给这四位；`Reflect.apply` 让装饰器工厂保持未类型化的调用面。
+  // 它一概不读），故这里只给这四位；`Reflect.apply` 让装饰器工厂保持未类型化的调用签名。
   const context = {
     kind: "method",
     name: methodName,
@@ -2176,14 +2176,14 @@ markRemote(OcrReviewRemoteService.prototype, "auth");
 markRemote(OcrReviewRemoteService.prototype, "chatGpt");
 
 /**
- * 把读面装到这个上下文上（构造即注册，见类文档；host 侧唯一该调的口）。
+ * 把读取接口装到这个上下文上（构造即注册，见类文档；host 那侧唯一该调的入口）。
  *
  * 注册口先探一次（`ctx.reflect.provide`）：替身/畸形上下文未必给，少了它只该少掉卡片
  * 这一栏，绝不该让 apply 当场炸掉。本服务没有自己的收尾资源——卸载由 Service 基类登记的
- * 反射面 disposer 负责，不另挂 effect。
+ * 由反射那一步的 disposer 负责，不另挂 effect。
  *
  * @param ctx - 宿主上下文
- * @param deps - 读面的全部依赖（见 OcrReviewRemoteDeps）
+ * @param deps - 读取接口的全部依赖（见 OcrReviewRemoteDeps）
  * @returns 装上了没有（调用方不需要它——返回它只是让这条路可断言）
  */
 export function installOcrRemote(ctx: Context, deps: OcrReviewRemoteDeps): boolean {
@@ -2202,15 +2202,15 @@ export function installOcrRemote(ctx: Context, deps: OcrReviewRemoteDeps): boole
 // ── 外部 CLI 可用性前置 ─────────────────────────────────────────────────────
 
 /**
- * 可用性的**现读口**：每次工具调用现问一次文件系统。
+ * 可用性的**现场读取**：每次工具调用都现问一次文件系统。
  * 不做进程级缓存是刻意的——`PATH` 与随包依赖都会在 dsh 运行期间被改（装了就直接重试，
  * 不必重启宿主），而一次 statSync 的代价远低于一次误判成「没装」把可用环境挡掉。
  */
 export type OcrAvailabilityProbe = () => OcrBinaryStatus;
 
 /**
- * 生产侧的可用性现读口：每次调用问一次真实文件系统。
- * 单独具名导出是为了让它能被结构性地钉住（单测拿它和 `lib/cli.ts` 那份判据逐字比），
+ * 生产侧的可用性现场读取：每次调用问一次真实的文件系统。
+ * 单独具名导出是为了让它能被结构性地钉住（单测拿它和 `lib/cli.ts` 那份判断逐字比），
  * 而不必让任何用例去分支「这台机器恰好装没装 ocr」。
  */
 export const productionProbe: OcrAvailabilityProbe = () => resolveOcrAvailability();
@@ -2218,10 +2218,10 @@ export const productionProbe: OcrAvailabilityProbe = () => resolveOcrAvailabilit
 /**
  * 两条路都没有候选时就地抛，让模型与用户看到的是「哪条路都没找到 + 怎么装（带核对版本）」，
  * 而不是子进程 exit 127 之后那句反推出来的「ocr 命令不存在」。
- * 判据只回答「找不找得到」：丢执行位、随包平台二进制缺失这些「找到了但跑不起来」的事实
- * 仍由真实 spawn 报（lib/cli.ts 的 resolveOcrAvailability 头注释写了同一口径），
+ * 这个判断只回答「找不找得到」：丢了执行位、随包的平台二进制缺失这些「找到了但跑不起来」的事实
+ * 仍然由真实 spawn 报出来（lib/cli.ts 的 resolveOcrAvailability 的头注释写的是同一套规则），
  * 所以 `execNotFound` 那条兜底文案必须留着。
- * @param status - 现读口交回的可用性判定。
+ * @param status - 现场读取回来的可用性判定。
  * @param messages - 文案表（拒绝理由是人读文本，随官方 locale 偏好走）。
  * @param install - 那条装法文案（`ocrInstallText` 现组；只有真要拒时才付这次拼接）。
  */
@@ -2396,7 +2396,7 @@ function registerReviewTool(
       const eff = effortOf(args["effort"], config, runMsgs);
       // wait=false = 后台：无 tmp、无 --output，结果以会话记录为准（ocr_session 轮询）。
       const wait = waitOf(args["wait"], runMsgs);
-      // 评审可能是长任务：临时目录落盘 --output，避免宿主 stdout 截断丢评论。
+      // 评审可能是长任务：临时目录写到磁盘 --output，避免宿主 stdout 截断丢评论。
       const tmp = wait ? mkdtempSync(path.join(tmpdir(), "ocr-review-")) : undefined;
       const outPath = tmp === undefined ? undefined : path.join(tmp, "out.json");
       // ocrConfigPath 自定义时的 HOME 重定向（withHomeEnv 内部对 undefined/win32
@@ -2636,7 +2636,7 @@ function registerDelegatePreviewTool(
       const parsed = parseDelegatePreview(stdout.text);
       if (!parsed.ok) {
         // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）。截断说明
-        // 单独拼在尾部：载荷被截断恰恰必然解析失败，而 raw 只回显头部，spill 落盘
+        // 单独拼在尾部：载荷被截断恰恰必然解析失败，而 raw 只回显头部，spill 写到磁盘
         // 路径只有从这里才到得了模型。
         return (
           format(runMsgs.parseFailedPlain, {
@@ -2708,7 +2708,7 @@ function registerDelegateRuleTool(
       const parsed = parseDelegateRules(stdout.text);
       if (!parsed.ok) {
         // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）；截断说明
-        // 单独拼在尾部（判据同 ocr_delegate_preview）。
+        // 单独拼在尾部（判据和 ocr_delegate_preview 相同）。
         return (
           format(runMsgs.parseFailedPlain, {
             tool: "ocr delegate rule",
@@ -2734,7 +2734,7 @@ function registerDelegateRuleTool(
 
 function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
   const msgs = localeMessages(host);
-  // ocr_session：历史评审会话（恢复中断 review 的配套闭环）。
+  // ocr_session：历史评审会话（配合恢复中断的 review 这条链路）。
   define(host, {
     name: "ocr_session",
     description: msgs.sessionToolDescription,
@@ -2949,7 +2949,7 @@ const ENDPOINT_VERIFY_CHARS = 400;
  *  为什么需要：卡片写盘只写 url/model/key 通道，**不验端点能力**。实测踩到过——网关强制
  *  要求一枚能力头，缺了它每个文件都 400，而模型侧看到的是「N 个文件审查失败」，与真因
  *  （端点配置）隔着一层。自检失败不抛、不阻塞装载：它只负责让这件事早点可见。
- * @param host 宿主服务面
+ * @param host 宿主的服务
  * @param config 本次 apply 的配置
  * @param sink 本次 apply 的闭包槽（不是常驻状态）
  */
@@ -2967,14 +2967,14 @@ async function probeEndpointAtApply(
 ): Promise<void> {
   try {
     // runCollect 只把「命令跑不动」折进 exitCode/output，**它自己仍会抛**：
-    // host.shell.resolve/execute/result 任一步的基础设施故障都是 reject。这一臂是
+    // host.shell.resolve/execute/result 任一步的基础设施故障都是 reject。这一分支是
     // fire-and-forget（apply 里不 await），漏出去就是未处理 rejection——Node ≥22 默认
     // 终止宿主进程，而一次自检失败根本不值得杀掉整个 dsh。
     const result = await runLlmTest(host, config);
     sink.value = endpointVerifyOf(result);
   } catch {
     // 结论留空 = 卡片显示「未检测」：人按「检测」会走同一条路径现取，这里没有可报的
-    // 第二个出口（插件侧没有日志面），静默失败也不会把失败写成成功。
+    // 第二个出口（插件侧不打日志），静默失败也不会把失败写成成功。
   }
 }
 
@@ -2983,9 +2983,9 @@ async function probeEndpointAtApply(
  *
  * 为什么要有这一次：工具回执里那句「实测与核对版本不一致」只能来自一次真实测量，而按下
  * 「检测」是人在页面上的动作——把它留给用户，模型侧的版本提示就永远晚一步。与端点自检同批、
- * 同受 `startupVerify` 管：那条设置的判据就是「装载期允不允许起进程」，这里起的同样是进程。
+ * 同样受 `startupVerify` 管：那条设置的条件就是「装载阶段允不允许起进程」，这里起的同样是进程。
  * 关掉它的部署退化成「页面上点过检测之后，工具才开始报」，那也是一句实话。
- * @param host 宿主服务面
+ * @param host 宿主的服务
  * @param config 本次 apply 的配置
  * @param sink 本次 apply 的闭包槽（与 POST probe 写的是同一个）
  */
@@ -3010,7 +3010,7 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
   const endpointVerify: { value: EndpointVerify | null } = { value: null };
   // 外部 CLI 的实测版本同样落在这次 apply 的闭包里：装载期填一次，之后每次「检测」覆盖它。
   const versionSink: { value: string | null } = { value: null };
-  // 本插件起过的作业台账（id → 发起会话）。有 owner 的作业在注册表里对**别的会话**
+  // 本插件起过的作业台账（id → 发起它的会话）。有 owner 的作业在注册表里对**别的会话**
   // 不可见（`list(caller)` 只返回无主作业与该 caller 自己的），卸载时无法靠 `list()`
   // 枚举它们，故留这一份最小台账；条目随已落定记录的裁剪与会话回收一起删。
   const jobLedger: JobLedger = new Map();
@@ -3081,7 +3081,7 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     text: localeMessages(host).routingText,
   });
 
-  // 设置卡的官方读面（Typert Remote）：九条方法经宿主网关暴露给**本 profile 的客户端**。
+  // 设置卡的官方读取接口（Typert Remote）：九条方法经宿主网关暴露给**本 profile 的客户端**。
   // 无条件上线——依赖都由这里交进去；来源校验与鉴权由宿主网关承担。
   installOcrRemote(ctx, {
     host,
@@ -3095,9 +3095,9 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
 export default {
   inject: ["settings", "shell", "tools", "systemPrompt"],
   Config: configSchema,
-  // cordis 只交 `(ctx, config)` 两个参数，所以入口在这一层把生产现读口接上；
+  // cordis 只给 `(ctx, config)` 两个参数，所以入口在这一层把生产环境里的读取实现接上；
   // 具名导出的 `apply` 保留第三个参数，用例据此注入可用性替身——否则每个工具用例
-  // 都得看「这台机器恰好装没装 ocr」的脸色，而那条判据在无头机器上根本不可复现。
+  // 都得看「这台机器恰好装没装 ocr」，而那条判断在无头的机器上根本没法复跑。
   apply: (ctx: Context, config: Config): void => {
     apply(ctx, config, productionProbe);
   },

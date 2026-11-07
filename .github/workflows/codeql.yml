@@ -21,7 +21,7 @@ on:
 # 才是还有人等它结论的那一份。
 # 已知残差：schedule 与 push@main 会在同一个 ref 上并发分析，而 category 只按语言。
 # codeql-action 把这个 category 原样写进 SARIF 的 automationDetails.id
-# （src/upload-lib.ts 的 getAutomationID），落点还带着被分析的那个 commit——两次分析的是不同
+# （src/upload-lib.ts 的 getAutomationID），结果里还带着被分析的那个 commit——两次分析的是不同
 # commit，各记各的账；同一个 commit 传两次则是同一份结果被替换，不丢信息。所以这一档不构成
 # 「并发上传互相覆盖」，也就不必把 category 按事件拆开：拆成两个来源反而打断同一份分析的告警去重。
 concurrency:

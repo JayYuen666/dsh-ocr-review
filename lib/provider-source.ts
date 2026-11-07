@@ -8,10 +8,10 @@
 //
 // 为什么 provider 清单只能走 ctx.settings.describe()、不碰宿主的私有配置文件与
 // 凭据文件（完整理由见 lib/ocr-config.ts 头注释）：那些文件的位置与格式都是
-// 宿主实现细节。本模块因此只认 DshConfigGateway 这一个面，单测给替身。
+// 宿主实现细节。本模块因此只认 DshConfigGateway 这一个接口，单测给替身。
 //
-// 安全口径：本模块绝不在返回值里带出任何 key 值——卡片侧只问 describe(ref) 的 configured
-// 布尔，值本身连经手都不经手。
+// 安全规则：本模块绝不在返回值里带出任何 key 的值——设置卡只读 describe(ref) 返回的 configured
+// 这个布尔，值本身连经手都不经手。
 
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
@@ -28,7 +28,7 @@ export interface DshProviderWithKey extends DshProvider {
   hasKey: boolean;
 }
 
-/** describe() 单条描述符里本包用到的面（宿主给全量 SettingsDescriptor，测试给替身）。 */
+/** describe() 单条描述符里本包用到的部分（宿主给全量 SettingsDescriptor，测试给替身）。 */
 export interface ProviderDescriptor {
   /** 命名空间名。宿主侧官方字段名是 `ns`。 */
   ns: string;
@@ -43,7 +43,7 @@ export interface GatewayHealth {
 }
 
 /**
- * dsh 官方配置/凭据通道的最小门面。由 host.ts 用 ctx 装配，lib 只依赖这个面
+ * dsh 官方配置/凭据通道的最小门面。由 host.ts 用 ctx 装配，lib 只依赖这个接口
  * （单测给替身），这样 provider 清单与 key 状态的来源在包里只有一个。
  */
 export interface DshConfigGateway {
@@ -59,7 +59,7 @@ export interface DshConfigGateway {
    *
    * 为什么是层 id 而不是布尔：宿主侧 resolve 得到值 ≠ OCR 运行时取得到——
    * dsh 起 shell 会净化环境（见 lib/ocr-config.ts 的 keyReachableAtOcrRuntime），
-   * apply/migrate 需要按层判定可达性，把「select 成功 → OCR 401」的假绿拦在写盘前。
+   * apply/migrate 需要按层判断可达性，把"select 成功 → OCR 401"这种漏报拦在写盘之前。
    */
   credentialSource: (envKey: string) => Promise<string | undefined>;
 }
@@ -105,7 +105,7 @@ function settingsFailed(
 }
 
 /**
- * 读 provider 清单并把一切失败折进 source（不抛）：会话热路径与卡片读面
+ * 读 provider 清单，并把所有失败收进 source 里（不抛）：会话的热路径和卡片的读取
  * 都只消费返回值，服务缺席/抛错时卡片仍能显示原因。
  */
 export function readProviders(
@@ -120,7 +120,7 @@ export function readProviders(
   // migratePlaintextKeys 都依赖这条不变式。
   // 两个布尔在 try 里一次读出：health() 的返回对象由宿主装配，本函数的契约是
   // 「把一切失败折进 source，不抛」——读属性这一下同样可能经 getter/Proxy 抛，
-  // 与 health() 本身同属「宿主门面不可信」的那一面。
+  // 与 health() 本身一样，都属于「宿主门面不可信」这一类。
   let settingsUp: boolean;
   let credentialsUp: boolean;
   try {
@@ -169,7 +169,7 @@ export function readProviders(
     };
   }
   // providers 表的读取走 shared 的 fieldOf：读取抛错（敌意 getter / Proxy 陷阱）在那一层
-  // 已塌成「取不到」，所以这里不再有 try/catch——敌意键与「没配 providers」在本读口不可
+  // 已经塌成「取不到」，所以这里不再有 try/catch——敌意键和「没配 providers」在这个读取处分不
   // 区分，一律按 namespace-unavailable。仍然分得开的故障形态（describe 形状、descriptor
   // 属性读取、投影阶段的条目读取）由各自的 try 折进 settings-failed，见上方三个分支。
   const providersValue = fieldOf(hit.value, PROVIDERS_FIELD);
@@ -219,17 +219,17 @@ export async function markKeyFlags(
       let hasKey = false;
       try {
         const ref = providerCfg.apiKeyEnv;
-        // 判据与 applyProviderSelection / migratePlaintextKeys 侧完全一致（null **或** 空串）：
-        // 同一份 DshProvider 上两套判据，一旦有别的构造路径送来 ""，这里就会把空 ref
+        // 判据和 applyProviderSelection / migratePlaintextKeys 那两侧完全一致（null **或** 空串）：
+        // 同一份 DshProvider 上用两套标准，一旦有别的构造路径送来 ""，这里就会把空 ref
         // 送进凭据服务。
         if (ref !== null && ref !== "") {
           hasKey = await gateway.credentialConfigured(ref);
         }
       } catch {
         // 单个 ref 探测失败不许连坐整张卡：凭据服务抖一下不该让 providersForCard 抛穿到
-        // GET /providers 的兜底（整张卡退化成 500 JSON），把其他 provider 已经探到的
+        // GET /providers 的兜底处理（整张卡退化成 500 的 JSON），把其他 provider 已经探到的
         // configured 结果一起丢掉。降级成 false = 「此刻读不到」，与 host 侧
-        // credentialConfigured 的 catch 口径一致。
+        // credentialConfigured 的 catch 是同一种处理方式。
         hasKey = false;
       }
       return { ...providerCfg, hasKey };

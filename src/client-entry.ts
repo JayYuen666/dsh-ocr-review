@@ -1,6 +1,6 @@
 // ocr-review 设置卡片（Client 半，build-client.mjs 打包为 client.js）。
 // 功能：经官方 Typert Remote（src/remote.ts）从宿主配置服务列出可选 provider+model，
-// 选择后写到外部 ocr CLI 的 config.json（key 走 api_key_cmd 动态读取，不落盘明文）；
+// 选择后写到外部 ocr CLI 的 config.json（key 走 api_key_cmd 动态读取，不写到磁盘明文）；
 // 附带 llm test 验证、明文 key 一键迁移，以及 effort/language/autoVerify/ocrConfigPath
 // 设置行（保存条暂存-写入）。React 一律 createElement；卡片注册进 keyed
 // plugins.bundle.config 槽的 **bundle 包名**键（`@jayyuen66/dsh-ocr-review`，见 BUNDLE_PKG），
@@ -25,19 +25,19 @@ import type { Context } from "@deepseek-ai/cordis";
 import type { BuiltInLocaleId } from "@deepseek-ai/dsh-client-locale/client";
 import type { LocaleDictOf } from "@deepseek-ai/dsh-client-ui-slots";
 import type { SlotRegistry } from "@deepseek-ai/dsh-client-ui-renderer/client";
-// 配置表单面取官方声明（type-only：产物 client.js 里对包名零引用，由 build-client.test.ts
-// 的 external 判定守着），不再手抄一份 `getSnapshot: () => unknown` 的镜像。
+// 配置表单的类型取官方声明（type-only：产物 client.js 里对包名零引用，由 build-client.test.ts
+// 的 external 判定守着），不再照抄一份 `getSnapshot: () => unknown` 的镜像。
 import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-settings/client";
 // 槽位契约的所有权在属主包：`plugins.bundle.config` 由 plugin-manager 通过
 // `declare module '@deepseek-ai/dsh-client-ui-slots' { interface SlotMap }` 交出
 // （installed `dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts:73-104`，
 // 文件头明写「A registrant merges this contract with `import type` and registers
 // through `ctx.slots`; it never imports this package at runtime」）。本包过去没有那份
-// merge，也没有手抄一份——结果是 `ctx.slots.inject("plugins.bundle.config", …)` 的槽位名
+// merge，也没有照抄一份——结果是 `ctx.slots.inject("plugins.bundle.config", …)` 的槽位名
 // 一直只是个自由 `string`，拼错了编译器不说话。抄一次就多一处漂移点，而属主的 dts 现在是
 // 本包 devDependency，编译器可以替我们对表。
 // 这里取 `ConfigPageForm` 是**一举两得**：既是把那份 merge 载入 program 的入口（TS 会
-// 顺着 `./client` 的再导出走到 slot-contract.ts），也是本卡渲染视模型两个状态位的真源
+// 顺着 `./client` 的再导出走到 slot-contract.ts），也是这张卡的渲染视图里那两个状态位的唯一来源
 // （见下面 CardSnapshot）。lint 的 `require-module-specifiers` 禁空 import specifier，
 // 正合本意——载入官方契约就该同时*用上*它。
 import type {
@@ -86,7 +86,7 @@ const NS: LocaleNs = "ocr-review";
  * `dsh.profile.bundles` 里；test/build-client.test.ts 从
  * `~/.dsh/profiles/web/package.json` 解析校验，不在此处硬抄一份到测试。
  * 唯一定义在 lib/remote-shape.ts 的 OCR_BUNDLE_PACKAGE（descriptor id / $mount 位
- * 与这里是同一份值），设置命名空间**不跟着改**：下面 `ctx.configForms.get(NS)` 仍吃
+ * 与这里是同一份值），设置命名空间**不跟着改**：下面 `ctx.configForms.get(NS)` 仍取
  * 裸条目 id（installed dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当
  * settings 命名空间用）。
  */
@@ -182,7 +182,7 @@ const ENDPOINT_VERIFY_SCHEMA = z.object({
 const BINARY_SOURCE_SCHEMA = z.enum(["bundled", "path", "none"]);
 
 /**
- * 解析宿主送的可得性对象。导出是为了让「wire 键名」这条契约能被钉住：卡片与 host
+ * 解析宿主送来的可得性对象。导出是为了让「传输时用的键名」这条契约能被钉住下来：卡片和 host
  *  两处各写一份键名时，写错了的症状是状态行永远显示「未取到」，而不是任何报错。
  *
  * 只有 `source` 是必需的：其余四样各管一句附加信息，缺了就少说那一句，而不是把整行判定
@@ -215,9 +215,9 @@ export function binaryOf(raw: unknown): OcrBinaryView | null {
 }
 
 /**
- * 详情页徽标/区块/启用指引共用的取数口：读同一条 providers 载荷的 `ocrBinary` 那半。
- * 判据只在 host 的 `resolveOcrAvailability` 一处，本包三个显示面都只翻译它的结论。
- * 读取器缺席（部署没装远程面）与传输失败都归成 null：这三处只负责显示。
+ * 详情页的徽标、区块和启用指引共用的取数入口：读同一条 providers 载荷里的 `ocrBinary` 那一半。
+ * 判断只发生在 host 的 `resolveOcrAvailability` 一处，本包三个显示位置都只翻译它给出的结论。
+ * 读取器不在（部署没有远程接口）和传输失败都归成 null：这三处只负责显示。
  */
 export async function loadCliStatus(reader: OcrReader | undefined): Promise<OcrBinaryView | null> {
   if (reader === undefined) {
@@ -322,21 +322,21 @@ export interface ProvidersPayload {
   /** 装载期端点自检结果（host 在 apply 时跑一次 `ocr llm test`）；null/缺省 = 没跑。
    *  可选：上游 host 版本可能不带这个字段，卡片按「没跑」处理即可。 */
   endpointVerify?: { ok: boolean; message: string } | null;
-  /** 外部 ocr 的可得性（纯 fs 判据）；null/缺省 = 宿主这侧没报，卡片显示「未取到状态」。 */
+  /** 外部 ocr 的可得性（只靠 fs 判断）；null 或没给出 = 宿主那侧没有报，卡片显示「未取到状态」。 */
   ocrBinary?: OcrBinaryView | null;
 }
 
 /**
- * 客户端配置面：直接取官方声明
+ * 客户端配置的类型：直接取官方声明
  * `@deepseek-ai/dsh-client-ui-settings/client` 的 `ConfigForm<T>`（getSnapshot / subscribe /
  * mutate / set / unset）与其 `ConfigFormSnapshot<T>`。原先那份 `getSnapshot: () => unknown`
  * 逼出下面 `cardStore` 里的 `fieldOf(snap, "status")` 逐位再解析——那只是丢失类型的补救，不是
  * 宿主契约（provider 侧已按命名空间 schema decode/derive 过快照，宿主不会送别的形状）。
  * 入口是 `ctx.configForms.get(entryId)`，`entryId` 即 profile 条目 id = 本包命名空间。
  * 本卡依赖的两条：
- *  - `set`/`unset` 多带回**受理位**：`true` 宿主受理，`false` = 拒绝或写入被跳过，只有传输
- *    失败才 reject。本卡两条都认：受理位回传到 `saveSettingsDraft`，`false` 的字段留在
- *    touched 上并报出（见下面 saveRefused 文案键）；把受理位丢掉会让「宿主没写盘」显示成
+ *  - `set` 和 `unset` 多带回**是否受理**：`true` 表示宿主受理，`false` 表示被拒绝或写入被跳过，只有传输
+ *    失败才 reject。这张卡两种都认：受理结果回传给 `saveSettingsDraft`，为 `false` 的字段留在
+ *    touched 上并报出来（见下面 saveRefused 那个文案键）；把这个结果丢掉会让「宿主没写到磁盘」显示成
  *    「已保存」，用户无从分辨。
  *  - 交回的表单**没有 `dispose()`**：那是 provider 自己持有的共享表单，消费者无从销毁。 */
 export type EntryForm = ConfigForm<Record<string, unknown>>;
@@ -349,15 +349,15 @@ export type EntryForm = ConfigForm<Record<string, unknown>>;
  */
 export type LocaleCatalog = Record<BuiltInLocaleId, LocaleDictOf<typeof NS>>;
 
-/** 本卡自己的渲染视模型（官方快照的有用子集 + 兜底值）。
+/** 这张卡自己用的渲染视图（官方快照里有用的那部分 + 默认值）。
  *  `status`/`writable` 两位出自**同一个**官方源：属主包交给配置页的那份状态
  *  （`ConfigPageForm['state']`，installed `dsh-client-ui-plugin-manager/lib/types/client/
  *  slot-contract.d.ts:150-155`，其类型就是官方 `ConfigFormSnapshot<Record<string, unknown>>`
- *  的再投影）。原先 `status` 已经从 `ConfigFormSnapshot` 取，`writable` 却还是手抄的裸
+ *  的再投影）。原先 `status` 已经从 `ConfigFormSnapshot` 取，`writable` 却还是自己抄来的
  *  `boolean`——两位两个来源就各漂各的，现在同源了。宿主把 status 的取值域或 writable 的
  *  必选性一改，这里当场红。
  *  两者都成立才可写，故保持**必选**，不再用 `unknown` 假装宿主会送别的形状；`value` 是本卡
- *  的兜底收窄（官方 `value: T | undefined` → 首个快照受理前落成空对象供渲染）。 */
+ *  的收窄（官方 `value: T | undefined` → 第一个快照回来之前先给一个空对象供渲染）。 */
 export interface CardSnapshot extends Pick<ConfigPageForm["state"], "status" | "writable"> {
   value: Record<string, unknown>;
 }
@@ -368,7 +368,7 @@ export function cardStore(scope: EntryForm): {
 } {
   let cachedSnap: ConfigFormSnapshot<Record<string, unknown>> | null = null;
   let cachedView: CardSnapshot | null = null;
-  // 只作 TS 收窄兜底：官方 getSnapshot() 恒回一个快照，首次调用即走上面的赋值分支。
+  // 只用来让 TS 的类型收窄过去：官方 getSnapshot() 总会返回一个快照，第一次调用就走上面的赋值分支。
   const EMPTY_SNAPSHOT: CardSnapshot = { status: "loading", writable: false, value: {} };
   return {
     getSnapshot() {
@@ -408,7 +408,7 @@ export interface OcrCardDeps {
   modelOptions: DshModel[];
   keyHint: string;
   statusHint: string | null;
-  /** 外部 ocr 的可得性（fs 判据，随 providers 载荷来）；null = 宿主没报。 */
+  /** 外部 ocr 的可得性（按 fs 判断，随 providers 载荷一起来）；null = 宿主没报。 */
   binary: OcrBinaryView | null;
   /** 最近一次 `ocr version` 的回执；null = 还没检测过。 */
   probeMsg: { ok: boolean; text: string } | null;
@@ -461,7 +461,7 @@ function channelText(t: Translate, channel: string | undefined): string {
 }
 
 /**
- * 外部 CLI 可得性那一行的文本。三档来源与「宿主没报」四种说法，判据全在 host 侧
+ * 外部 CLI 可得性那一行的文本。三种来源加上「宿主没报」共四种说法，判断全在 host 那侧
  * （`lib/cli.ts` 的 resolveOcrAvailability），卡片只翻译结论——两处各算各的就会漂。
  */
 export function binaryStatusText(t: Translate, binary: OcrBinaryView | null): string {
@@ -571,7 +571,7 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
 }
 
 /**
- * 徽标用的短文案（标题旁那只标签放不下整句装法）。与 `binaryStatusText` 同一判据、
+ * 徽标用的短文案（标题旁边那个标签放不下整句安装方式）。和 `binaryStatusText` 用同一条判断、
  * 不同长度：两处各算一份「哪一档」就会漂，所以入参仍是 host 送的那份 `OcrBinaryView`。
  *
  * 「实测过且与核对版本不一致」压过来源那一档：用户扫一眼列表要看到的结论是「这份 CLI
@@ -598,7 +598,7 @@ export function cliBadgeText(t: Translate, binary: OcrBinaryView | null): string
 }
 
 /** 这页说的是不是本包（bundle 页与它的行页都算；官方插件页 `item` 没有包名可比）。
- *  导出是因为「在别人插件的页上白拉一次自己的端点」这条判据只能在这里钉。 */
+ *  导出是因为「在别的插件页面上白拉一次自己的端点」这条限制只能在这里固定。 */
 export function isOwnSubject(subject: PluginsSubject): boolean {
   return subject.kind !== "item" && subject.pkg.name === BUNDLE_PKG;
 }
@@ -612,14 +612,14 @@ export function buildCliBadge(t: Translate, status: OcrBinaryView | null): React
   );
 }
 
-/** 详情页/启用指引这几处贡献点共用的注入面：取文案的口 + 取可得性的口。 */
+/** 详情页/启用指引这几处贡献点共用的注入：取文案的口 + 取可得性的口。 */
 export interface CliStatusShare {
   t: Translate;
   loadCliStatus: () => Promise<OcrBinaryView | null>;
 }
 
 /**
- * 订阅一次外部 CLI 可得性（GET providers 的 `ocrBinary` 那半，纯 fs 判据、不起进程）。
+ * 订阅一次外部 CLI 的可得性（GET providers 返回里的 `ocrBinary` 那一半，只看 fs、不起进程）。
  *
  * `active` 为假（这页说的不是本包）时既不发请求也不画东西：官方契约是「对无话可说的
  * subject 渲染 null」，在别人插件的页面上拉一次自己的端点属于白干的活。
@@ -950,7 +950,7 @@ function resolveBackend(
   const currentStillExists =
     current !== undefined && providerList.some((provider) => provider.name === current.provider);
   // `currentStillExists` 是 `current !== undefined && …` 的别名条件（TS 4.4+ 的
-  // aliased narrowing）：它为真就已经含住 `current` 非空，重复判一次是恒真条件。
+  // aliased narrowing）：它为真就已经含住 `current` 非空，重复判一次是永远成立条件。
   const effectiveProvider =
     selProvider ||
     (currentStillExists ? current.provider : "") ||
@@ -963,7 +963,7 @@ function resolveBackend(
     current.provider === chosenProvider?.name &&
     typeof current.model === "string" &&
     current.model.length > 0 &&
-    // 走到这一臂时 `chosenProvider` 已被上面那条相等式收窄成非空（空的话 `?.name` 是
+    // 走到这一分支时 `chosenProvider` 已被上面那条相等式收窄成非空（空的话 `?.name` 是
     // undefined、`current.provider` 是 string，等式不成立就短路了），`some()` 又恒回
     // boolean ⇒ 既不用 `?.` 也不用 `?? false`。
     chosenProvider.models.some((model) => model.id === current.model);
@@ -1192,7 +1192,7 @@ export function buildAdminSection(props: AdminSectionProps): ReactNode {
   return createElement("div", null, buildMcpAdmin(props), buildAuthAdmin(props));
 }
 
-/** providers 读面的两个落态口（对象化以受 max-params 约束）。 */
+/** providers 读取结果的两个返回位置（打包成一个对象，以受 max-params 约束）。 */
 interface ProvidersSinks {
   setData: (payload: ProvidersPayload | null) => void;
   setFetchError: (message: string | null) => void;
@@ -1230,7 +1230,7 @@ async function refreshProviders(
 /** 卡片动作的线上方法名（与 src/remote.ts 的 descriptor.method 同源）。 */
 export type RemoteAction = "select" | "migrate" | "test" | "probe";
 
-/** 动作回执的最小面：既有动作函数只读 `json()`，不必把整个 Response 门面造齐。 */
+/** 动作回执的最小类型：既有动作函数只读 `json()`，不必把整个 Response 门面造齐。 */
 export interface JsonReply {
   json: () => Promise<unknown>;
 }
@@ -1390,8 +1390,8 @@ async function runTestConnection(deps: CardActionDeps): Promise<void> {
   }
 }
 
-/** 探测动作的落态口：只写自己的那一行，不占 provider 动作条（两处同时有回执要分得开）。
- *  导出是为了让「回执文本 = 版本行 + 原样附上的 output」这条用户可见契约能被钉住。 */
+/** 探测动作写状态的地方：只写自己的那一行，不占 provider 的动作条（两处同时有回执时要分得开）。
+ *  导出是为了让「回执文本 = 版本行 + 原样附上的 output」这条用户看得见的契约能被钉住下来。 */
 export interface ProbeActionDeps {
   t: Translate;
   post: CardPost;
@@ -1404,7 +1404,7 @@ export interface ProbeActionDeps {
  * POST probe：跑一次 `ocr version`。
  *
  * 回执里的 `output` 原样附上，不从中抽「有新版本」那句——那是上游的措辞，抽一次就多
- * 一处会跟着漂的判据；那段文本本来就带在页面上供人选中复制（含上游给的 `npm i -g …`）。
+ * 一处会跟着变化的判断；那段文本本来就显示在页面上供人选中复制（含上游给的 `npm i -g …`）。
  */
 export async function runProbe(deps: ProbeActionDeps): Promise<void> {
   const { t } = deps;
@@ -1446,7 +1446,7 @@ export interface SaveDraftDeps {
 }
 
 /** 只写差异字段：touched 值为 undefined → 写 null（= 清回 schema 默认）。
- *  受理位必须回来：`set` 回 `false` 表示宿主拒收或跳过了这次写入（值没落盘），
+ *  受理结果必须传回来：`set` 返回 `false` 表示宿主拒收或跳过了这次写入（值没写到磁盘），
  *  这时不能清 touched、也不能报成功——否则用户看到「已保存」而配置原封未动。
  *  传输失败仍以 rejection 表达。 */
 export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
@@ -1463,7 +1463,7 @@ export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   });
   // allSettled 而不是 all：`set` 逐个字段写，任一拒绝时其余可能仍在飞行。用 all 会在
   // 第一个拒绝处进 catch 并立刻释放 busy——用户此时能再点保存，对已完成那些字段重复
-  // 写入，而且没人知道「哪些已经落盘」。等全部 settle 再统一判，并按结果只留失败字段
+  // 写入，而且没人知道「哪些已经写到磁盘」。等全部 settle 再统一判，并按结果只留失败字段
   // 在 touched 上，重试只会重写真正没写进去的那些。
   const settled = await Promise.allSettled(ops);
   deps.setSettingsBusy(false);
@@ -1493,7 +1493,7 @@ export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   deps.setTouched({});
 }
 
-/** 设置行的渲染值（touched 优先、快照兜底，再按各行自己的类型收口）。 */
+/** 设置行的渲染值（touched 优先、快照兜底，再按各行自己的类型统一处理）。 */
 interface DraftFields {
   effortValue: OcrEffort;
   languageValue: OcrLanguage;
@@ -1558,7 +1558,7 @@ function buildProviderPanel(deps: OcrCardDeps): ReactNode[] {
 
 type AdminState = Omit<AdminSectionProps, "t" | "writable">;
 
-/** MCP 配置编辑器的状态与动作：读、写，以及「没读成功不许写」的判据。 */
+/** MCP 配置编辑器的状态与动作：读、写，以及「没读成功就不许写」这条限制。 */
 function useMcpPanel(
   reader: OcrReader | undefined,
   t: Translate,
@@ -1723,7 +1723,7 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const writable = snap.writable && ready;
   const adminState = useAdminPanel(props.reader, t);
 
-  // Provider 数据（官方 Remote 读面，无 key 明文）。
+  // Provider 数据（走官方 Remote 的读取接口，没有 key 的明文）。
   const [data, setData] = useState<ProvidersPayload | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [busy, setBusy] = useState<CardActionKind | null>(null);
@@ -1851,23 +1851,23 @@ export interface CardSlotProps {
   t: Translate;
   useCard: <TResult>(selector: (snap: CardSnapshot) => TResult) => TResult;
   set: (field: string, value: unknown) => boolean | Promise<boolean>;
-  /** 宿主读面（官方 Remote 的消费侧，见 src/remote.ts）；缺席 = 当前部署没有远程面。 */
+  /** 宿主的读取接口（官方 Remote 的消费侧，见 src/remote.ts）；不在 = 当前部署没有远程接口。 */
   reader?: OcrReader;
 }
 
 /**
- * 本卡用到的 ctx 面：`effect` / `slots` 两位直接取官方服务面，`locale` 取官方**类型化**
- * 重载，只有 `configForms` 仍是方法面投影（原因见那一条）。
+ * 这张卡用到的 ctx 上的成员：`effect` 和 `slots` 直接取官方服务的类型，`locale` 取官方**带类型的**
+ * 重载，只有 `configForms` 仍是方法子集投影（原因见那一条）。
  *
  * - `effect`：cordis 官方效应面（installed `@deepseek-ai/cordis/lib/types/fiber.d.ts:8`
  *   的 `interface Context extends Pick<Fiber, 'effect'>`，:157/:159 两个重载）。原先这里
  *   手写的是 `(factory: () => (() => void) | undefined, label?: string) => void`——返回位
  *   被抄成了 `void`，而官方交回的是可 await 的 `Disposable`/`AsyncDisposable`；抄一次就把
- *   cordis 的形状漂移钉死的机会丢掉了。
+ *   cordis 形状变化时立刻报错的机会就丢掉了。
  * - `slots`：官方 `SlotRegistry`（renderer 把它增强进 cordis `Context`，installed
- *   `dsh-client-ui-renderer/lib/types/client/index.d.ts:27`）的**方法面投影**。取 `Pick`
+ *   `dsh-client-ui-renderer/lib/types/client/index.d.ts:27`）的**方法子集投影**。取 `Pick`
  *   而不是 `Context["slots"]` 整个类型：`SlotRegistry` 是带 private 字段的 cordis
- *   `Service` 类（同目录 `registry.d.ts:46`），TS 对它做名义比较，测试桩件无法满足。
+ *   `Service` 类（cordis 同目录的 registry.d.ts），TS 对它做名义比较，测试替身无法满足。
  *   `register` 逐字复用 `SlotCore['register']`（`registry.d.ts:85`，两个重载），
  *   `inject` 是 `registry.d.ts:111` 的「按槽位声明生命周期装 effect」那一位（disposer
  *   随 collapse 重跑工厂的语义就写在 :100）。合并进 `SlotMap` 的槽位键在这里是
@@ -1878,8 +1878,8 @@ export interface CardSlotProps {
  *   `Context.configForms`，`get:142` 按 profile 条目 id 取那张共享表单）：取代已随宿主
  *   移除的 `settingsScope`（installed 全树零命中）。只投影用到的 `get`：官方
  *   `ConfigForms.get` 是泛型（`<T>(entryId) => ConfigForm<T>`），且 `ConfigForms` 同样是
- *   Service 类 → 既不能整类型用，也不能把 `Pick` 交给桩件；这里把 `T` 钉在本卡唯一取的
- *   那张表单上，返回面仍是官方 `ConfigForm`。写侧的 `remote.settings` 由 provider 自己的
+ *   Service 类 → 既不能整类型用，也不能把 `Pick` 交给测试替身；这里把 `T` 固定在这张卡唯一取的
+ *   那张表单上，返回类型仍是官方 `ConfigForm`。写侧的 `remote.settings` 由 provider 自己的
  *   fiber 承担，故此处不必声明。
  * - `locale`：官方 `@deepseek-ai/dsh-client-locale` 的 client 面（`LocaleRuntime`，installed
  *   `lib/types/client/index.d.ts:97`）在**类型化**那两条重载上的投影：
@@ -1909,7 +1909,7 @@ export interface ClientCtx {
     register: (ns: typeof NS, dicts: LocaleCatalog) => () => void;
     bind: (ns: typeof NS) => Translate;
   };
-  /** 显式读取可选服务（官方 `ctx.get`）；缺省时按「当前部署没有远程面」处理。 */
+  /** 显式读取可选服务（官方 `ctx.get`）；缺省时按「当前部署没有远程通道」处理。 */
   get?: (name: string, strict?: boolean) => unknown;
 }
 
@@ -1942,9 +1942,9 @@ function apply(ctx: ClientCtx): void {
   // 返回的是**一个**回收全部 pairs 的 disposer（旧写法是两个 disposer 手工串起来）。
   ctx.effect(() => ctx.locale.register(NS, UI_MESSAGES), "ocr-review-card: locale dictionaries");
   const t = ctx.locale.bind(NS);
-  // 远程读面在 apply 期造一次；`remote` 在读取器内部**每次读取现取**——网关晚于本
+  // 远程读取接口在 apply 时造一次；`remote` 在读取器内部**每次读取时现取**——网关晚于本
   // 插件 apply 才 provide("remote") 的部署，首次成功读取就能接上；缺席的部署在读取时
-  // 抛可读错误，卡片照常渲染、数据面显示原因。`$mount` 幂等（随卡片卸载自动撤），
+  // 抛可读错误，卡片照常渲染、数据那一栏显示原因。`$mount` 幂等（随卡片卸载自动撤），
   // 反复拉取只挂一次。
   const reader = createOcrReader(ctx);
   ctx.slots.inject("plugins.bundle.config", () => {
@@ -1963,7 +1963,7 @@ function apply(ctx: ClientCtx): void {
           hooks: { card: store },
           set: (field: string, value: unknown): boolean | Promise<boolean> =>
             scope.set(field, value),
-          // 宿主读面（remote 的消费侧）。
+          // 宿主的读取接口（remote 的消费侧）。
           reader,
         }),
       },
@@ -1977,7 +1977,7 @@ function apply(ctx: ClientCtx): void {
     // disposer 并在再次声明时**重跑工厂**（installed
     // dsh-client-ui-renderer/lib/types/client/registry.d.ts:100 "Collapse disposes the
     // effect and a later declaration runs it again"）——表单共享且长活，所以重跑后写入
-    // 依然落盘；旧 `settingsScope` 那种「离开插件页一次之后 scope 永久 disposed、之后每次
+    // 依然写到磁盘；旧 `settingsScope` 那种「离开插件页一次之后 scope 永久 disposed、之后每次
     // 保存被静默丢弃」的坑（早先那个 fiber 级 dispose）随该服务一起消失。
     return unregister;
   });

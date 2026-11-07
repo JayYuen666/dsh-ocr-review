@@ -5,7 +5,7 @@
 ## 设置卡上改的是什么
 
 - **模型** — `ocrProvider` 与 `ocrModel` 不是本插件存的值：它们是宿主模型命名空间的投影，没有可用密钥的条目照样列出但禁用。`chatGptModel` 是本插件写进外部命令行自己配置的 model slug（provider 置为 `chatgpt`，同时删掉 `api_key` / `api_key_cmd`）；该提供方背后的凭据来自命令行自己的登录态，本插件只查询 `ocr auth`，不保存。
-- **审查参数** — `effort`（`auto`/`low`/`medium`/`high`）是跑几轮审查，越深越费时。`language` 选中文或英文输出。`autoVerify`（默认开）在选完提供方与模型后跑一次 `ocr llm test`，选错当场就知道，而不是等第一次评审失败。`maxComments`（默认 12；0 表示全部，包括钉不到行上的意见）。`timeoutMinutes`（0 表示向宿主要上限；正数是分钟数，仍由宿主收口）。`ocrConfigPath`——留空就是 `~/.opencodereview/config.json`；填了就必须是 `<目录>/.opencodereview/config.json` 的形状，生效方式是重定向 `HOME`；Windows 上值能通过形状校验但不会重定向，命令行仍读默认路径。
+- **审查参数** — `effort`（`auto`/`low`/`medium`/`high`）是跑几轮审查，越深越费时。`language` 选中文或英文输出。`autoVerify`（默认开）在选完提供方与模型后跑一次 `ocr llm test`，选错当场就知道，而不是等第一次评审失败。`maxComments`（默认 12；0 表示全部，包括钉不到行上的意见）。`timeoutMinutes`（0 表示向宿主要上限；正数是分钟数，最终仍由宿主收敛）。`ocrConfigPath`——留空就是 `~/.opencodereview/config.json`；填了就必须是 `<目录>/.opencodereview/config.json` 的形状，生效方式是重定向 `HOME`；Windows 上值能通过形状校验但不会重定向，命令行仍读默认路径。
 
 `effort`、`maxComments`、`timeoutMinutes` 与 `ocrConfigPath` 每次调用现读，改完下一次评审生效，不需要重启宿主。`language` 与 `autoVerify` 在应用一次 provider/model 选择时读取：`language` 当场写进命令行配置，`autoVerify` 只决定那时是否跑 `ocr llm test`。
 

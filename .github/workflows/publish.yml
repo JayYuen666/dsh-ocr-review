@@ -18,7 +18,7 @@ jobs:
   # 而那些脚本能直接读到 ACTIONS_ID_TOKEN_REQUEST_URL / ACTIONS_ID_TOKEN_REQUEST_TOKEN，
   # 用它们向 GitHub 换一枚 OIDC token——npm 的 trusted publisher 交换不校验发起方是哪个
   # 步骤，于是「一次被投毒的依赖更新」就足以在发布之前拿到发布能力。把这两步挪进一个不持
-  # id-token 的 job，那条路就断了；persist-credentials: false 与凭据不跨步骤传递收的是别的面，
+  # id-token 的 job，那条路就断了；persist-credentials: false 与凭据不跨步骤传递管的是别的东西，
   # 覆盖不到这一条。
   # publish job 里仍有一次 install：pnpm publish 的 prepack 要重建 host.js/client.js，
   # 那条链离不开 node_modules。这层暴露是发布本身固有的，拆 job 消不掉它，只能写清。
@@ -93,7 +93,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           # publish job 里也要装依赖（prepack 要重建产物），同样受益于 store 缓存。
           cache: pnpm
-      # 静态 token 是 OIDC 失败时的兜底，不是发布的前提：仓库里没有这枚 secret 是正常状态，
+      # 静态 token 是 OIDC 失败时的后备，不是发布的前提：仓库里没有这枚 secret 是正常状态，
       # 走 trusted publishing 的仓库本来就不该长期存它。所以这一步在值为空时放行，只把
       # 凭据本身不跨步骤传递：步骤输出会落成 RUNNER_TEMP 下的文件，同 job 后续步骤
       # （含 install 与 check 里跑的依赖脚本）都能枚举读到；写进 job 级环境同理。
@@ -128,7 +128,7 @@ jobs:
       # 为什么必须在发布前判：版本号一旦占用就撤不回（npm 不允许重发同一个号），而
       # workflow_dispatch 是手动入口，重复派发是常态。预检只回答「身份有效吗」与「依赖可见吗」，
       # 它不回答「这个号是不是已经发出去了」——缺这一步时，重复派发会以 pnpm 的版本冲突收尾，
-      # 结论面分不清「这次是重复发」还是「发到一半坏了」。concurrency 是 cancel-in-progress: false
+      # 光看结论分不清「这次是重复发」还是「发到一半坏了」。concurrency 是 cancel-in-progress: false
       # 的串行队列，尤其需要一条能把「哪一次真正落到了 registry」讲清楚的判据。
       # 提交 SHA 一并打出来：同一版本号在不同提交上重试时，日志要能对上到底是哪一棵树。
       - name: 版本号自检（别把已发过的号再发一遍）
@@ -172,7 +172,7 @@ jobs:
             echo "读包元数据得到 HTTP $code——这不是 404（没有）也不是 200（有），先别发"
             exit 1
           fi
-      # 静态 token 只是兜底，所以这里判的是「还能不能用」，不是「必须有效」：
+      # 静态 token 只是后备，所以这里判的是「还能不能用」，不是「必须有效」：
       #   · 200      → 原样传给发布步
       #   · 401/403  → 告警并清空，让发布步走 OIDC。凭据失效不是工作流该红的理由，
       #                OIDC 也没配好时发布步会在认证处以 ENEEDAUTH 红，那一步才是真判据。
@@ -249,7 +249,7 @@ jobs:
           # 只交结论、不交凭据：发布步据此决定导不导出 NODE_AUTH_TOKEN。
           printf 'use_static=%s\n' "$USE_STATIC" >> "$GITHUB_OUTPUT"
       # 只装依赖，不再跑 check：完整门禁已经在上游 check job 里跑过一遍，
-      # 在这里重跑等于把 install/check 的执行面又搬回持 id-token 的 job。
+      # 在这里重跑等于把 install/check 的执行又搬回持 id-token 的 job。
       # 这一行本身留着的理由只有一个——pnpm publish 的 prepack 要重建产物。
       # `--ignore-scripts`：本 job 持 id-token，依赖的生命周期脚本能拿它换 npm 受众的
       # OIDC token；这些脚本对构建不是必需的。实测：在 /tmp 的全新检出里用
@@ -259,7 +259,7 @@ jobs:
       # prepack 会重建 host.js/client.js，产物不入库也发得出去。
       # 凭据优先级是本文件最容易读反的地方：不是「配了 NPM_TOKEN 就用它、没配才 OIDC」，
       # 而是 OIDC 在前、token 在后（pnpm 的 publish_options.rs 原话 "OIDC takes precedence over
-      # a configured static token"）。trusted publisher 配好时下面这段 export 等于空转，
+      # a configured static token"）。trusted publisher 配好时下面这段 export 等于没有校验作用，
       # registry 上该版本的 _npmUser 记成 GitHub Actions <npm-oidc-no-reply@github.com> 就是这个。
       # 注入方式只能是环境变量：setup-node 配了 registry-url 会把 `${NODE_AUTH_TOKEN}` 占位写进
       # RUNNER_TEMP/.npmrc 并用 NPM_CONFIG_USERCONFIG 指过去，$HOME/.npmrc 被忽略；真 token 留在

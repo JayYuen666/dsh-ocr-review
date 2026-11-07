@@ -1,4 +1,4 @@
-// MCP / ChatGPT 管理面配置读写：只测纯配置层（不碰卡片与 Remote）。
+// MCP / ChatGPT 管理界面配置读写：只测纯配置层（不碰卡片与 Remote）。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,7 +26,7 @@ describe("mcp / chatgpt 配置读写", () => {
   });
 
   beforeEach(() => {
-    // 每个用例从一份确定盘面开始：拒绝分支要证明「盘上没被改动」，接力上一用例的
+    // 每个用例从一份确定的初始配置开始：拒绝分支要证明「盘上没被改动」，接力上一用例的
     // 内容会让这条断言依赖执行顺序。
     writeFileSync(configPath, "{}");
     rmSync(missingPath, { force: true });
@@ -108,7 +108,7 @@ describe("mcp / chatgpt 配置读写", () => {
     });
   });
 
-  it("写：过大 / 非法 JSON / 顶层非对象 / 条数超限都拒绝，且盘面不变", async () => {
+  it("写：过大 / 非法 JSON / 顶层非对象 / 条数超限都拒绝，且配置内容不变", async () => {
     const before = readFileSync(configPath, "utf8");
     const tooLarge = await saveMcpServers(configPath, "x".repeat(64 * 1024 + 1), zh);
     expect(tooLarge.ok).toBe(false);

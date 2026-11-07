@@ -27,8 +27,8 @@
 // lib/messages.ts 的消息表，由调用方（host.ts）按官方 locale 偏好取一份注入
 // ——纯函数不读设置，所以 messages 是入参而不是模块常量。
 //
-// 分层：本模块只负责「OCR 的 JSON → 本包形状」。severity 白名单、未知等级归一、
-// 排序位与计数聚合都在 lib/severity.ts（摘要的排序与聚合共用那一个口径）。
+// 分层：本模块只负责「OCR 的 JSON → 本包需要的形状」。severity 的白名单、未知等级归一、
+// 排序位置和计数聚合都在 lib/severity.ts（摘要的排序和聚合共用那一处规则）。
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
@@ -39,7 +39,7 @@ import type { CommentAggregation } from "./severity.ts";
 const DECIMAL_INTEGER = /^\d+$/u;
 
 /**
- * OCR 评审 JSON 的 status 枚举（判据在 CLI 侧 `cmd/opencodereview/output.go` 的 jsonOutput
+ * OCR 评审 JSON 的 status 枚举（依据在 CLI 侧 `cmd/opencodereview/output.go` 的 jsonOutput
  * 装配与 `internal/session/manifest.go` 的 TerminalState）。
  * 白名单外的一律视为失败：exit 0 不等于评审成功——`{"error":"auth failed"}`
  * 这类「没有 status 的错误对象」若被当作 ok:true，模型会把「0 条评论」读成
@@ -57,7 +57,7 @@ const DECIMAL_INTEGER = /^\d+$/u;
  *
  * 有 manifest 时 status 就是它的终态（complete/partial/skipped），success 与
  * completed_with_warnings/completed_with_errors 只在没有 manifest 的产出上出现——
- * 逐文件失败在那两种形态下的落点也不同（前者在 coverage.failed，后者在 warnings）。
+ * 逐文件失败在那两种形态下的表现位置也不同（前者在 coverage.failed，后者在 warnings）。
  */
 const REVIEW_STATUSES = [
   "success",
@@ -134,7 +134,7 @@ export interface ToolCallView {
 /**
  * OCR 的 `manifest.coverage`：五个互斥文件集的大小，selected 是分母。
  *
- * 这是「这一场到底审完了多少文件」的权威口径，与 `warnings` 互补：带 manifest 时 CLI
+ * 这是「这一场到底审完了多少文件」最可靠的说法，和 `warnings` 互补：带 manifest 时 CLI
  * 会把子任务失败从 warnings 里摘掉（同一事实不在两处重复，也避免 provider 原始错误文本
  * 泄漏），失败条目只剩 coverage.failed。`droppedCount` 一类衡量的是**本摘要的截断**，
  * 与这里的**运行覆盖度**是两件事，不能互相替代。
@@ -193,14 +193,14 @@ function str(value: unknown): string {
  * 为什么把负数和小数一起挡掉：行号出现 "-3" 会被下游当成「未锚定的评论」而丢弃
  * （分类错了——它是畸形值不是缺锚点），而 insertions: -5 会原样传播进给模型看的
  * diff 统计。两者都是上游畸形值被当合法值透传。0 在下游有既定语义（未锚定 / 无统计），
- * 故作兜底值。
+ * 所以拿它当默认值。
  */
 function nonNegativeInt(value: number): number {
   // 直接判原值，**不能先 Math.trunc**：3.7 → 3、0.5 → 0 之后 isSafeInteger 一律成立，
   // 小数就被静默改写了——行号偏移一位、insertions 少算一截，而上方注释承诺的是
   // 「负数和小数一起挡掉」。用 Number.isSafeInteger 而不是 Number.isFinite：1e300
   // 有限但远超安全整数域，原样传播会把行号与统计变成天文数字。与 host.ts:readMaxComments
-  // 的口径保持一致。
+  // 保持一致。
   if (!Number.isSafeInteger(value) || value < 0) {
     return 0;
   }
@@ -313,7 +313,7 @@ function capLines(lines: string[], total: number, messages: OcrReviewMessages): 
 /** 计数字段的合法形态：**安全整数域内**的非负整数或纯十进制数字串——与 {@link num}
  *  的取值域是同一道闸。只查「是不是数字串」不够：`"99999999999999999999"` 过得了
  *  `^\d+$`，而 num() 的 nonNegativeInt 会把它折成 0，于是「读不出」被伪装成「零失败」
- *  （tool_calls 不进 unreadable、preview 的计数回退到本地长度），两种口径必须一起判。 */
+ *  （tool_calls 不进 unreadable、preview 的计数退回到本地长度），这两种情况必须一起判断。 */
 function isCount(value: unknown): boolean {
   if (typeof value === "number") {
     return Number.isSafeInteger(value) && value >= 0;
@@ -701,7 +701,7 @@ function locationOf(comment: OcrComment, messages: OcrReviewMessages): string {
   return `${comment.path || messages.pathUnknown}:${range === "" ? "0" : range}`;
 }
 
-/** 摘要产出的可核对口径：展示数与「被丢弃数」同时给出，「干净」必须可证明。 */
+/** 摘要产出里可以核对的一组数：展示的条数和被丢弃的条数同时给出，「确实干净」必须能证明。 */
 export interface ReviewSummaryView {
   status: ParsedReviewStatus;
   skipped: boolean;
@@ -734,7 +734,7 @@ export interface ReviewSummaryView {
     suggestion: string | null;
   }[];
   warnings: string[];
-  /** LLM 工具调用统计（`--audience agent` 下这是模型侧唯一能看见的失败口径）。 */
+  /** LLM 工具调用的统计（`--audience agent` 下这是模型唯一能看见的失败情况）。 */
   toolCalls: ToolCallView | null;
   /** 运行覆盖度（有 manifest 时「哪些文件没审成」的权威来源）。 */
   coverage: CoverageView | null;
@@ -755,7 +755,7 @@ export function summarizeReview(
   // 再按行号。未锚定（0 行）默认靠后。
   // maxComments <= 0 = 不截断：全量评论（含未锚定条目），忠实桥接 OCR 全部产出。
   // 这里是数值比较（`SummaryPlan.maxComments: number`，生产侧经 readMaxComments 的
-  // Number.isSafeInteger 兜底、不会喂进 NaN），故直接写 `<= 0` 而不是 `!(… > 0)`。
+  // Number.isSafeInteger 拦过、不会传进 NaN），所以直接写 `<= 0` 而不是 `!(… > 0)`。
   const unlimited = plan.maxComments <= 0;
   const keepZeroLine = plan.includeZeroLine === true;
   const ranked = [...parsed.comments]
@@ -847,7 +847,7 @@ export interface ParsedDelegatePreview {
 /**
  * preview 的条目数组 → 结构化清单；返回 null 表示「上游给了条目却一条都没解析出来」。
  *
- * 判据分两层：部分条目解析不出来照旧丢弃（OCR 偶发脏条目不该毁掉整份清单），
+ * 判断分两层：部分条目解析不出来仍然照旧丢弃（OCR 偶发的脏条目不该毁掉整份清单），
  * 但一条不剩时不能继续以 ok:true 的形态报「0 个文件可审」——那不是「没有可审的
  * 文件」，是半截产出，模型与用户都会拿它当范围结论。
  */
@@ -916,8 +916,8 @@ export function parseDelegatePreview(text: string): ParsedDelegatePreview {
   // 契约键在、但值类型不对（null / 字符串 / 对象）⇒ 同样判失败。此前只查「键在不在」，
   // 于是 {"reviewable_files": null} 这种上游半截产出被当成「0 个文件可审」——
   // 假阴性的范围结论，比解析失败更难察觉。同层的 review 解析对 comments 非数组是
-  // 硬失败，两条口径必须一致。
-  // reviewable_files 是契约里的结构性键，走到这里它一定存在；类型不对同样判失败。
+  // 硬失败，这两处的处理必须一致。
+  // reviewable_files 是对外声明里的结构性键，走到这里它一定存在；类型不对同样判失败。
   const reviewableRaw = root["reviewable_files"];
   if (!Array.isArray(reviewableRaw)) {
     return delegatePreviewFailure();
@@ -986,7 +986,7 @@ export function parseDelegateRules(text: string): { ok: boolean; groups: RuleGro
   }
   // 到这里的组必带**数组** files：files 存在却非数组的已在上面整体判失败，
   // 不存在 files 的组会被下面 files.length > 0 滤掉。故守卫式收窄一次即可，
-  // 不必在映射里再写一遍不可能走到的 : [] 兜底。
+  // 不必在映射里再写一遍永远走不到的 : [] 兜底。
   const groupsWithFiles = groupsRaw.filter(
     (groupRaw): groupRaw is { files: unknown[] } & Record<string, unknown> =>
       isRecord(groupRaw) && Array.isArray(groupRaw["files"]),
@@ -1006,7 +1006,7 @@ export function parseDelegateRules(text: string): { ok: boolean; groups: RuleGro
     // files 为空的组传达不了任何文件路径，留着它等于给模型一条无处可用的规则。
     .filter((group) => group.files.length > 0);
   // 上游给了分组却一条都没解析出来 ⇒ 半截产出，不能再以 ok:true 的形态报「0 个规则
-  // 分组」。部分分组解析不出来仍照旧放行（上面已按组丢弃），与 preview 同口径。
+  // 分组」。部分分组解析不出来仍然照旧放行（上面已经按组丢弃），和 preview 用同一种处理。
   if (groupsRaw.length > 0 && groups.length === 0) {
     return { ok: false, groups: [] };
   }
@@ -1059,7 +1059,7 @@ function previewFileOf(raw: unknown): PreviewFile | null {
 /**
  * 解析 `ocr review --preview --format json` / `ocr scan --preview --format json`。
  *
- * 预览是 `model.Preview` 的裸对象（键 `files`），与 review/scan 的摘要**不是**同一
+ * 预览交回的是 `model.Preview` 对象本身（键 `files`），与 review/scan 的摘要**不是**同一
  * 形状；把它喂给 parseReviewOutput 只会得到一条解析失败。契约键一个都不命中、或
  * 条目全是坏形状时判失败，不能报成「0 个文件可审」。
  */

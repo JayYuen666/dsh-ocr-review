@@ -1,4 +1,4 @@
-// MCP 管理面的配置读写：卡片把用户编辑的 `mcp_servers` 写进外部 ocr CLI 的
+// MCP 管理界面的配置读写：卡片把用户编辑的 `mcp_servers` 写进外部 ocr CLI 的
 // config.json。它**不是模型工具**——stdio server 会执行命令，只有设置卡的管理动作
 // 可以改它。
 //
@@ -232,12 +232,12 @@ function normalizeRemote(
  * 单个 server 条目 → 只含已知字段的普通对象。
  *
  * 未知字段默认拒绝（避免写出 OCR 不认的配置），但**盘上同一条目已有的未知字段会原样接回**：
- * OCR 自己的 MCPServerConfig 带 unknownJSONFields 契约（读进来不认识的键在来回写时留着），
- * 手写或新版写下的字段在这里丢掉，等于用户改一个字段就静默删掉另一个。
- * 判据是「基线里出现过这个键」——新条目里出现未知键仍判非法，否则一次拼错会被写成 OCR 忽略的键。
+ * OCR 自己的 MCPServerConfig 带 unknownJSONFields 这条契约（读进来不认识的键在来回写时留着），
+ * 手写或新版本写下的字段在这里丢掉，等于用户改一个字段就静默删掉另一个。
+ * 判据是「基线里出现过这个键」——新条目里出现未知键仍然判非法，否则一次拼错会被写成 OCR 忽略的键。
  */
 /**
- * 未知字段的保留判据（理由见 normalizeServer 的 JSDoc）。
+ * 未知字段怎么保留（理由见 normalizeServer 的 JSDoc）。
  */
 function preservedFieldsOf(
   name: string,
@@ -444,7 +444,7 @@ export async function saveMcpServers(
       };
     });
   } catch (error) {
-    // 写失败（加锁/读回/落盘）不能用读侧文案：用户会被提示去查一个没坏的读取路径。
+    // 写失败（加锁/读回/写到磁盘）不能用读侧文案：用户会被提示去查一个没坏的读取路径。
     return {
       ok: false,
       error: format(messages.mcpSaveFailed, { where: configPath, cause: String(error) }),

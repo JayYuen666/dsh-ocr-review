@@ -1,4 +1,4 @@
-// 输出 schema 单源：host.ts 只负责注册与执行，schema 的形状与关键字子集在这里维护。
+// 输出 schema 唯一来源：host.ts 只负责注册与执行，schema 的形状与关键字子集在这里维护。
 // 所有 schema 必须留在官方子集内（lib/output.ts 的守卫会逐关键字检查）。
 import type { JsonSchemaNode } from "@deepseek-ai/dsh-tools";
 
@@ -26,7 +26,7 @@ const BACKGROUND_RECEIPT_SCHEMA = {
     processStatus: { type: "string", enum: ["running", "completed", "killed"] },
     // 官方作业 id（ctx.jobs 发号，形如 `ocr-review-<16 位 hex>`）。这是后台评审**一定有结果**
     // 的句柄：`job_output` 按 id 读得到增量 stdout/stderr 与最终结局；而 polling 里
-    // 那条 `ocr_session(action=list)` 路线依赖会话已落盘且 --repo 能对上，启动早期
+    // 那条 `ocr_session(action=list)` 路线依赖会话已写到磁盘且 --repo 能对上，启动早期
     // 这两件事都可能还不成立，于是模型手里就只剩一个查不出东西的 running 回执。
     jobId: { type: "string" },
     polling: { type: "string" },
@@ -95,7 +95,7 @@ const REVIEW_SUMMARY_SCHEMA = {
             "elapsed",
           ],
           properties: {
-            // num() 经 nonNegativeInt 收口，返回值恒为非负安全整数；这里仍写 number 是
+            // num() 经 nonNegativeInt 统一处理，返回值恒为非负安全整数；这里仍写 number 是
             // 刻意放宽，解析层将来若调整边界时输出契约不必跟着改。同款字段同理。
             filesReviewed: { type: "number" },
             comments: { type: "number" },
@@ -211,7 +211,7 @@ const REVIEW_SUMMARY_SCHEMA = {
     warnings: { type: "array", items: { type: "string" } },
     // LLM 工具调用统计。`--audience agent` 下 OCR 把进度行写进 io.Discard，
     // "No tool calls parsed" 一类文本永远不会出现在输出里，这个字段是模型侧
-    // 「是模型不会调工具，而不是代码没问题」的唯一可见口径。
+    // 「是模型不会调工具，而不是代码没问题」的唯一可见规则。
     toolCalls: {
       oneOf: [
         { type: "null" },
@@ -337,7 +337,7 @@ export const PREVIEW_OUTPUT_SCHEMA = {
         // OCR 端 merge_base 带 omitempty（delegate_cmd.go:263）：缺席落 null。
         mergeBase: NULLABLE_STRING,
         reviewableCount: { type: "integer" },
-        // num() 经 nonNegativeInt 收口后恒为整数；写 number 是与 summary 同一条放宽口径。
+        // num() 经 nonNegativeInt统一处理后恒为整数；写 number 是与 summary 同一条放宽规则。
         insertions: { type: "number" },
         deletions: { type: "number" },
         reviewableFiles: {

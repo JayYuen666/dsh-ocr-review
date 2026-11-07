@@ -38,7 +38,7 @@ export interface UiMessages {
   readonly saveRefused: string;
   /** providers 端点请求失败整行（含原因与自救提示）。 */
   readonly loadProvidersFailed: string;
-  /** 当前部署没有远程面（或网关没挂上命名空间）时的可行动文案。 */
+  /** 当前部署没有远程通道（或网关没挂上命名空间）时的可行动文案。 */
   readonly remoteUnavailable: string;
   /** providers 首次加载中的占位。 */
   readonly loadingProviders: string;
@@ -66,7 +66,7 @@ export interface UiMessages {
   readonly plainKeyWarning: string;
   /** OCR 配置里还没有 provider。 */
   readonly noProvider: string;
-  /** 数据源不可用但宿主没给原因时的兜底说明。 */
+  /** 数据源不可用而宿主没给原因时，用来顶上的那句说明。 */
   readonly noReason: string;
   /** 数据源不可用整行（含宿主给的原因）。 */
   readonly readProvidersFailed: string;
@@ -141,7 +141,7 @@ export interface UiMessages {
   readonly chatGptUsing: string;
   readonly chatGptSaved: string;
   readonly chatGptLoginHint: string;
-  /** 当前部署没有远程面。 */
+  /** 当前部署没有远程通道。 */
   readonly adminUnavailable: string;
   /** 设置快照还在加载时的提示。 */
   readonly settingsLoading: string;
@@ -154,7 +154,7 @@ export interface UiMessages {
   readonly binaryTitle: string;
   /** 宿主没报可得性（载荷缺字段或形状不合）。 */
   readonly binaryUnknown: string;
-  /** 随包兜底入口在盘上：{path} 绝对路径，{channel} 装法。 */
+  /** 随包分发的兜底入口在磁盘上：{path} 是绝对路径，{channel} 是安装方式。 */
   readonly binaryBundled: string;
   /** PATH 上的全局安装：{path} 是命中的绝对路径，{channel} 是那份的装法。 */
   readonly binaryPath: string;
@@ -201,14 +201,14 @@ export interface UiMessages {
  * 的美化：官方 `LocaleRuntime.bind` 有两条重载（installed
  * `dsh-client-locale/lib/types/client/index.d.ts:219` 的类型化那条、:226 的
  * `bind(ns: string): Translate` 未类型化那条），不 merge 时本包命名空间只能落到后面那条，
- * 拿回来的 `t` 键域是宽 `string`——卡片要的键集收窄的 `t` 于是**没有任何官方来源**，
+ * 拿回来的 `t` 接受的键是宽 `string`——卡片要的那个只认自己那几个键的 `t` 于是**没有任何官方来源**，
  * 本地只好继续手写一个官方给不出的函数形状。实测撤掉下面这一行（本包不再 merge），
  * 官方 `LocaleDictOf` / `TranslateNS` 的约束域立刻只剩宿主包 merge 的那三个命名空间
  * （`Type '"ocr-review"' does not satisfy the constraint
- * '"common" | "pluginManager" | "settings.locale"'`，TS2344）：merge 是键域的**唯一**入口。
+ * '"common" | "pluginManager" | "settings.locale"'`，TS2344）：merge 是键的范围的**唯一**入口。
  * merge 之后键集由官方 `TranslateNS<NS>`（`index.d.ts:67`，`= Translate<LocaleKeysOf<N>>`，
  * :45/:59）表达，`t("拼错的键")` 在编译期红。
- * ⚠ 表键必须是字面量（interface 键位不接受计算属性），故下面的等式常量是本源，
+ * ⚠ 表的键必须是字面量（interface 的键不接受计算属性），所以下面那条等号常量是这里的唯一来源，
  * client-entry.ts 的 `NS` 按它的类型 `LocaleNs` 标注：两边哪天分叉，那行编译期就红。
  */
 declare module "@deepseek-ai/dsh-client-ui-slots" {
@@ -223,8 +223,8 @@ declare module "@deepseek-ai/dsh-client-ui-slots" {
 const LOCALE_NS_KEY = "ocr-review" as const;
 
 /**
- * 本源只以**类型**形态对外流通：`client-entry.ts` 的 `const NS: LocaleNs = "ocr-review"` 把条目
- * id 钉在本源上（分叉即编译期红），而产物漂移针仍要按字面量形状从 bundle 里抓 `NS`，所以那里
+ * 这个唯一来源只以**类型**形态对外流通：`client-entry.ts` 的 `const NS: LocaleNs = "ocr-review"` 把条目
+ * id 固定在这个来源上（两边不一致就会在编译期报错），而核对产物有没有漂移的那条断言仍要按字面量形状从 bundle 里抓 `NS`，所以那里
  * 保留字面量、只加类型标注——值导出不必存在（用例侧同理：要断言运行时那串就写字面量）。
  */
 export type LocaleNs = typeof LOCALE_NS_KEY;
@@ -232,9 +232,9 @@ export type LocaleNs = typeof LOCALE_NS_KEY;
 /**
  * 卡片取文案的函数形状：官方 `TranslateNS<N>`（installed `index.d.ts:67`，
  * `= Translate<LocaleKeysOf<N>>`，而 `Translate<K> = (key: K, params?) => string`，
- * `index.d.ts:45`）——键域就是上面 merge 的 `keyof UiMessages` **并上**官方 `common`
+ * dsh-client-locale 的 index.d.ts 里 Translate 的声明）——允许的键就是上面 merge 出来的 `keyof UiMessages` **并上**官方 `common`
  * 命名空间的共享词（官方 `LocaleKeysOf` 的并集：宿主查找链在本命名空间 miss 之后确实
- * 会去 consult common），函数面完全归官方。
+ * 会去 consult common），函数类型完全归官方。
  */
 export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;
 

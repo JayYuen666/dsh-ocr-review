@@ -8,7 +8,7 @@
 //     ctx.credentials），但 OCR 是**另一个进程树**里的外部 CLI：它只会按
 //     ~/.opencodereview/config.json 里的 api_key_cmd 起子进程取 key，够不到 cordis
 //     容器，也没有 dsh 的依赖注入。api_key_cmd 就是它唯一的动态 key 通道。
-//   - 用户决策「key 不落 OCR 配置」：落盘的是命令字符串，明文只在取用时出现一次。
+//   - 用户决策「key 不落 OCR 配置」：写到磁盘的是命令字符串，明文只在取用时出现一次。
 //     宿主侧写这条命令前已经用 credentials.resolve() 确认过 key 解析得到（host.ts
 //     createGateway），本脚本负责让 OCR 自己也能取到同一个值。
 //
@@ -19,9 +19,9 @@
 // 数据目录怎么找（刻意不写死 ~/.dsh）：显式第三参数 > $DSH_HOME > os.homedir()/.dsh
 //   —— 与宿主 util/home-paths 的 resolveDshHome 优先级一致（configured > env > 默认）。
 //   第三参数由 buildApiKeyCmd（lib/config-store.ts）在写 api_key_cmd 时带上：值是
-//   **宿主进程此刻** resolveDshHome() 的解析结果。必须显式钉住的原因：设置项
+//   **宿主进程此刻** resolveDshHome() 的解析结果。必须显式传进来的原因：设置项
 //   ocrConfigPath 会给 ocr 子进程注入 HOME（<X>/.opencodereview/config.json 布局），
-//   本脚本的 homedir() 兜底随之读 X/.dsh 就跑偏了；部署若以非 env 方式指定 dsh home，
+//   本脚本的 homedir() 兜底就跟着去读 X/.dsh，结果是错的；部署若用非 env 的方式指定 dsh home，
 //   env 档同样不可靠。
 //
 // 取值的层序必须与宿主**同源**：官方 credentials-local 的 LocalCredentialProvider
@@ -45,7 +45,7 @@
 //     绝不静默回退（保持硬失败语义）。
 //   - config.json 中的 api_key_cmd 属于可信输入（用户权限 0600）。
 //
-// 防注入：ref 名白名单校验 ^[A-Z0-9_]+$，绝不做 shell 拼接。
+// 防注入：ref 名要过白名单 ^[A-Z0-9_]+$，绝不做 shell 字符串拼接。
 //
 // 顶部 node reference：oxlint 类型检查对 .mjs 不自动加载 @types/node，需显式
 // 声明才能解析 node:fs/node:os/node:process/process（否则整文件按 error 类型
@@ -261,7 +261,7 @@ function fromCredentialsDoc(credPath, refName) {
  * 继承来的进程环境层：去首尾空白，空白按「这一层没有值」处理；含内嵌换行的值整层作废。
  *
  * 单行是 OCR 的 api_key_cmd 契约（多行 stdout = 硬错误，见文件头），托管文档层已按同一条
- * 判据丢弃——环境层不能是例外：把带内嵌换行的值原样吐出去，用户拿到的是隔了一层的
+ * 这条判断丢弃——环境层不能是例外：把带内嵌换行的值原样吐出去，用户拿到的是隔了一层的
  * 「resolve LLM endpoint」报错，而这一层本可以当没有值、继续往下回退。
  * @param {string | undefined} raw
  * @returns {string | undefined}
@@ -313,7 +313,7 @@ function scanQuoted(trimmed, quote) {
  * 带引号形态的取值：成对才剥；闭引号之后只允许空白或行内注释。单边引号、闭引号后跟
  * 多余字符都记 problem——硬砍首尾等于把凭据改短一位，拿一个错 key 去打上游（401），
  * 比报「未配置」难排查得多。剥引号后再 trim 并判空：`KEY=""` / `KEY="   "` 与另两层
- * （托管文档、进程环境）的口径一致——纯空白不是可用凭据，按「该行没有值」处理。
+ * （托管文档、进程环境）的处理一致——纯空白不算可用凭据，按「这一行没有值」处理。
  * @param {string} trimmed
  * @param {string} quote
  * @returns {{ value: string | undefined, problem: string | undefined }}
@@ -332,7 +332,7 @@ function quotedValueOf(trimmed, quote) {
 }
 
 /**
- * .env 一行里「=」右侧的取值：按首字符分派到未加引号 / 带引号两条解析路径（判据各自
+ * .env 这一行里「=」右侧的取值：按第一个字符分派到未加引号或带引号两条解析路径（判据各自
  * 见下）。只实现与官方 dotenv 相交且本脚本用得到的语义；拿不准的形态 fail-closed
  * （按该行未配置处理并记 problem），绝不猜一个值出去。
  * @param {string} raw
@@ -428,7 +428,7 @@ function main() {
     return;
   }
   // 成功回退也要说话：查过的层里有坏消息时，用户必须知道生效的 key 得自哪一层。
-  // problems 在收集时已按脱敏口径拼装（YAML 报错走 yamlErrorDetail，绝不带邻域
+  // problems 在收集时已经按脱敏的规则拼装（YAML 报错走 yamlErrorDetail，绝不带邻域
   // 原文），这里原样转述。只报实际来源，不推断「更低的一层」——坏消息可能来自
   // .env 自己的坏行，而值也正是同一层给的。
   if (problems.length > 0) {

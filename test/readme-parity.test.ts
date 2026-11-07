@@ -9,7 +9,7 @@ import { EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 
 const pkgDir = path.join(import.meta.dirname, "..");
 
-/** 本门禁要读的 manifest 面：宿主窗口与开发基线都从这两张表取真源。 */
+/** 这条门禁要读的 manifest 部分：宿主窗口和开发基线都从这两张表取值。 */
 interface ManifestShape {
   readonly engines?: Record<string, string>;
   readonly devDependencies?: Record<string, string>;
@@ -29,7 +29,7 @@ const NOTICES_FILE = "THIRD_PARTY_NOTICES.md";
 const MANIFEST_FILE = "package.json";
 const WORKSPACE_FILE = "pnpm-workspace.yaml";
 
-/** 两侧都必须出现的工具名（模型面的全部入口）。 */
+/** 两侧都必须出现的工具名（模型可见的全部入口）。 */
 const TOOL_NAMES = [
   "ocr_review",
   "ocr_scan",
@@ -52,9 +52,9 @@ const DEPLOYMENT_KEYS = [
 ] as const;
 
 /**
- * 两侧都必须逐条点名的读/写方法（对外契约面）。刻意数方法名而不是数总数：少写一行的症状
- * 是「读文档的人以为没有这个方法」，而总数断言在同侧既漏写又补上一句别处引用时正好相互抵消。
- * 带括号的写法是门槛的一部分：裸 `providers` 这种子串在别的句子里也会出现，数不出契约面。
+ * 两侧都必须逐条点名的读/写方法（对外声明的那组方法）。刻意数方法名而不是数总数：少写一行的症状
+ * 是「读文档的人以为没有这个方法」，而总数断言在同一份文档里既漏写又补上一句别处引用时正好相互抵消。
+ * 带括号的写法是这条门槛的要求：不带括号的 `providers` 这种子串在别的句子里也会出现，就数不出这条契约。
  */
 const REMOTE_METHODS = [
   "providers()",
@@ -108,7 +108,7 @@ describe("readme 双语结构", () => {
     expect(sectionIcons(en), "两侧章节图标序列不一致").toStrictEqual(sectionIcons(zh));
   });
 
-  it("全部工具名两侧都在（模型面契约不许单语失明）", async () => {
+  it("全部工具名两侧都在（模型可见契约不许单语失明）", async () => {
     const texts = {
       en: await readReadme("en"),
       zh: await readReadme("zh"),

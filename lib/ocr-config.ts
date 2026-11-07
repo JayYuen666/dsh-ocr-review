@@ -2,16 +2,16 @@
 // + credentials 服务的 key 状态）映射为外部 open-code-review CLI 的 config.json。
 //
 // 本文件只做**装配**：三条流程（卡片数据 providersForCard / 应用选择 applyProviderSelection /
-// 明文迁移 migratePlaintextKeys）与「设置项 ocrConfigPath → 落点」这一道解析。判据分家在三个
+// 明文迁移 migratePlaintextKeys）与「设置项 ocrConfigPath → 写到哪个文件」这一道解析。判据分布在三个
 // 模块：provider 形状投影 lib/provider-projection.ts、官方通道门面与降级状态
-// lib/provider-source.ts、外部 config.json 的落点与读写 lib/config-store.ts。
+// lib/provider-source.ts、外部 config.json 的文件位置与读写 lib/config-store.ts。
 // resolveOcrConfigPath 留在本文件：它是**设置项语义**（读配置值 → 决定默认路径 → 报错文案），
-// 而它调用的那条展开判据（expandHomeForSeparator）属落点判据，住在 lib/config-store.ts。
+// 而它调用的那条展开规则（expandHomeForSeparator）属于写到哪里这一类判断，定义在 lib/config-store.ts。
 //
 // 为什么不自己读宿主的配置文件与凭据文件（改走官方通道的理由）：
 //   - 它们的**位置与格式**都是宿主实现细节：$DSH_HOME 可被启动参数/环境变量改写，
 //     credentials 之上还压着进程环境与项目/用户 .env 三层回退。手解 YAML 等于把宿主的
-//     私有布局钉死在本包里——换 profile、换数据目录、换凭据后端都会静默失效。
+//     私有布局固定在本包里——换 profile、换数据目录、换凭据后端都会静默失效。
 //   - 官方通道：ctx.settings.describe() 给出各命名空间**解析后的最终值**
 //     （packages/settings/settings/src/index.ts:319 —— `value = projectForm(form,
 //     plainConfig(entry.fiber.config))`，整个 describe() 是 :302-340），provider 清单即
@@ -23,7 +23,7 @@
 //   - 本模块绝不在返回值里带出任何 key 值：卡片侧只问 describe(ref) 的 configured 布尔，
 //     应用侧 resolve(ref) 只用来确认「能解析出值」，值本身当场丢弃。
 //   - 写入 OCR config 用 api_key_cmd（scripts/get-cred.mjs 在 OCR 侧动态取 key），
-//     落盘的是命令字符串而非明文；同 provider 若此前手配过明文 api_key 一并清除（迁移）。
+//     写到磁盘的是命令字符串而非明文；同 provider 若此前手配过明文 api_key 一并清除（迁移）。
 //   - config.json 的目标权限 0600（OCR 官方对 config 文件的权限要求）由官方
 //     `writeFileAtomic({ mode: 0o600 })` 在**新 inode** 上携带，不再"写回后 chmod"
 //     （事后 chmod 等于给 rename 之后再开一个改写窗口；`writeFile` 的 mode 受 umask
@@ -31,7 +31,7 @@
 //     `copyFileSync` 复制出来的，官方件管不到它，权限仍由本地 chmod 收到 0600。
 //     写回走 temp+rename 原子替换并留 `.bak`，坏 JSON 输入直接抛错——绝不用
 //     「解析失败当空配置」的方式把用户已有 providers/keys/mcp_servers 写掉。
-//     整段「读→判→写」再套官方 `withFileLock`：落盘改异步之后，读与写之间会让出
+//     整段「读→判→写」再套官方 `withFileLock`：写到磁盘改异步之后，读与写之间会让出
 //     event loop，两个端点并发就各自拿旧快照重写**整份**文档。
 //
 // 同步 fs 只剩外部 ocr CLI 自己的 config.json 的读取与备份复制（那个文件宿主服务管不到，
@@ -46,7 +46,7 @@ import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 // resolveDshHome：宿主数据目录的官方定位（$DSH_HOME > ~/.dsh，或显式 configured）。
-// 写 api_key_cmd 时钉成 get-cred 的第一档显式参数——ocrConfigPath 重定向 HOME 后，
+// 写 api_key_cmd 时把宿主侧解析出的数据目录作为 get-cred 的第一个显式参数——ocrConfigPath 重定向 HOME 后，
 // get-cred 自己的 homedir() 兜底会跟着跑偏，只有宿主侧此刻的解析值是准的。
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { PI_AI_NAMESPACE, markKeyFlags, readProviders } from "./provider-source.ts";
@@ -84,7 +84,7 @@ const HOST_SCRUBBED_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN|^DSH_/iu;
  * key 在 **OCR 运行时**是否真的取得到（get-cred 三层里有没有一层够得到它）。
  *
  * 宿主侧 resolve() 的 source 是「dsh 进程自己的取值层」，不等于「OCR 子进程够得到的
- * 层」——少了这道判定就是「select 成功 → OCR 401」的假绿：
+ * 层」——少了这道判断就是"select 成功 → OCR 401"这种漏报：
  *   - `file`（$DSH_HOME/.credentials.yaml）→ get-cred 第 1 层，可达；
  *   - `user-env`（$DSH_HOME/.env）→ get-cred 第 3 层，可达；
  *   - `env`（dsh 进程继承的环境）→ 只有 ref 名**不**命中宿主净化模式时才可达
@@ -126,8 +126,8 @@ function layoutHomeOf(configPath: string): string | null {
 
 /**
  * OCR 配置文件路径：设置项 ocrConfigPath 覆盖，未覆盖时按 os.homedir() 派生。
- * 家目录展开交官方 `expandHomePath`，但本地保留两条它没有的判据（见
- * `expandHomeForSeparator` 与下面的绝对性闸门）：直写相对路径会把配置落到
+ * 家目录展开交给官方的 `expandHomePath`，但本地保留两条它没有的判断（见
+ * `expandHomeForSeparator` 与下面的绝对性检查）：直写相对路径会把配置落到
  * 「当时的工作区」，用户找不到也修不了。自定义值还必须是
  * `<X>/.opencodereview/config.json` 布局（见 layoutHomeOf）。
  */
@@ -153,7 +153,7 @@ export function resolveOcrConfigPath(
  * ocr 子进程的 HOME 重定向值：设置项命中 `<X>/.opencodereview/config.json` 布局时
  * 返回 X，否则 undefined（默认路径零重定向）。**绝不抛错**——布局/绝对性不合法时
  * 返回 undefined，让工具执行不受坏设置拖累（错误由 resolveOcrConfigPath 在端点侧
- * 报出，卡片显示原因，「工具与设置照常可用」的既有口径不变）。
+ * 报出来，卡片显示原因，"工具与设置照常可用"这个既有行为不变）。
  */
 export function ocrHomeOverride(configured: string | undefined): string | undefined {
   const trimmed = typeof configured === "string" ? configured.trim() : "";
@@ -245,7 +245,7 @@ export async function applyProviderSelection(
   // models 白名单也是逐字相等、回执与写盘都读这个名字。只判 trim 非空却继续用原值，
   // 会得到「模型带一个尾空格 → 先按带空格的名字报 modelNotInList」这类用户没法自救的
   // 错形状（空白 provider 则更早掉进 providerNotInList）。
-  // 上面那条判据已经覆盖「trim 后为空」，这里不再重复判一次：trim 过还是空的字符串在前面
+  // 上面那条判断已经覆盖「trim 后为空」，这里不再重复判一次：trim 过还是空的字符串在前面
   // 就被拒了，多写一个分支只会是一条永远不执行的死语句（本包覆盖率是四项 100%）。
   const provider = selection.provider.trim();
   const model = selection.model.trim();
@@ -267,7 +267,7 @@ export async function applyProviderSelection(
     throw new Error(format(messages.noApiKeyEnv, { provider }));
   }
   // resolve 只用于判定「key 在 OCR 运行时取不取得到」；值当场丢弃，绝不进配置/回执/日志。
-  // 两段式：先「未配置」（沿用既有 keyNotResolvable 文案），再「层不可达」（假绿闸，
+  // 分两段：先「未配置」（沿用既有的 keyNotResolvable 文案），再「层不可达」（防漏报的那道闸，
   // 见 keyReachableAtOcrRuntime）——把「select 成功 → OCR 401」拦在写盘前。
   const keySource = await gateway.credentialSource(target.apiKeyEnv);
   if (keySource === undefined) {
@@ -282,10 +282,10 @@ export async function applyProviderSelection(
   if (!existsSync(scriptPath)) {
     throw new Error(format(messages.credScriptMissing, { path: scriptPath }));
   }
-  // 宿主侧此刻解析出的数据目录钉成 get-cred 的第一档显式参数：HOME 重定向（或
-  // 部署以非 env 方式指定 dsh home）时，get-cred 自己的 homedir()/env 兜底都不可靠。
+  // 把宿主侧此刻解析出的数据目录作为 get-cred 的第一个显式参数：HOME 被重定向（或
+  // 部署用非 env 的方式指定 dsh home）时，get-cred 自己的 homedir()/env 兜底都不可靠。
   const apiKeyCmd = buildApiKeyCmd(scriptPath, target.apiKeyEnv, resolveDshHome(), messages);
-  // 读—渲染—写整段进官方 withFileLock：落盘改成异步之前，这三次动作同在一个
+  // 读—渲染—写整段进官方 withFileLock：写到磁盘改成异步之前，这三次动作同在一个
   // event-loop tick 里做完，等于免费拿到了"并发不互相覆盖整份文档"的性质；
   // 异步化后读与写之间出现了让出点，不加锁就可能把对方刚写好的 provider 选择
   // 用旧快照盖掉（最坏情况：明文 api_key 复活）。锁只圈文件 RMW，不圈上面那个
@@ -303,7 +303,7 @@ export async function applyProviderSelection(
         model,
         apiKeyCmd,
         // 空白不是「用户想清空语言」的合法值：renderSelectedConfig 只在非空白时落键
-        //（同一判据在 lib/config-store.ts，两边各写一遍会漂）。
+        //（同一条判断在 lib/config-store.ts，两边各写一遍会不一致）。
         ...(selection.language === undefined || selection.language.trim() === ""
           ? {}
           : { language: selection.language.trim() }),
@@ -354,7 +354,7 @@ function migrateEntry(
   if (envKey === undefined || envKey === "" || !context.reachableEnvKeys.has(envKey)) {
     return "unknown";
   }
-  // 投影层（lib/provider-projection.ts）已按 CREDENTIAL_ENV_KEY 收口：能走到这里的
+  // 投影层（lib/provider-projection.ts）已经按 CREDENTIAL_ENV_KEY统一处理过：能走到这里的
   // env 名一定构造得出命令，故不再包 try/catch 留一条测不到的分支。
   entry["api_key_cmd"] = buildApiKeyCmd(
     context.scriptPath,
@@ -397,14 +397,14 @@ export async function migratePlaintextKeys(
   if (source.status !== "ready" && source.status !== "credentials-unavailable") {
     throw new Error(source.message);
   }
-  // 前置闸门只为保持**抛错顺序**：坏 JSON 必须在 readProviders 之后、写盘之前抛
+  // 前面那次解析只为保持**抛错顺序**：坏 JSON 必须在 readProviders 之后、写盘之前抛
   // 「已中止写入以保护既有配置」，与既有断言一致。结果丢弃——锁内会对新快照重解一次。
   parseExistingConfig(precheck, paths.ocrConfigJson, messages);
   const scriptPath = credentialScriptPath(paths);
   if (!existsSync(scriptPath)) {
     // 脚本缺失却回空名单，端点会给 200 {ok:true, migrated:[]}，卡片据此渲染成
     // 「没有需要迁移的明文 key」——把「没做」报成「没有」，用户以为明文密钥已清掉，
-    // 实际还留在盘上。apply 侧同一情况是抛 credScriptMissing，两条路径口径必须一致。
+    // 实际还留在磁盘上。apply 那侧遇到同一情况是抛 credScriptMissing，两条路径的处理必须一致。
     throw new Error(format(messages.credScriptMissing, { path: scriptPath }));
   }
   // 与 applyProviderSelection 同源：宿主侧此刻解析出的数据目录显式进 api_key_cmd。
@@ -439,8 +439,8 @@ export async function migratePlaintextKeys(
   };
   const outcome = await updateConfigLocked(paths.ocrConfigJson, async () => {
     // 锁内不再判一次"空文件"：`parseExistingConfig`（lib/config-store.ts）对空白输入返回
-    // `{}`，于是下面的 `custom_providers` 形状闸门自然走成同一条"无可迁移对象"的早返回，
-    // 多写一次判据只会留下一条永远测不到的分支。
+    // `{}`，于是下面的 `custom_providers` 形状检查自然走成同一条"无可迁移对象"的早返回，
+    // 多写一次判断只会留下一条永远测不到的分支。
     const doc = parseExistingConfig(
       readExistingText(paths.ocrConfigJson, messages),
       paths.ocrConfigJson,
@@ -467,7 +467,7 @@ export async function migratePlaintextKeys(
     if (migrated.length === 0) {
       return { migrated, skippedUnknown };
     }
-    // 渲染形态只有一处真源（lib/config-store.ts 的 renderConfigDoc）：本文件其余
+    // 渲染形态只有一处唯一来源（lib/config-store.ts 的 renderConfigDoc）：本文件其余
     // 写回点已经用它，这里再手写一份缩进/结尾换行就等于留一条会漂的第二实现。
     await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc));
     return { migrated, skippedUnknown };
@@ -523,7 +523,7 @@ export async function ensureKeyScriptPointer(
     return { repointed: [], checked: true };
   }
   try {
-    // 判据整体放进锁内，不在锁外先判一遍「要不要改」：锁外的结论基于一份**随时可能过期**
+    // 判断整段放进锁内，不在锁外先判一遍「要不要改」：锁外的结论基于一份**随时可能过期**
     // 的快照，据此决定跳过锁内重读，只在「别的进程恰好在两次读之间修好了」时才与锁内
     // 结论一致——为了省一次锁而多留一个必须靠并发才能触发的分支，不值。锁是一次 mkdir +
     // 一次 wx 建锁，相对一次分钟级评审可忽略。

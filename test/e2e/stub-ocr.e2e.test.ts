@@ -100,7 +100,7 @@ describe("stub ocr 真进程全链", () => {
     }
   });
 
-  it("构造的命令经真执行器 spawn：stub 收到完整 argv、产物落盘、解析链到 schema 校验全通过", async () => {
+  it("构造的命令经真执行器 spawn：stub 收到完整 argv、产物写到磁盘、解析链到 schema 校验全通过", async () => {
     const current = rig;
     assert.ok(current !== undefined);
     const { ctx, project, argsLog, output } = current;

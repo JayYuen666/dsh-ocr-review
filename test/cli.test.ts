@@ -1,4 +1,4 @@
-// cli 纯函数测试：命令构造、转义、scope 互斥、注入防线（白名单 + 转义骨架）。
+// cli 的纯函数测试：命令构造、转义、scope 互斥、防注入（白名单 + 转义的骨架）。
 //
 // 拒绝理由已随 host 语言走（messages 是 lib/cli.ts 每个函数的最后一个入参）。
 // 本文件主体走「host 注入中文那份」的等价路径（断言里的中文串与 i18n 迁移前完全
@@ -57,7 +57,7 @@ const runsOnWindows = process.platform === "win32";
 /** brew 那条装法命令的原文（多处断言共用）。 */
 const BREW_INSTALL = "brew install open-code-review";
 
-/** 随包兜底那一份的入口是否「在盘上」的可切换替身：lib/cli.ts 的定位口经 existsSync 判入口，
+/** 随包那一份的入口是否在磁盘上，这个开关可以切换：lib/cli.ts 定位入口时经 existsSync 判断，
  *  缺了它就只有「在盘上」这一档分支——而那取决于这台机器的依赖树里有没有那枚包。 */
 const fsStub = vi.hoisted(() => ({ exists: true }));
 
@@ -66,16 +66,16 @@ vi.mock("node:fs", async (importOriginal) => {
   const patched = {
     ...actual,
     existsSync: (target: string): boolean =>
-      // 收窄到随包入口的确切形状（…/bin/ocr.js）：裸后缀匹配会把 myocr.js 之类的
+      // 收窄到随包入口的确切形状（…/bin/ocr.js）：只按后缀匹配会把 myocr.js 之类的
       // 无关路径也拐进桩里。
       target.endsWith(path.join("bin", "ocr.js")) ? fsStub.exists : actual.existsSync(target),
   };
   return { ...patched, default: patched };
 });
 
-/** 解析出的命令词：随包入口的绝对路径，或 PATH 上的裸 `ocr`。测试与生产同源。 */
+/** 解析出的命令词：随包入口的绝对路径，或不带路径的 `ocr`。测试与生产同源。 */
 const OCR = ocrCommand();
-/** 命令词在骨架里占一个 ⟦Q⟧ 当且仅当它解析成了绝对路径（未安装时是裸名 `ocr`）。 */
+/** 命令词在骨架里占一个 ⟦Q⟧ 当且仅当它解析成了绝对路径（未安装时只有 `ocr` 这个名字本身）。 */
 const OCR_QUOTED = OCR.startsWith("'") ? 1 : 0;
 /** 可控槽位数（决定命令里应有几段 shq 引号）：命令词另占一段。 */
 const REVIEW_SLOTS = 7;
@@ -138,7 +138,7 @@ function unwrapReaper(wrapped: string): string {
   return shqUnwrap(wrapped.slice(prefix.length));
 }
 
-/* ── 临时目录夹具（可用性判据与装法判据都只问文件系统）───────────────────── */
+/* ── 临时目录的夹具（可用性和安装方式都只问文件系统）─────────────────── */
 
 const tempDirs: string[] = [];
 
@@ -167,7 +167,7 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-/** 给 PATH 用的相对形态；空串按 `.`（不会出现在 mkdtemp 的结果里，仍显式收口）。 */
+/** 给 PATH 用的相对写法；空串按 `.` 处理（mkdtemp 的结果里不会出现，这里仍显式统一处理）。 */
 function pathEntry(dir: string): string {
   const rel = path.relative(process.cwd(), dir);
   return rel === "" ? "." : rel;
@@ -183,7 +183,7 @@ function makeBinDir(names: string[]): string {
 }
 
 /** 按 `/` 分隔的相对段落建一棵目录树，末端是普通文件；返回该文件的绝对路径。
- *  装法判据读的是路径里的 `node_modules` / `Cellar` 这些段落，只能靠真目录树构造。 */
+ *  安装方式的判断读的是路径里 `node_modules`、`Cellar` 这些段落，只能用真实的目录树构造。 */
 function makeNestedFile(segments: string[]): string {
   const dir = makeTempDir("ocr-chan-");
   const target = path.join(dir, ...segments);
@@ -210,7 +210,7 @@ describe("commaList 的边界闸", () => {
 
   it("字符串形式里花括号内含逗号 ⇒ 同样拒绝（split 会撕出无效模式）", () => {
     // "src/**/*.{ts,tsx}" 按 split(",") 拆成 "src/**/*.{ts" 与 "tsx}" 两个无效模式，
-    // 过滤条件失效而表面照常成功——与数组分支的拒绝口径一致。
+    // 过滤条件失效但表面上照样成功——和数组那条分支的拒绝方式一致。
     expect(() => listOf("src/**/*.{ts,tsx}", "exclude", 50)).toThrow(/花括号内含逗号/u);
     expect(() => listOf("a{b,c},d", "exclude", 50)).toThrow(/花括号内含逗号/u);
     // 花括号外逗号照常拆；成对花括号内没有逗号不受影响。
@@ -246,7 +246,7 @@ describe("shq", () => {
   });
 
   it("含 NUL 字节直接拒绝：POSIX 命令串无法表示它，放行会静默截断 argv", () => {
-    // 此前这条不变量靠各调用点先做 NUL 检查维持；下沉到 shq 自身后，
+    // 此前这条不变量靠各调用点先做 NUL 检查维持；放进 shq 自身后，
     // 「转义后的串一定能被 shell 完整读回」由实现保证，而不是靠调用顺序。
     expect(() => shq("a\u0000b")).toThrow(/NUL/u);
   });
@@ -295,18 +295,18 @@ describe("assertAbsoluteRoot / resolveRoot", () => {
     }
   });
 
-  it("交出前归一成唯一形态：尾随斜杠、重复分隔符与点段折叠", () => {
+  it("交出前归一成唯一形态：尾随斜杠、重复分隔符与点段化简", () => {
     // 同一目录的几种写法收成一种——会话目录等按路径派生的键不再随写法分叉。
     expect(rootOf("/repo/")).toBe("/repo");
     expect(rootOf("/repo//sub/")).toBe("/repo/sub");
     expect(rootOf("/repo/./a")).toBe("/repo/a");
-    // 「..」段按 posix.normalize 的词法折叠落到实际目标（"/repo/../.." 即根），
+    // 「..」段按 posix.normalize 的词法化简落到实际目标（"/repo/../.." 即根），
     // 不存在解析后仍含「..」的形态。
     expect(rootOf("/repo/../other")).toBe("/other");
   });
 
   it("归一后落在文件系统根一律拒绝：根下任何文件都会被当成仓内文件（--rule 越界读）", () => {
-    // 判据不是「能不能归一」，而是**归一结果不能是根**：resolveRepoFile 的边界判据是
+    // 要判断的不是「能不能归一」，而是**归一的结果不能是根**：resolveRepoFile 的边界条件是
     // path.relative(rootReal, real) 不以 .. 开头，根为 / 时它对 /etc/passwd 给出
     // etc/passwd、恒成立，于是 --rule /etc/passwd 会被当成仓内文件读进 OCR 并送给 LLM。
     expect(() => rootOf("/repo/../..")).toThrow(/不能是文件系统根/u);
@@ -355,14 +355,14 @@ describe("clampEffort / commaList", () => {
 const REVIEW_CMD = "ocr review --audience agent";
 
 describe("命令词的合法形态", () => {
-  it("要么是 shq 转义的绝对路径，要么是未安装时刻意的裸 `ocr`", () => {
+  it("要么是 shq 转义的绝对路径，要么是未安装时刻意留下的不带路径的 `ocr`", () => {
     const legal = OCR === "ocr" || /^'\/.*'$/u.test(OCR);
     expect(legal, `命令词形态不认识：${OCR}`).toBe(true);
   });
 });
 
-describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判据）", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+describe("ocrCommand：命令词的解析（与 resolveOcrAvailability 用同一份判断）", () => {
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   beforeEach(() => {
     pinPlatform("linux");
@@ -382,7 +382,7 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
     );
   });
 
-  it("PATH 没有候选才取随包 launcher；两处都没有 ⇒ 裸 ocr", () => {
+  it("PATH 没有候选才取随包 launcher；两处都没有 ⇒ 不带路径的 ocr", () => {
     const launcher = makeBinDir(["ocr.js"]);
     const empty = makeEmptyDir();
     const memo = {};
@@ -393,7 +393,7 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
     expect(ocrCommand(() => null, bare, { PATH: pathEntry(empty) })).toBe("ocr");
   });
 
-  it("解析结果每进程记忆一次：第二次即便判据给出别的答案也不重解析", () => {
+  it("解析结果每个进程记一次：第二次即便判断给出别的答案也不重新解析", () => {
     const bin = makeBinDir(["ocr"]);
     const other = makeBinDir(["ocr"]);
     const memo = {};
@@ -409,7 +409,7 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
     expect(ocrCommand(undefined, {}, undefined)).toMatch(/^(?:'.*'|ocr)$/u);
   });
 
-  it("win32 恒走裸 ocr：绝对路径带反斜杠与空格在 cmd 里不可靠，随包 launcher 又是 shebang 脚本", () => {
+  it("win32 恒用不带路径的 ocr：绝对路径带反斜杠与空格在 cmd 里不可靠，随包 launcher 又是 shebang 脚本", () => {
     // 与 resolveOcrAvailability 的 win32 分支同一口径；README 的平台承诺（Windows 跑裸命令）
     // 由此兑现。platform 换成 stub，记忆槽用局部盒。
     const real = Object.getOwnPropertyDescriptor(process, "platform");
@@ -455,7 +455,7 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
   });
 
   it("生产那一档：本包不再随包分发 CLI，默认定位口恒给 null", () => {
-    // 与 test/publish-manifest.test.ts 那条「没有 optionalDependencies」的门禁同一条事实，
+    // 和 test/publish-manifest.test.ts 里那条「没有 optionalDependencies」的门禁说的是同一件事，
     // 从代码侧再钉一次：这里若哪天不再是 null，就说明随包那份又回来了、PATH 上的用户自装
     // 那份又要被它遮蔽。
     expect(locateLauncher()).toBeNull();
@@ -463,7 +463,7 @@ describe("ocrCommand：命令词解析（与 resolveOcrAvailability 同一份判
 });
 
 describe("wrapWithHostReaper", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   beforeEach(() => {
     pinPlatform("linux");
@@ -487,8 +487,8 @@ describe("wrapWithHostReaper", () => {
     expect(inner).toContain('wait "$ocr"; exit $?');
   });
 
-  it("ps 不可用时监视判据短路：不再每轮 fork ps，且 ppid 比对有显式旁路", () => {
-    // 回归钉的是两件事：HAVEPS=0 分支真的存在（否则恒真判据会冒充看护在位），
+  it("ps 不可用时监视的条件短路：不再每轮 fork ps，而且 ppid 的比对有显式的旁路", () => {
+    // 这条回归断言固定两件事：HAVEPS=0 那条分支真的存在（否则一个永远成立的条件会冒充看护在位），
     // 以及 ps 在该分支下不被调用（否则围栏里每 2 秒刷一次 EPERM）。
     const inner = unwrapReaper(wrapWithHostReaper(REVIEW_CMD, zh));
     expect(inner).toContain(`[ "$HAVEPS" = 0 ] ||`);
@@ -520,7 +520,7 @@ describe("wrapWithHostReaper", () => {
 
   it("ps 与 pgrep 都探测；任一不可用就整条不挂守护（残缺 reap 只会杀中间 bash 壳）", () => {
     const inner = unwrapReaper(wrapWithHostReaper(REVIEW_CMD, zh));
-    // ps 探测：恒真的 ppid 比对会把「硬退出看护没生效」伪装成在位
+    // ps 的探测：永远成立的 ppid 比对会把「硬退出的看护没生效」伪装成在位
     expect(inner).toContain("HAVEPS");
     // pgrep 探测：它只出现在后代快照 desc() 里，漏探时 cs 恒空 ⇒ 真 ocr 进程全部泄漏。
     // 退出码 1 是「没有匹配」（PID 1 在单进程命名空间里没有子进程），不是不可用。
@@ -705,7 +705,7 @@ describe("buildSessionCommand", () => {
 
   it("limit 显式给出必须是 1-100 整数：0/101/浮点/布尔/非数字串抛错（0 不再静默钳成 1）", () => {
     expect(sessionCmd({ repo: "/r", limit: 50 }).command).toContain("--limit 50");
-    // 数字字符串与 pushIntFlag 同口径：接受。
+    // 数字字符串和 pushIntFlag 一样：接受。
     expect(sessionCmd({ repo: "/r", limit: "25" }).command).toContain("--limit 25");
     for (const bad of [0, 101, 1.5, true, "abc"]) {
       expect(() => sessionCmd({ repo: "/r", limit: bad })).toThrow(/1-100/u);
@@ -720,7 +720,7 @@ describe("buildSessionCommand", () => {
 });
 
 describe("withHomeEnv / buildLlmTestCommand", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   beforeEach(() => {
     pinPlatform("linux");
@@ -736,7 +736,7 @@ describe("withHomeEnv / buildLlmTestCommand", () => {
     expect(withHomeEnv(`${OCR} review`, "/da ta; x")).toBe(`HOME='/da ta; x' ${OCR} review`);
   });
 
-  it("llm test 与五个工具同一命令词解析源（随包装法下 PATH 上没有裸 ocr）", () => {
+  it("llm test 与五个工具同一命令词解析源（随包装法下 PATH 上解析不到 ocr）", () => {
     // OCR 常量就是 ocrCommand() 的记忆值：两条必须同源，否则 autoVerify/测试连接
     // 在「只随包装了 npm 包」的机器上永远 exit 127。
     expect(buildLlmTestCommand()).toBe(`${OCR} llm test --color never`);
@@ -766,7 +766,7 @@ describe("version 探测：命令词与版本解析", () => {
     expect(parseOcrVersion("open-code-review dev linux/amd64")).toBeNull();
     expect(parseOcrVersion("")).toBeNull();
     // launcher 的升级提示里也带一个版本号，但那是**可用的新版本**、不是本机装的这份；
-    // 判据锚在产品名上，所以这里必须是 null，而不是把建议读成现状。
+    // 判断锚在产品名上，所以这里必须是 null，不能把建议读成现状。
     expect(
       parseOcrVersion(
         "[ocr] A new version (v1.14.0) is available. Run to update:\n" +
@@ -859,8 +859,8 @@ const PAYLOADS = [
 /** 除 ⟦Q⟧ 占位与固定字面量外，骨架里不允许出现任何 shell 元字符。 */
 const METACHARS = /[;&|`$<>*\n\\"'{}[\]()!#~%]/u;
 
-describe("注入防线：所有插值槽位都必须经 shq 或白名单", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+describe("防注入：所有插值的槽位都必须经 shq 或白名单", () => {
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   beforeEach(() => {
     pinPlatform("linux");
@@ -869,7 +869,7 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
     restorePlatform();
   });
 
-  it("format 白名单：非枚举值（含注入 PoC）回落 json，绝不进命令串", () => {
+  it("format 的白名单：非枚举值（含注入的 PoC）退回 json，绝不进命令串", () => {
     expect(resolveOutputFormat("json")).toBe("json");
     expect(resolveOutputFormat("text")).toBe("text");
     expect(resolveOutputFormat("sarif")).toBe("sarif");
@@ -888,9 +888,9 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
     expect(resolveOutputFormat(42)).toBe("json");
   });
 
-  it("白名单放行的 text/sarif 在执行层被拒：本包只解 JSON，交下去只会把契约问题说成 OCR 的错", () => {
-    // 三层口径不同是刻意的：resolveOutputFormat 管**注入面**（只放行枚举值，挡住拼接），
-    // 而 buildReviewCommand/buildScanCommand 管**下游能力**（解析层只解 JSON）。白名单里
+  it("白名单放行的 text 和 sarif 在执行那一层被拒：本包只解析 JSON，交下去只会把自身契约没做到的事说成 OCR 的错", () => {
+    // 三层的分工不同是刻意的：resolveOutputFormat 管**注入**（只放行枚举值，挡住字符串拼接），
+    // 而 buildReviewCommand 和 buildScanCommand 管**下游能做什么**（解析层只解析 JSON）。白名单里
     // 留着 text/sarif 是为了让"传了非法值"与"传了本包不支持的合法值"给出不同的错，
     // 这一条钉的正是后面那句。
     for (const format of ["text", "sarif"] as const) {
@@ -923,7 +923,7 @@ describe("注入防线：所有插值槽位都必须经 shq 或白名单", () =>
       expect(stripped).not.toMatch(METACHARS);
       // 载荷必须整段落在引号里：⟦Q⟧ 个数 = 可控槽位数（commit/background/
       // exclude/provider/model/resume/output）+ 命令词本身。命令词只在解析到绝对路径时
-      // 是 shq 转义的（未安装 ocr 的机器上是刻意保留的裸名 `ocr`），所以按现量加。
+      // 是 shq 转义的（未安装 ocr 的机器上是刻意保留的光一个名字 `ocr`），所以按当场实测加。
       expect(stripped.split("⟦Q⟧").length - 1).toBe(REVIEW_SLOTS + OCR_QUOTED);
     }
   });
@@ -1018,11 +1018,11 @@ describe("错类型参数：静默回落会扩大审查范围，一律抛错", (
     expect(() => listOf(42, "exclude", 5)).toThrow(/必须是字符串或字符串数组/u);
     expect(() => listOf(["a\u0000b"], "path", 5)).toThrow(/NUL/u);
     expect(listOf("a,b", "path", 5)).toStrictEqual(["a", "b"]);
-    // 超限整条拒绝：命令不构造、一条都不审，文案把「没有开始」说出口。
+    // 超过上限就整条拒绝：不构造命令、一条都不审，文案明说「没有开始」。
     expect(() => listOf(["a", "b"], "path", 1)).toThrow(/超过 1 条上限（多出 1 条）/u);
   });
 
-  it("session action 白名单、id 类型严格", () => {
+  it("session 的 action 走白名单、id 的类型严格", () => {
     expect(() => sessionCmd({ repo: "/r", action: "rm -rf /" })).toThrow(/action 非法/u);
     expect(() => sessionCmd({ repo: "/r", id: 9 })).toThrow(/id 必须是字符串/u);
     // action=list 与 id 同给不再静默改写成 show（自相矛盾的入参一律抛错）。
@@ -1045,7 +1045,7 @@ describe("scope 组合：branch 先判，commit 非空不再静默吞掉 branch"
       reviewCmd({ repo: "/r", scope: "branch", commit: "c", from: "a", to: "b" }, "/o"),
     ).toThrow(/与 commit 互斥/u);
     expect(() => reviewCmd({ repo: "/r", scope: "nope" }, "/o")).toThrow(/未知 scope/u);
-    // 白名单必须排在「按 from/to 反推模式」之前：否则 scope=nope 配上一组合法的
+    // 白名单那条必须排在「按 from/to 反推模式」之前：否则 scope=nope 配上一组合法的
     // from/to 会被当成 branch 静默放行，那条 unknownScope 永不可达。
     expect(() => reviewCmd({ repo: "/r", scope: "nope", from: "a", to: "b" }, "/o")).toThrow(
       /未知 scope：nope/u,
@@ -1073,7 +1073,7 @@ describe("scope 组合：branch 先判，commit 非空不再静默吞掉 branch"
   });
 });
 
-describe("session：action 白名单下的优雅降级", () => {
+describe("session：action 不在白名单时怎么降级", () => {
   it("action=show/comments 缺 id ⇒ 回落 list，绝不构造空 id 的 show", () => {
     expect(sessionCmd({ repo: "/r", action: "show" }).command).toContain(SESSION_LIST_CMD);
     expect(sessionCmd({ repo: "/r", action: "comments" }).command).toContain(SESSION_LIST_CMD);
@@ -1100,7 +1100,7 @@ describe("拒绝理由双语（注入 en 那份）", () => {
     );
   });
 
-  it("类型闸 / 数值闸 / scope 与 action 白名单：整批拒绝都随语言切换", () => {
+  it("类型把关 / 数值把关 / scope 与 action 的白名单：整批拒绝的文案都跟着语言切换", () => {
     expect(() => reviewCmd({ repo: "/r", commit: 12_345 }, "/o", en)).toThrow(
       "commit must be a string (got 12345)",
     );
@@ -1161,11 +1161,11 @@ describe("拒绝理由双语（注入 en 那份）", () => {
   });
 });
 
-/* ── 只问文件系统、不 spawn 的可用性判据 ─────────────────────────────────── */
+/* ── 只问文件系统、不 spawn 的可用性判断 ─────────────────────────────────── */
 
-describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁装的", () => {
+describe("只问文件系统、不 spawn 的判断：装没装、哪一份、谁装的", () => {
   describe("resolveOcrAvailability：来源三档与它的假命中防线", () => {
-    // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+    // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
     // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
     beforeEach(() => {
       pinPlatform("linux");
@@ -1188,7 +1188,7 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
       });
     });
 
-    it("PATH 没有候选、随包入口在盘 ⇒ bundled（那一档只剩兜底的意义）", () => {
+    it("PATH 上没有候选、随包入口在磁盘上 ⇒ bundled（这一档只剩兜底的意义）", () => {
       const empty = makeEmptyDir();
       const launcher = path.join(makeBinDir(["ocr.js"]), "ocr.js");
       expect(
@@ -1247,9 +1247,9 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
     });
 
     it("win32 即便定位口给得出入口也只走 PATH，并按 PATHEXT 命中", () => {
-      // 与 ocrCommand() 的 win32 跳过同一口径：两处不一致时，状态说「随包可用」而命令
-      // 却走另一条路，用户按状态做的决定就落在空处。后缀按字面比，大小写折叠是 Windows
-      // 文件系统的事，在 POSIX 上照做就错了，本判据不替平台改写语义。
+      // 和 ocrCommand() 在 win32 上的跳过是同一种处理：两处不一致时，状态说「随包可用」而命令
+      // 却走另一条路，用户按状态做的决定就落在空处。后缀按字面比，大小写不敏感是 Windows
+      // 文件系统的事，在 POSIX 上照着做就错了，这一条不替平台改写含义。
       const bin = makeBinDir(["ocr.cmd"]);
       const launcher = makeBinDir(["ocr.js"]);
       expect(
@@ -1261,7 +1261,7 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
       ).toStrictEqual({ source: "path", path: path.join(bin, "ocr.cmd"), channel: "unknown" });
     });
 
-    it("win32 的 PATHEXT 缺席时认裸名；Path 这种环境变量名也读", () => {
+    it("win32 的 PATHEXT 缺席时认不带可执行后缀的名字；Path 这种环境变量名也读", () => {
       const bin = makeBinDir(["ocr"]);
       expect(resolveOcrAvailability({ Path: bin }, () => null, "win32")).toStrictEqual({
         source: "path",
@@ -1296,7 +1296,7 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
     });
 
     it("brew 前缀下的 npm 全局包判 npm：node_modules 先判，否则 homebrew 那段把它抢成 brew", () => {
-      // 这条是两条判据的**顺序**测试，不是内容测试：用 brew 装的 node 跑 `npm i -g` 时，
+      // 这条测的是两个判断的**先后**，不是它们的内容：用 brew 装的 node 跑 `npm i -g` 时，
       // 路径同时含 homebrew 与 node_modules。判反了，用户拿到的就是一条动他包管理器的命令。
       expect(
         inferOcrInstallChannel(
@@ -1326,7 +1326,7 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
     });
 
     it("路径已经不在盘上 ⇒ 退回字面值判，不抛", () => {
-      // 解不开符号链接这一档在真实机器上是「候选刚被移走」：判据退化成按字面路径读，
+      // 解不开符号链接这一档在真实机器上是「候选刚被移走」：这时退化成按字面路径读，
       // 结果仍指向正确的装法，而不是因为一次 ENOENT 就没有来源。
       expect(inferOcrInstallChannel("/opt/homebrew/Cellar/open-code-review/9.9.9/bin/ocr")).toBe(
         "brew",
@@ -1354,7 +1354,7 @@ describe("只问文件系统、不 spawn 的判据：装没装、哪一份、谁
 });
 
 describe("1.13.3 新增参数：preview / noFilter / scan 开关 / max-git-procs / 路径守卫", () => {
-  // POSIX 臂判据：钉住平台再判（纪律同 dsh-danger-guard 的平台桩）——Windows CI 上
+  // POSIX 分支的判断：先钉住平台再判（做法同 dsh-danger-guard 的平台测试替身）——Windows CI 上
   // 这些用例会跑进 win32 轨道、以假理由红；win32 轨道由各 win32 桩用例自证。
   const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   beforeEach(() => {
@@ -1398,12 +1398,12 @@ describe("1.13.3 新增参数：preview / noFilter / scan 开关 / max-git-procs
 
   it("preview 转发 --max-tokens：预览的 will_review 集合同样受每文件 prompt 上限影响", () => {
     // OCR 的 agent.Preview 用模板 MaxTokens 把超限文件标成不审（scan 的 selectScanItems
-    // 同口径）；不转发会让预览与同参数实跑给出两份不同的清单。
+    // 同一种处理）；不转发会让预览和同参数的实际运行给出两份不同的清单。
     const review = reviewCmd({ repo: root, preview: true, maxTokens: 3000 }, "/o").command;
     expect(review).toContain("--max-tokens 3000");
     const scan = scanCmd({ repo: root, preview: true, maxTokens: 5000 }, "/o").command;
     expect(scan).toContain("--max-tokens 5000");
-    // 错类型仍按数值槽位同一口径抛错，不能因为 preview 就静默吞掉。
+    // 类型不对仍然按数值槽位那条规则抛错，不能因为是 preview 就默默吞掉。
     expect(() => reviewCmd({ repo: root, preview: true, maxTokens: "abc" }, "/o")).toThrow(
       /--max-tokens 需要为 ≥0 的整数/u,
     );

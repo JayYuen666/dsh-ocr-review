@@ -2,20 +2,20 @@
 //
 // 为什么从 lib/ocr-config.ts 拆出来：这一层只认得「settings 那条值长什么样」，不认得
 // ctx.settings 也不认得 credentials 通道（门面与降级状态在 lib/provider-source.ts），更不认得
-// 外部 ocr CLI 的 config.json（在 lib/config-store.ts）。读侧的宽容判据（形状不合的条目整条
+// 外部 ocr CLI 的 config.json（在 lib/config-store.ts）。读取时宽容的判据（形状不合的条目整条
 // 丢弃，卡片要能打开让用户去修）与「通道在不在」是两件事。分层依据就是
 // 上面那条：**本层不认 ctx、不认 credentials、不认 config.json**，只做纯形状投影。
 //
-// 安全口径与 lib/ocr-config.ts 一致：投影只搬形状，`apiKeyEnv` 是凭据 ref 名而不是 key 值，
+// 安全规则和 lib/ocr-config.ts 一致：投影只搬形状，`apiKeyEnv` 是凭据 ref 的名字而不是 key 的值，
 // 本模块不读任何凭据，返回值里也不会出现 key。
 
 import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 
-/** llm-pi-ai 命名空间里 provider 表的字段名。导出给 lib/provider-source.ts：读口判
- *  「命名空间里有 providers 表吗」与投影取同一张表，两处各写一份字面量迟早漂。 */
+/** llm-pi-ai 命名空间里 provider 表的字段名。导出给 lib/provider-source.ts：读取时判断
+ *  「命名空间里有 providers 表吗」用的是同一张表，两处各写一份字面量迟早会不一致。 */
 export const PROVIDERS_FIELD = "providers";
 
-/** provider 的 baseURL 里出现空白或控制字符：URL 解析器会把换行/制表符直接吃掉、
+/** provider 的 baseURL 里出现空白或控制字符：URL 解析器会直接忽略换行/制表符、
  *  把空格编码进路径，畸形串因此可能变形后通过，故先按原文拒绝。 */
 const RAW_SPACE_OR_CONTROL = /[\p{Cc} ]/u;
 
@@ -30,7 +30,7 @@ export interface DshModel {
   name: string;
 }
 
-/** settings 的 llm-pi-ai.value.providers 里一条 provider 投影出的本包所需面。 */
+/** settings 的 llm-pi-ai.value.providers 里一条 provider 投影出的本包需要的字段。 */
 export interface DshProvider {
   name: string;
   displayName: string;
@@ -59,10 +59,10 @@ export interface DshProvider {
  */
 /** Map 而非对象字面量：查表键来自用户可写的 settings 值，对象会继承 Object.prototype，
  *  于是 api="constructor" 取到 Object 这个构造函数、"__proto__" 取到 Object.prototype，
- *  `?? api` 的原样透传兜底失效——protocol 被写成函数/对象，直接违反 `DshProvider.protocol
+ *  `?? api` 那条原样透传的兜底就失效了——protocol 被写成函数或对象，直接违反 `DshProvider.protocol
  *  的 string 声明，还会让 apply 侧的白名单错误文案里出现 "function toString() { [native
  *  code] }"。Map.get 不查原型链，这两类键安全 miss 并落回「原样透传」这条正路。
- *  provider 名那一侧的同款防护见文件下方的 UNUSABLE_PROVIDER_NAMES。 */
+ *  对 provider 名的同款防护见文件下方的 UNUSABLE_PROVIDER_NAMES。 */
 const OCR_PROTOCOL_BY_API: ReadonlyMap<string, string> = new Map([
   ["openai-completions", "openai"],
   ["openai-responses", "openai-responses"],
@@ -71,14 +71,14 @@ const OCR_PROTOCOL_BY_API: ReadonlyMap<string, string> = new Map([
 
 /** 不能落进 config.json `custom_providers.<name>` 的 provider 名：`__proto__` 在普通对象
  *  上是 setter（赋值被静默忽略、写入凭空丢失），`constructor` / `prototype` 是继承属性
- *  名，与写侧的普通对象赋值组合都不是普通自有键。空名/全空白名单独由 trim 判据拦。 */
+ *  名，和写入侧的普通对象赋值组合起来都不是普通的自有键。空名字和全空白由 trim 那一条单独拦住。 */
 const UNUSABLE_PROVIDER_NAMES: ReadonlySet<string> = new Set([
   "__proto__",
   "constructor",
   "prototype",
 ]);
 
-/** 1.13.3 的 `validateProviderName` 口径：点号分段不能为空或全空白。 */
+/** 1.13.3 的 `validateProviderName` 的规则：按点号分出来的段不能为空或全空白。 */
 function isUsableProviderName(name: string): boolean {
   if (UNUSABLE_PROVIDER_NAMES.has(name)) {
     return false;
@@ -93,9 +93,9 @@ const API_UNREADABLE = "[unreadable]";
  * settings 里的 `api` 字段 → 协议查表用的键；「未声明」以 null 表达。
  *
  * 四种形态必须分开，否则畸形声明会被静默降级成「能用的」配置：
- *   - 未声明（undefined / null）⇒ null，交给 llm-pi-ai 的 openai-completions 兜底语义；
+ *   - 没有声明（undefined / null）⇒ null，交给 llm-pi-ai 的 openai-completions 默认行为；
  *   - 字符串 ⇒ trim 后原样，**含空串**（表外值原样透传，由写侧白名单拒绝——显式
- *     `api: ""` 在上游同样不走 `??` 默认，兜底它等于把畸形声明改写成可用配置）；
+ *     `api: ""` 在上游同样不会走 `??` 的默认值，替它补默认值等于把畸形的声明改写成可用配置）；
  *   - 数字 / 布尔 ⇒ String()，同样落进「表外值」这条正路；
  *   - 对象 / 数组 ⇒ 固定标记。用 String(raw) 会走 Object.prototype.toString 得到
  *     "[object Object]"，那既无信息量又看着像协议名；显式标记更能说明「这里读不出来」。
@@ -159,19 +159,19 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
     return null;
   }
   const entry = raw;
-  // 凭据 ref 名按写侧同一白名单收口：非法形态置 null，provider 仍保留供用户在 settings
+  // 凭据 ref 名按写入侧同一份白名单统一处理：非法形态置为 null，provider 仍然保留，让用户能在 settings
   // 修复；否则真实 key 误填进这个字段会被当作 ref 查询，并在失败文案里原样回显。
   const rawApiKeyEnv = typeof entry["apiKeyEnv"] === "string" ? entry["apiKeyEnv"].trim() : "";
   const apiKeyEnv = CREDENTIAL_ENV_KEY.test(rawApiKeyEnv) ? rawApiKeyEnv : null;
   const apiKeyEnvInvalid = apiKeyEnv === null && rawApiKeyEnv !== "" ? rawApiKeyEnv : null;
   // `api` 的「未声明」与「类型就不对 / 显式空串」必须分开：前者按 llm-pi-ai 的
-  // `request.api ?? 'openai-completions'`（discovery.ts:300）兜底成 openai；后两者
+  // `request.api ?? 'openai-completions'`（discovery.ts 里那一句）取到 openai；后两者
   // 字符串化后**原样透传**，让写侧白名单给出可读错误。此前空串也被兜成 ""→openai，
   // 显式写坏 `api: ""` 的 provider 会静默降级成 OpenAI 线协议——正是本文件批评过的
   // 「select 成功、OCR 调不通」。
   const api = apiKeyOf(entry["api"]);
   const protocol = api === null ? "openai" : (OCR_PROTOCOL_BY_API.get(api) ?? api);
-  // baseURL 同样 trim，且必须是可用的 http(s) URL（判据见 isAcceptableBaseUrl）：
+  // baseURL 同样 trim，而且必须是可用的 http(s) URL（判据见 isAcceptableBaseUrl）：
   // 故障在读侧就暴露，不是延到 OCR 调用期。读侧宽容的落法是整条丢弃（卡片照常打开，
   // 用户去 settings 修），不是替用户猜一个修正值。
   const baseURL = typeof entry["baseURL"] === "string" ? entry["baseURL"].trim() : "";
@@ -192,7 +192,7 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
   if (modelsRaw.length > 0 && models.length === 0) {
     return null;
   }
-  // displayName 与 id/name/baseURL 同一条 trim 口径：全空白是真值，会顶掉本可回退的
+  // displayName 和 id/name/baseURL 用同一条 trim 规则：全空白也是真值，会顶掉本来可以回退的
   // provider 名，设置卡上渲染成空白项。
   const displayName = typeof entry["displayName"] === "string" ? entry["displayName"].trim() : "";
   return {

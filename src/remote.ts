@@ -1,8 +1,8 @@
-// src/remote.ts —— 设置卡读/写**宿主侧 OCR 配置**的那一面（官方 Typert Remote 的消费侧）。
+// src/remote.ts —— 设置卡读/写**宿主侧 OCR 配置**的客户端实现（官方 Typert Remote 的消费侧）。
 //
 // 为什么需要它：卡片跑在浏览器里，而 provider 清单、外部 ocr CLI 的配置与 `ocr llm test`
-// 都在宿主进程。设置面没有「宿主执行动作」的口子，唯一的官方通道就是 Remote（见
-// host.ts 的读面实现）。
+// 都在宿主进程里。设置卡上没有"让宿主执行动作"这个入口，唯一的官方通道就是 Remote（见
+// host.ts 里读取接口的实现）。
 //
 // 为什么 descriptor 是**手写**的：宿主网关在源模式（SRC）下从方法签名推参数名，参数与
 // 结果都走 `{ mode: "src-json" }`，不需要生成器的 `typeSymbol` / `create()` 产物。但**客户端**
@@ -11,9 +11,9 @@
 // 从不跨网；宿主那边仍按源模式从签名取参数名。
 //
 // ⚠ **为什么走 `ctx.get("remote")` 而不是把 `remote` 写进 `inject`**：cordis 对**未 inject 的
-// 服务**读取是**抛错**。而本卡的其余部分在"没装远程面"的部署里也必须照常渲染（远程读面是
-// 可选能力），`inject: ["remote", …]` 却会把整条 client 入口绑死在远程面上——缺它就不激活。
-// `ctx.get` 是**显式读取**，不受 inject 门禁约束——官方网关自己也是这么读可选服务的。
+// 服务**读取时会**抛错**。而这张卡的其余部分在"没有远程接口"的部署里也必须照常渲染（远程读取接口是
+// 可选能力），`inject: ["remote", …]` 却会把整条 client 入口绑死在远程通道上——缺它就不激活。
+// `ctx.get` 是**显式读取**，不受 inject 那条门禁约束——官方网关自己也是这么读可选服务的。
 //
 // ⚠ 类型一律 `import type`（产物里零新说明符）：`@deepseek-ai/*` 只作类型消费。
 import type {
@@ -113,9 +113,9 @@ const CHAT_GPT_CODEC: TypertCodec<OcrChatGptRequest> = {
   }),
 };
 
-/** 把宿主那九个方法挂到客户端远程面上的描述符（`id` 的形状照生成器：`<包>#<命名空间>/<方法>`）。
+/** 把宿主那九个方法挂到客户端远程通道上的描述符（`id` 的形状照生成器：`<包>#<命名空间>/<方法>`）。
  *  导出它只为一件事：`test/remote.test.ts` 拿它与宿主侧 `remoteMethods()` 的标记对质
- *  —— 两侧分叉时卡片不会报错，只会"读不到"，所以那条比较必须在门禁里。 */
+ *  —— 两侧不一致时卡片不会报错，只会"读不到"，所以那条比较必须留在这项门禁里。 */
 export const OCR_DESCRIPTORS: readonly InvocationDescriptor[] = [
   {
     id: `${PACKAGE_NAME}#${OCR_REMOTE_NAMESPACE}/providers`,
@@ -205,7 +205,7 @@ export interface RemoteHost {
   get?: (name: string, strict?: boolean) => unknown;
 }
 
-/** 官方网关的客户端服务面：本卡只用 `$mount` 一位（挂载一枚手写贡献）。 */
+/** 官方网关的客户端接口：这张卡只用 `$mount` 这一个（挂载一个手写的贡献）。 */
 interface RemoteMounter {
   $mount: (contribution: {
     package: string;
@@ -213,7 +213,7 @@ interface RemoteMounter {
   }) => Promise<unknown>;
 }
 
-/** 挂载后由网关提供的命名空间服务面（方法名 = descriptor.method，位置参数）。 */
+/** 挂载之后由网关提供的命名空间接口（方法名 = descriptor.method，按位置传参）。 */
 interface OcrNamespace {
   providers: () => Promise<RemoteResult<Record<string, unknown>>>;
   select: (request: OcrSelectRequest) => Promise<RemoteResult<OcrSelectReply>>;
@@ -242,7 +242,7 @@ export interface OcrReader {
   chatGpt: (model: string) => Promise<OcrChatGptReply>;
 }
 
-/** 这个值能当远程面用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
+/** 这个值能当远程通道用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
 const isRemoteMounter = (value: unknown): value is RemoteMounter =>
   isRecord(value) && typeof value["$mount"] === "function";
 
@@ -351,7 +351,7 @@ function buildOcrReader(ctx: RemoteHost): OcrReader {
 }
 
 /**
- * 造一个「读/写宿主侧 OCR 配置」的读取器。**当前部署没有远程面时读取会抛**可读错误
+ * 造一个「读/写宿主侧 OCR 配置」的读取器。**当前部署没有远程通道时读取会抛**可读错误
  * （卡片那层按「请求失败」显示原因）——remote 不在构造期做快照，网关晚于卡片注册
  * `provide("remote")` 的部署在首次成功读取时就能接上，不存在「apply 期没有就永远
  * 读不到」的路径。

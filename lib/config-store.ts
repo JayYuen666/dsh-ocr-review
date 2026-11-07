@@ -1,13 +1,13 @@
-// lib/config-store.ts —— 外部 ocr CLI 自己的那份 config.json：**落点、读、渲染、原子写回**，
+// lib/config-store.ts —— 外部 ocr CLI 自己的那份 config.json：**文件位置、读、渲染、原子写回**，
 // 以及写进去的 `api_key_cmd` 怎么构造。
 //
 // 为什么从 lib/ocr-config.ts 拆出来：这一层只认得「那个文件」——路径怎么定（含官方
-// `expandHomePath` 之外本地保留的那两条判据，绝对性闸门在 lib/ocr-config.ts 的
-// resolveOcrConfigPath 里）、盘面怎么在不丢未知键的前提下改、怎么用官方
-// `withFileLock` + `writeFileAtomic` 落盘。而「读到的清单与写盘的配置怎么装配成卡片/应用/迁移
+// `expandHomePath` 之外本地保留的那两条判断，绝对性的检查在 lib/ocr-config.ts 的
+// resolveOcrConfigPath 里）、整份配置怎么在不丢未知键的前提下改、怎么用官方
+// `withFileLock` + `writeFileAtomic` 写到磁盘。而「读到的清单与写盘的配置怎么装配成卡片/应用/迁移
 // 三条流程」在 lib/ocr-config.ts。
 //
-// 权限与备份口径（0600 / `.bak` / 坏 JSON 抛错而读侧宽容）与「key 不落 OCR 配置」那条决策，
+// 权限与备份的做法（0600、`.bak`、写盘遇到坏 JSON 抛错而读取时宽容）与「key 不写进 OCR 配置」那条决定，
 // 完整理由记在 lib/ocr-config.ts 的头注释里，本模块逐字实现它：写盘一律交官方件，本地只
 // 管备份与目录。
 
@@ -26,7 +26,7 @@ import { PI_AI_NAMESPACE } from "./provider-source.ts";
 import { CREDENTIAL_ENV_KEY } from "./provider-projection.ts";
 import type { DshProvider } from "./provider-projection.ts";
 
-/** api_key_cmd 脚本名（pluginDir 兜底路径的唯一拼法来源）。 */
+/** api_key_cmd 的脚本名（拼 pluginDir 那条兜底路径时唯一用到的名字）。 */
 const GET_CRED_SCRIPT = path.join("scripts", "get-cred.mjs");
 
 /** 尾部反斜杠 / 翻倍反斜杠 / 行首 node 命令。 */
@@ -135,7 +135,7 @@ function shqDyn(value: string): string {
 /** api_key_cmd 值构造：脚本路径与 env key 名（及可选的 dsh 数据目录）shq 转义后
  *  拼成 shell 命令。第三参数是 get-cred.mjs 数据目录定位的**第一档**（显式参数 >
  *  $DSH_HOME > homedir()/.dsh）：ocrConfigPath 重定向 ocr 子进程的 HOME 后，
- *  get-cred 的 homedir() 兜底会跟着跑偏，须在宿主侧把解析出的数据目录显式钉进
+ *  get-cred 的 homedir() 兜底会跟着跑偏，须在宿主侧把解析出的数据目录显式写进
  *  命令。undefined（未重定向）时省略，沿用 env/默认档。
  *  env key 白名单是 CREDENTIAL_ENV_KEY（定义在 lib/provider-projection.ts，投影与写侧
  *  共用同一枚；刻意比宿主 CredentialRef 的语法紧：OCR 侧惯例大写，且这是写进
@@ -156,7 +156,7 @@ export function buildApiKeyCmd(
   return parts.join(" ");
 }
 
-// ── api_key_cmd 反解（指针自愈的前置判据） ─────────────────────────────────
+// ── api_key_cmd 反解（指针自愈要先过的判断） ─────────────────────────────
 
 /** api_key_cmd 反解出的三个槽位。 */
 export interface ParsedApiKeyCmd {
@@ -255,12 +255,12 @@ function readDqToken(body: string, start: number): { value: string; next: number
 }
 
 /**
- * cmd.exe 双引号形态的 token 列表（buildApiKeyCmd 的 win32 臂写出的那种：
+ * cmd.exe 双引号形态的 token 列表（buildApiKeyCmd 的 win32 分支写出的那种：
  * `node "a" "b" "c"`）；形态不符（裸词 / 未闭合）返回 null。
  *
  * 只在 readShqTokens 判 null 之后被调用，而那条路必有非空白内容 ⇒ 循环至少走一轮，
  * 解析成功的列表至少一枚 token；末尾的 `return tokens` 对实际可达的输入不可能交出
- * 空列表（parseApiKeyCmd 的 `script === ""` 闸对它另有兜底）。
+ * 空列表（parseApiKeyCmd 的 `script === ""` 那道闸另外替它收尾）。
  */
 function readDqTokens(body: string): string[] | null {
   const tokens: string[] = [];
@@ -318,7 +318,7 @@ export function parseApiKeyCmd(command: string): ParsedApiKeyCmd | null {
 }
 
 export interface SelectInput {
-  /** 目标 config.json 的完整盘面（用于保留未知键）。 */
+  /** 目标 config.json 的完整内容（用于保留未知键）。 */
   existingText: string;
   /** 目标文件的显示名（写侧错误文案要点名实际路径，设置项覆盖后不能还报默认值）。 */
   configLabel: string;
@@ -331,7 +331,7 @@ export interface SelectInput {
   language?: string;
 }
 
-/** 现有 config 文本 → 盘面对象。
+/** 现有 config 文本 → 配置内容对象。
  *
  * 解析失败必须抛错而非给 `{}`：调用方（renderSelectedConfig /
  * migratePlaintextKeys）拿返回值做「保留未知键」的基准，静默变成空对象就等于
@@ -347,7 +347,7 @@ export function parseExistingConfig(
   }
   let parsed: unknown;
   // String(error) 已保留 SyntaxError 的「Unexpected end of JSON input」定位信息；
-  // JSON.parse 只会抛 Error，故不再写 instanceof 兜底分支（那一支永不可达）。
+  // JSON.parse 只会抛 Error，所以不再写 instanceof 的兜底分支（那一支永远走不到）。
   try {
     parsed = JSON.parse(text);
   } catch (error) {
@@ -364,7 +364,7 @@ export function parseExistingConfig(
 /**
  * 把「读 config.json → 改 → 原子写回」整段串行化。
  *
- * 为什么需要：落盘交给官方异步 `writeFileAtomic` 之后，原本同处一个
+ * 为什么需要：写到磁盘交给官方异步 `writeFileAtomic` 之后，原本同处一个
  * event-loop tick 内的读写对被拆开了——卡片的「应用 provider」与「一键迁移」并发
  * 时可以各自用旧快照覆盖对方的整份文档，最坏情况是刚迁走的明文 api_key 又被写回来。
  * 锁用官方 `dsh-atomic-write` 的 `withFileLock`（`<目标>.lock`、`wx` 独占创建、
@@ -381,13 +381,13 @@ export async function updateConfigLocked<TResult>(
 }
 
 /**
- * 原子写回的落点：符号链接解到真身。
+ * 原子写回落到哪个文件：符号链接解到真身。
  *
  * ocr CLI 自己用 `os.WriteFile`（跟随链接）写这份配置，用户把 `config.json` 链到
  * dotfiles 仓库是常见用法。官方 `writeFileAtomic` 以 rename 提交，它会**替换链接本身**
  * （包内文档原文："replaces a symlinked target itself instead of writing through to its
  * referent"），于是链接消失、真身停在旧内容，配置仓库从此与运行配置脱钩。
- * `realpath` 对普通文件返回自身、对链接返回最终真身，一条判据就够；悬空链接解不出真身，
+ * `realpath` 对普通文件返回自身、对链接返回最终的真身，一条判断就够；悬空链接解不出真身，
  * 按链接文本定位它指向的位置（首写会创建该文件）；文件尚未存在时两者都失败，仍用原路径。
  */
 async function writableTargetOf(targetPath: string): Promise<string> {
@@ -403,13 +403,13 @@ async function writableTargetOf(targetPath: string): Promise<string> {
 }
 
 /**
- * 原子写回 config.json：先留 `.bak` 备份，再交官方 `writeFileAtomic` 落盘。
+ * 原子写回 config.json：先留 `.bak` 备份，再交官方 `writeFileAtomic` 写到磁盘。
  * 此前是 `writeFileSync` 直写：进程/磁盘在写入中途出问题就会留下半截配置
  * （OCR 与用户都读不到），且没有任何回滚点。rename 在同目录内是原子的。
  *
  * 随机后缀临时文件 + `wx` 独占创建、失败清临时文件、Windows rename 重试、父目录
- * 创建（`dirMode`）与新 inode 携带 `mode` 全是官方件既有行为，本仓不再手抄
- * （实测）。本地只剩 `.bak`：官方写文件面无备份语义，且备份必须落在
+ * 创建（`dirMode`）与新 inode 携带 `mode` 全是官方件既有行为，本仓不再照抄
+ * （实测）。本地只剩 `.bak`：官方写文件的那一步没有备份语义，且备份必须落在
  * rename **之前**——挪到之后备份到的就是新内容。
  *
  * 备份的权限必须**在创建那一刻**就是 0600：备份里可能仍有迁移前的明文 api_key，
@@ -494,7 +494,7 @@ export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMess
   doc["provider"] = input.provider;
   doc["custom_providers"] = customs;
   // 空串/纯空白不覆写：语言框被清空再保存，不该把盘上已有的 language 抹成 ""。
-  // 与 lib/ocr-config.ts 的 selection 展开同一条判据（两处各写一遍会漂成两套语义）。
+  // 和 lib/ocr-config.ts 里 selection 的展开用同一条规则（两处各写一遍会漂成两套语义）。
   const language = input.language?.trim();
   if (language !== undefined && language !== "") {
     doc["language"] = language;
@@ -510,9 +510,9 @@ export interface OcrPaths {
    *  时为 X，否则 undefined（默认路径零重定向）。工具执行点据此给命令加 HOME 前缀
    *  （lib/cli.ts withHomeEnv）；undefined/坏设置一律不加前缀。 */
   homeOverride: string | undefined;
-  /** 插件所在目录（get-cred 脚本兜底位置）。 */
+  /** 插件所在的目录（get-cred 脚本的兜底位置）。 */
   pluginDir: string;
-  /** api_key_cmd 脚本路径；空串 = 按 pluginDir 兜底。 */
+  /** api_key_cmd 的脚本路径；空串 = 按 pluginDir 拼兜底路径。 */
   getCredScript: string;
 }
 
@@ -521,7 +521,7 @@ export interface OcrPaths {
  * `~/` 与 `~\` 两条前缀，在 POSIX 上会把 `~\notes.txt` 折成 `<home>/\notes.txt`
  * ——一枚合法的反斜杠文件名，等于把用户打错的相对路径静默变成家目录里的怪文件，
  * 比现状（报"必须是绝对路径"）更坏。原样放行让它落到调用方（lib/ocr-config.ts 的
- * resolveOcrConfigPath）那道绝对性闸门去报错。
+ * resolveOcrConfigPath）那道绝对性检查去报错。
  * sep 作参数而不是就地读 `path.sep`：两个分支都要能被断言（同 plugin-hot-reload
  * 的 shellQuoted(bin, viaShell) 手法）。
  */
@@ -532,12 +532,12 @@ export function expandHomeForSeparator(value: string, sep: string): string {
   return expandHomePath(value);
 }
 
-/** api_key_cmd 脚本在插件目录里的固定落点（host.ts 与兜底路径共用这一处）。 */
+/** api_key_cmd 的脚本在插件目录里的固定位置（host.ts 和兜底路径共用这一处）。 */
 export function defaultCredScriptPath(pluginDir: string): string {
   return path.join(pluginDir, GET_CRED_SCRIPT);
 }
 
-/** api_key_cmd 脚本落点：显式路径优先，否则按 pluginDir 兜底。 */
+/** api_key_cmd 的脚本位置：显式路径优先，否则按 pluginDir 拼。 */
 export function credentialScriptPath(paths: OcrPaths): string {
   return paths.getCredScript === "" ? defaultCredScriptPath(paths.pluginDir) : paths.getCredScript;
 }
@@ -561,9 +561,9 @@ export interface KeyScriptRepoint {
  * ——而 ocr 侧的报错是「resolve LLM endpoint: api_key_cmd ... MODULE_NOT_FOUND」，完全
  * 指不到真因。没有自愈，用户只能手改一个自己都不知道错在哪的配置文件。
  *
- * 三条不越界的判据（宁可漏修也不猜）：
+ * 三条不越界的判断（宁可漏修也不猜）：
  *   1. 当前脚本自己都不在（包没装全）⇒ 一律不动，把「get-cred 脚本缺失」留给 apply 侧报；
- *   2. 旧脚本**还活着** ⇒ 不动。显式指定优先于 pluginDir 兜底，用户有意指到别处
+ *   2. 旧脚本**还在** ⇒ 不动。显式指定优先于 pluginDir 那条兜底，用户有意指到别处
  *      （自制脚本、共享副本）时不该被本包拽回来；
  *   3. 命令串读不懂（不是本包写出的形态）⇒ 不动。那多半是用户手写的，改写它就是在
  *      插手本包明令不碰的部分。

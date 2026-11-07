@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 # 工作流级全只读；两个写权限只挂在 analysis job 上。
 # read-all 比这份文件实际需要的更宽，但 scorecard-action 自己按仓库 API 面读各种元数据，
-# 逐项列全等于把上游的读取面抄一遍；写权限仍是逐项的最小白名单，这一档不改。
+# 逐项列全等于把上游的读取项抄一遍；写权限仍是逐项的最小白名单，这一档不改。
 permissions: read-all
 jobs:
   analysis:

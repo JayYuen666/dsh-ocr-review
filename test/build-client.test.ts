@@ -6,7 +6,7 @@
 // 本包的 tsconfig 分工是 `tsconfig.json`（node，types:["node"]）跑 host/lib/test 与三份根
 // 配置，`tsconfig.client.json`（浏览器，types:[]）跑 src/** 与 test/client/**。
 // 要**解析** `~/.dsh/profiles/web/package.json` 就得用 node:fs/node:os，在 types:[] 的
-// 工程里连 `node:fs` 都解析不了；而槽 key 恰恰只能在能读文件的这一侧验。
+// 工程里连 `node:fs` 都解析不了；而槽 key 恰恰只能在能读文件的 node 工程里验。
 // 于是分工：本文件（node）钉住 key 的**值**从哪来，test/client/client-card.test.ts
 // （浏览器程序）钉住 src 侧的结构与「不得退回裸条目 id」。形状照抄已定案的
 // plugins/zvec-grep/test/build-client.test.ts 的 `profileBundleName()`。
@@ -85,7 +85,7 @@ const SECTION_SLOT = "plugins.detail.section";
 const ACTIVATION_SLOT = "plugins.bundle.activation";
 
 /**
- * 那条 link 是不是指向本检出：`link:` 说明符按 profile 所在目录归一（pnpm 写的是
+ * 那条 link 是不是指向本检出：`link:` 这类说明符按 profile 所在目录归一（pnpm 写的是
  * `link:../..` 这类相对值），再比 realpath。用 `includes(PKG_DIR)` 判会把
  * `dsh-ocr-review-old`、`dsh-ocr-review-copy` 这类以本目录名开头的残留副本认成本份，
  * 而拦住的正是这种副本；registry 版本号（非 link）与指向别处同样按「不适用」跳过。
@@ -106,13 +106,13 @@ function linksThisCheckout(declared: unknown, profileDir: string): boolean {
 }
 /**
  * profile 的 bundle 清单（`~/.dsh/profiles/web/package.json` → `dsh.profile.bundles`）里
- * 本包那一条，即 `plugins.bundle.config` 唯一可命中的 key。顺带钉住两件事：清单里确有
- * 这一条（否则改名的漂移没人拦）、profile 的 link 目标就是本目录。
+ * 本包那一条，也就是 `plugins.bundle.config` 唯一能命中的 key。顺带钉住两件事：清单里确有
+ * 这一条（否则改名带来的不一致没人拦）、profile 的 link 目标就是本目录。
  */
 function profileBundleName(): string {
   // 宿主派发插件页的 entryKey 就是被装 bundle 的包名（= 本包 package.json.name，与装法无关），
-  // 所以核心判据不依赖 profile。profile 只在这台开发机上存在，装了才顺手钉两道机器侧针：
-  // 清单里恰有一条、link 目标就是本目录（避免比到另一份残留副本）。
+  // 所以最要紧的那条判断不依赖 profile。profile 只在这台开发机上存在，装了才顺手加两道本机侧的核对：
+  // 清单里恰好有一条、link 目标就是本目录（避免比到另一份残留的副本）。
   const override = process.env["DSH_PROFILE_PACKAGE_JSON"] ?? "";
   const profilePath =
     override === "" ? path.join(os.homedir(), ".dsh", "profiles", "web", "package.json") : override;
@@ -185,7 +185,7 @@ interface SlotRecord {
 
 /** apply 一次所需的最小宿主替身（槽位、表单取用 id、locale 注册都留痕）。 */
 interface HostTrace {
-  /** `ctx.effect` 的逐条 label：工厂体不执行（样式注入要 document），只验装配面确实登记了它们。 */
+  /** `ctx.effect` 的逐条 label：工厂体不执行（样式注入要 document），只验装配确实登记了它们。 */
   effects: { label?: string }[];
   entryIds: string[];
   /** `ctx.slots.inject` 的目标槽名，按注入顺序。 */
@@ -204,8 +204,8 @@ function slotOf(trace: HostTrace, slot: string): SlotRecord {
 /**
  * 本条目共享表单的替身：形状按 installed
  * `dsh-client-ui-settings/lib/types/client/config-form-types.d.ts` 的 `ConfigForm`
- * （getSnapshot:38 / subscribe:44 / set:65 —— set 回**受理位**，只有传输失败才 reject）。
- * `dispose` 只是绊线：卡片若试图销毁 provider 持有的共享表单就立刻炸在这里。
+ * （getSnapshot、subscribe、set 三个方法 —— set 会返回**是否受理**，只有传输失败才 reject）。
+ * `dispose` 只是个绊线：卡片要是试图销毁 provider 持有的共享表单，就会立刻在这里报错。
  */
 interface FakeForm {
   getSnapshot: () => { status: string; writable: boolean; value: Record<string, unknown> };
@@ -351,9 +351,9 @@ async function loadClientExports(): Promise<{
 }
 
 describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 id）", () => {
-  // 新鲜度门禁：下面的用例读的是**磁盘**产物（宿主加载的就是它），故 src 改了不重建
-  // 时它们仍会绿在旧 key 上。这一条逐字节比对把「改 src 必须 node build-client.mjs」钉住
-  // （同 plugins/zvec-grep/test/client-freshness.ts 的判据，此处就地实现不引新文件）。
+  // 产物是否最新这条门禁：下面的用例读的是**磁盘**上的产物（宿主加载的就是它），所以 src 改了没重建
+  // 时，它们仍会拿着旧的 key 通过。这一条逐字节比对把「改了 src 必须跑 node build-client.mjs」钉住下来
+  // （判据同 plugins/zvec-grep/test/client-freshness.ts，这里就地实现，不新增文件）。
   it("磁盘 client.js 与最新构建逐字节一致（改 src 后必须重建）", async () => {
     const expected = await buildClient();
     const onDisk = readFileSync(path.join(PKG_DIR, "client.js"), "utf8");
@@ -394,7 +394,7 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     // installed dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当命名空间用。
     assert.deepEqual(trace.entryIds, bareIds, "只取本条目那张共享表单，且只取一次");
 
-    // 四个贡献面逐个点名（顺序即 src 的注入顺序）：改名或漏注的症状都是那块表面静默不出现。
+    // 四个贡献点逐个点名（顺序即 src 的注入顺序）：改名或漏注的症状都是那块表面静默不出现。
     assert.deepEqual(trace.slotNames, [CARD_SLOT, BADGE_SLOT, SECTION_SLOT, ACTIVATION_SLOT]);
     // 每条 register 的 desc.name 必须正好落在它被注入的那个槽上：错槽 = 内容进了别人的槽，
     // 同样是静默不出现，而 inject 与 register 分家后只有这条能把两者钉在一起。
@@ -414,7 +414,7 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     );
     assert.equal(card.key, PKG_NAME, "槽 key 与本包 package.json 的 name 同源");
     // 启用指引同为 keyed 槽（slot-contract.d.ts:92-96「keyed by npm package name」），
-    // 与卡片同键才是一起出现、一起消失；列表槽不吃 key，带上等于把自己钉死在某个 subject 之外。
+    // 和卡片用同一个键才会一起出现、一起消失；列表槽不读 key，带上等于把自己限定在某个 subject 之外。
     assert.equal(slotOf(trace, ACTIVATION_SLOT).key, card.key);
     assert.equal(slotOf(trace, BADGE_SLOT).key, undefined);
     assert.equal(slotOf(trace, SECTION_SLOT).key, undefined);
@@ -428,9 +428,13 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     const payload = slotOf(trace, CARD_SLOT).payload as {
       set: (field: string, value: unknown) => boolean | Promise<boolean>;
     };
-    // 受理位必须外泄：官方 ConfigForm.set 用它区分「宿主受理」与「拒绝/跳过」，
-    // 丢掉它就分不出「已保存」和「宿主根本没写盘」这两种用户可见的结果。
-    assert.equal(await payload.set("effort", "low"), true, "payload.set 把受理位回传给卡片");
+    // 是否受理这个结果必须传出来：官方 ConfigForm.set 用它区分「宿主受理」和「拒绝或跳过」，
+    // 丢掉它就分不出「已保存」和「宿主根本没写到磁盘」这两种用户看得见的结果。
+    assert.equal(
+      await payload.set("effort", "low"),
+      true,
+      "payload.set 把是否受理的结果回传给卡片",
+    );
     assert.deepEqual(
       formTrace.setCalls,
       [["effort", "low"]],

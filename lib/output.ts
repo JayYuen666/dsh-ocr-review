@@ -14,10 +14,10 @@
 // 面从"harness 深处的 schema 拒绝"收敛回插件自身。
 //
 // 为什么自带一枚迷你校验器而不 import 官方 validateJsonSchemaValue：本包对
-// @deepseek-ai/dsh-tools 只做 type-only import（产物里不得出现该说明符，针在
+// @deepseek-ai/dsh-tools 只做 type-only import（产物里不得出现那个说明符，断言在
 // test/build-host.test.ts）。校验器的判据逐条对齐官方实现（exact-one oneOf、
-// required 含 undefined、number 须有限、标量级 const/enum），关键字子集就是官方
-// 那份（installed lib/index.js:206）——schema 用了子集外的关键字当场抛错，守卫
+// required 含 undefined、number 须有限、标量级的 const 和 enum），关键字子集就是官方
+// 那一份里的（lib/index.js 里那份 schema 校验）——schema 用了子集外的关键字当场抛错，守卫
 // 假装支持却静默放过，才是第二个 bug 的开始。
 //
 // 文案：违规说明取自 lib/messages.ts（messages 是最后一个入参，本模块仍是
@@ -65,7 +65,7 @@ function malformed(toolName: string, detail: string, messages: OcrReviewMessages
  *  `additionalProperties` 是布尔或子 schema、`items` 是单个子 schema。
  *
  *  形态不对时走查器会**静默丢掉整条约束**（数组 properties 把下标当字段名、字符串
- *  required 逐字符迭代、对象 additionalProperties 与 `=== false` 比较恒假），
+ *  required 逐字符迭代、对象 additionalProperties 与 `=== false` 比较永远不成立），
  *  与 `type`/`enum` 写错是同一类「守卫假装支持」的缺陷，所以同样当场抛。
  *  容器关键字也必须显式声明 `type`：走查按 `type` 分派，缺了它这些约束从不生效。 */
 function assertContainerShapes(
@@ -221,7 +221,7 @@ function assertGuardable(
   }
 }
 
-/** 标量分支的形态判定（true = 不合形态；判据对齐官方 checkValue 的标量臂：
+/** 标量分支的形态判定（true = 不合形态；判据对齐官方 checkValue 的标量分支：
  *  number 须为有限 JSON 数、integer 须整数值）。 */
 function scalarMismatch(
   type: "string" | "number" | "integer" | "boolean" | "null",
@@ -261,7 +261,7 @@ function recordViolation(sink: ViolationSink, message: string): void {
   }
 }
 
-/** 递归走查的函数面（object/array 分支经它回到顶层走查器，避免相互定义序问题）。 */
+/** 递归走查的函数入口（object/array 分支经它回到顶层走查器，避免相互定义序问题）。 */
 type Walker = (schema: JsonSchemaNode, value: unknown, path: string, sink: ViolationSink) => void;
 
 const MAX_FIELDS_LISTED = 10;
@@ -356,7 +356,7 @@ const STANDALONE_KEY = /\b[A-Za-z]{2,5}-[\w-]{20,}\b/gu;
  *  替换而 scheme 词保留。 */
 const AUTH_HEADER_VALUE =
   /(?<name>\b(?:proxy-)?authorization["'\s]*[:=]["'\s]*)(?<scheme>[a-z][\w-]*[ \t]+)?[^\s"',;)}\]]{4,}/giu;
-/** 裸 scheme + 值（没有头名时 OCR 也会整行回显）。scheme 只留 bearer：它在散文中几乎
+/** 只有 scheme 和值、不带头名的一段（没有头名时 OCR 也会整行回显）。scheme 只留 bearer：它在散文中几乎
  *  不出现，而 token / basic 之类会撞上「token count」「basic usage」等普通措辞。 */
 const BEARER_VALUE = /(?<scheme>\bbearer[ \t]+)[\w.~+/=-]{4,}/giu;
 /** `api_key: "xxx"`、`apiKey=xxx`、`token: xxx`、`x-api-key: xxx` 等赋值形态。
@@ -380,15 +380,15 @@ const REDACTION = "***REDACTED***";
 /** token 尾部至少一枚非 `-` 的字母/数字。 */
 const TOKEN_TAIL_CHARACTER = /[0-9A-Z]/u;
 /** 已知 provider key 的前缀：即便两侧是路径分隔符也按 key 处理。路径豁免是为了让
- *  仓库路径保持可读，而裸 key 同样可能被嵌进 URL 或日志路径（代理回显、错误行），
+ *  仓库路径保持可读，而独立 key 同样可能被嵌进 URL 或日志路径（代理回显、错误行），
  *  这条豁免不能替它开口。 */
 const KNOWN_KEY_PREFIX = /^(?:sk|ark|xai|gsk|ghp)-/iu;
 
-/** 独立 key 形态的替换臂：随机串段里真有数字或大写才抹，否则原样交回（文件路径要保持可读）。
+/** 独立 key 形态的替换分支：随机串段里真有数字或大写才抹，否则原样交回（文件路径要保持可读）。
  *  两侧任一是路径分隔符的匹配是路径段而非 key：ocr CLI 会把仓库路径拍平成 kebab 段嵌进
  *  session 的 file_path（`…/sessions/Users-yuanjiang-Documents-…/uuid.jsonl`），原路径里
  *  只要有大写组件（macOS 的 Documents/Desktop 一类）就过得了「数字或大写」那道护栏——
- *  裸 key 从不出现在斜杠两侧，路径段也从不出现在别处，按上下文分比按字符集猜稳。
+ *  独立 key 从不出现在斜杠两侧，路径段也从不出现在别处，按上下文分比按字符集猜稳。
  *  已知凭据前缀不走这条豁免：见 `KNOWN_KEY_PREFIX`。 */
 function redactStandaloneKey(match: string, offset: number, whole: string): string {
   const hasTokenTail = TOKEN_TAIL_CHARACTER.test(match.slice(match.indexOf("-") + 1));
@@ -412,7 +412,7 @@ function redactStandaloneKey(match: string, offset: number, whole: string): stri
  * 为什么需要：OCR 会把 provider 配置错误连同请求头/端点整段回显到 stderr，
  * `ocr llm test` 的输出又直通设置卡片；工具错误文本还会被持久化进会话日志
  * （session log），一次回显就等于把明文 key 写进了长期存储。本插件的既定
- * 决策是「key 绝不落盘、绝不过 HTTP」，故所有原始输出出口都必须过这道闸
+ * 决策是「key 绝不写到磁盘、绝不过 HTTP」，故所有原始输出出口都必须过这道闸
  * （harness 同方向的红线见 packages/settings/settings/src/redact.ts）。
  *
  * 只做「形态匹配」替换：赋值/Bearer 形态一律从严（宁可多抹），独立 key 形态则
@@ -429,7 +429,7 @@ export function redactKeyMaterial(text: string): string {
 }
 
 /** ESC 由运行时构造：`eslint(no-control-regex)` 不许控制字符出现在正则字面量里，而这里
- *  必须按真 ESC 匹配——放宽成「匹配 `[33m` 这种文本」会把日志里合法的方括号内容一起吃掉。 */
+ *  必须按真 ESC 匹配——放宽成「匹配 `[33m` 这种文本」会把日志里合法的方括号内容一起匹配掉。 */
 const ESC = String.fromCodePoint(27);
 /** BEL：OSC 的另一种合法终结符。 */
 const BEL = String.fromCodePoint(7);

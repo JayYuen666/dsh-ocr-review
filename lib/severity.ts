@@ -1,10 +1,10 @@
-// lib/severity.ts —— 评审评论的**严重度口径层**：等级白名单、未知等级归一、排序位、计数聚合。
+// lib/severity.ts —— 评审评论里**严重度归一的那一层**：允许哪些等级、未知等级怎么归类、排序位置、计数聚合。
 //
 // 为什么从 lib/parse.ts 拆出来：这一族东西共同回答一个问题——「一条 severity 字符串该算哪
-// 一档」。聚合计数与 top-N 排序都只认这一个口径（此前两处各自实现，同一份数据两种判据，见
-// classifySeverity 的注释），判据本身与「OCR 的 JSON 怎么解码」无关，故与 parse.ts 分家。
+// 一档」。聚合计数和 top-N 排序都只认这一处规则（此前两处各写各的，同一份数据得出两种结论，见
+// classifySeverity 的注释），这条规则本身和「OCR 的 JSON 怎么解码」无关，所以与 parse.ts 分家。
 //
-// 本模块与 parse.ts 之间只有 `OcrComment` 这一条**类型**回边（评论形状是 parse.ts 的解码契约，
+// 本模块与 parse.ts 之间只有 `OcrComment` 这一条**类型**回边（评论的形状是 parse.ts 的解码契约，
 // 留在原地），运行时没有反向依赖，不构成模块环。
 
 import type { OcrComment } from "./parse.ts";
@@ -16,22 +16,22 @@ export interface CommentAggregation {
   total: number;
   bySeverity: Record<SeverityLevel, number>;
   byCategory: Record<string, number>;
-  /** 走了「未知等级 → medium」兜底的条数。降级必须发生，但不该无痕：没有这个数，
+  /** 走了"未知等级归到 medium"这条兜底的条数。降级必须发生，但不该没有痕迹：没有这个数，
    *  OCR 自造等级（blocker / 严重 / "critical "）在聚合与排序里都看不出异常。 */
   unknownSeverityCount: number;
 }
 
 /**
- * 严重度归一：白名单外的值（含 OCR 自造等级、大小写异形）一律按 medium。
+ * 严重度归一：白名单之外的值（含 OCR 自造的等级、大小写不整齐）一律按 medium。
  * 聚合与排序共用这一个函数——此前两处各自实现（排序 indexOf 未命中得 -1 而把
- * UNKNOWN 排到 critical 之前，聚合却归 medium），同一份数据两种口径。
+ * UNKNOWN 排到 critical 之前，聚合却归 medium），同一份数据得出两种结论。
  *
- * trim 放在**本层**而不是留给 parse.ts：本模块声明自己是「唯一口径」，调用方不一定
+ * trim 放在**这一层**而不是留给 parse.ts：本模块声明自己是唯一的归一去处，调用方不一定
  * 来自 parse.ts 的解码路径。少了它，" critical"（带首尾空白）会掉到 medium——一个
- * 高危等级被静默降级成中危，正是这层要防的事。
+ * 高危等级被静默降成中危，正是这一层要防的事。
  *
  * known 一并回传：归一是「必须发生」的降级，但降级本身不该是**无痕**的——调用方要能
- * 统计出「有多少条走了兜底」，否则契约异常被彻底吞掉，聚合里看不出来、排序里也看不出来。
+ * 统计出「有多少条走了兜底」，否则形状不合这件事被彻底吞掉，聚合里看不出来、排序里也看不出来。
  */
 export function classifySeverity(severity: string): { level: SeverityLevel; known: boolean } {
   const matched = SEVERITY_ORDER.find((level) => level === severity.trim().toLowerCase());
@@ -52,7 +52,7 @@ export function aggregateComments(comments: OcrComment[]): CommentAggregation {
     low: 0,
   };
   // 计数走 Map 而非普通对象字面量：category 由上游给，"constructor" / "toString" /
-  // "valueOf" 这类键在 {} 上会命中 Object.prototype 的继承属性——`x ?? 0` 的空值兜底
+  // "valueOf" 这类键在 {} 上会命中 Object.prototype 的继承属性——`x ?? 0` 那条空值兜底
   // 挡不住它们（读到的不是 nullish），计数于是被写成 "function Object() { [native code] }1"
   // 这样的字符串；而 "__proto__" 是 setter，赋值被静默忽略、该条评论的计数凭空消失。
   // 两者都会被 summarizeReview 原样序列化进给模型的摘要。Map.get 不查原型链。
@@ -66,9 +66,9 @@ export function aggregateComments(comments: OcrComment[]): CommentAggregation {
       unknownSeverityCount += 1;
     }
     // category 只 trim、**不做大小写归一**：它是上游给的自由标签，没有可对表的枚举，
-    // 与 severity 的白名单归一是两套判据——" Security" 与 "security" 是两个键（保真展示，
+    // 和 severity 的白名单归一是两套规则——" Security" 与 "security" 是两个键（按原样展示，
     // 消费方按原样取键）。空串/全空白刻意**不计数也不占键**：parse 的 str() 对缺失字段给 ""，
-    // 「无 category」是上游合法的缺省而不是契约异常——所以它的可观测面是「byCategory
+    // 「没有 category」是上游合法的缺省而不是形状异常——所以它能被观察到的地方是「byCategory
     // 各键之和允许小于 total」，差值即无 category 的条数，不给独立计数器。
     const category = comment.category.trim();
     if (category !== "") {

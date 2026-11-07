@@ -1,5 +1,5 @@
 /**
- * 平台桩：钉住 / 还原 `process.platform` 的唯一一处。
+ * 平台的测试替身：钉住和还原 `process.platform` 的唯一一处。
  *
  * 描述符在模块求值时取一次：`process.platform` 恒有描述符，所以不存在
  * `Object.defineProperty(process, "platform", {})` 那种把 platform 定义成

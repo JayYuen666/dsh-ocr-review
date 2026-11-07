@@ -2,11 +2,11 @@
 // stub `ocr`（stub-ocr.e2e）按文档契约模仿；这一层用真二进制证「stub 假设 == 真实现」：
 // version 形态、delegate rule 的 JSON 结构（schema_version/groups/files）经真解析链、
 // session list 的空态、无参调用的真实失败形状。全部免 LLM 凭据；真 CLI 缺席时整组跳过
-// （skip 是显式声明的降级，不是悄悄变绿——判据在 spawn 之前）。
+// （skip 是显式声明的降级，不是悄悄变成通过——判断在 spawn 之前）。
 // 本仓的 oxlint 基线禁同步 spawn 与 require 写法，本文件整段豁免并写明理由：被测对象是
-// 外部 CLI 的**退出码与字节流**，同步 spawn + node:assert 是对这两者最短的判据路径；
+// 外部 CLI 的**退出码和字节流**，同步 spawn 加 node:assert 是对这两者最短的验证路径；
 // 豁免范围只覆盖本文件，不外溢到别的测试。
-/* oxlint-disable node/no-sync -- 真外部 CLI 的字节流判据：同步 spawn 最短且无并发需求 */
+/* oxlint-disable node/no-sync -- 要读真实外部 CLI 的字节流：同步 spawn 最短，而且没有并发需求 */
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -17,7 +17,7 @@ import path from "node:path";
 import { parseOcrVersion, EXPECTED_OCR_CLI_VERSION } from "../../lib/cli.ts";
 import { parseDelegateRules } from "../../lib/parse.ts";
 
-/** 环境：真 CLI 的 `version` 不允许顺带触发自更新，颜色输出也不进字节判据。 */
+/** 环境：真 CLI 的 `version` 不允许顺带触发自更新，颜色输出也不会混进比对的字节里。 */
 const PROBE_ENV = {
   FORCE_COLOR: "0",
   NO_COLOR: "1",
@@ -25,7 +25,7 @@ const PROBE_ENV = {
   OCR_NO_UPDATE: "1",
 } as const;
 
-/** spawn 失败时子进程的流在运行期可能为 null，类型面却写成 string；统一按字节读。 */
+/** spawn 失败时子进程的流在运行期可能为 null，类型上却写成 string；统一按字节读。 */
 function readText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -33,7 +33,7 @@ function readText(value: unknown): string {
 /**
  * PATH 上同名文件不等于可用的真 CLI：Windows runner 上命中的候选可能是目录，也可能是
  * 不能直接 CreateProcess 的 `.cmd` shim。后者 `spawnSync` 会回 `error` 且 `stdout/stderr`
- * 为 null，旧判据随后在 `.includes` 上抛 TypeError，把「没装 CLI」误报成失败。
+ * 为 null，旧的那句随后会在 `.includes` 上抛 TypeError，把「没装 CLI」报成一次失败。
  * 这里只收**普通文件**且 `version` 能真跑通、输出能被本包解析的候选；不满足就按缺席跳过。
  */
 function isRunnableRealOcr(candidate: string): boolean {
@@ -114,7 +114,7 @@ describe.skipIf(realOcr === undefined)("真 ocr 二进制（免凭据子命令�
       mkdirSync(path.join(dir, "src"), { recursive: true });
       writeFileSync(path.join(dir, "src", "a.ts"), "export const value = 1;\n", "utf8");
       // 真 CLI 约束（本机实测）：delegate 的路径解析要求 git 仓库；非 git 目录先报
-      // "is not a git repository" 非零退出——这条失败形状一并钉住。
+      // "is not a git repository" 非零退出——这个失败的形状也一并钉住。
       const nonGit = run(["delegate", "rule", "--format", "json", "src/a.ts"], dir);
       assert.notEqual(nonGit.status, 0);
       assert.ok(nonGit.stderr.includes("not a git repository"), nonGit.stderr.slice(0, 120));

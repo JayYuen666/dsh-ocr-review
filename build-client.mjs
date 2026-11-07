@@ -2,10 +2,10 @@
 // @ts-check
 /// <reference types="node" />
 // 构建 client.js：rolldown 把 src/client-entry.ts 打包为 CJS（react / zod 精确外置），再包进
-// window.__ModuleLoader__.load({ id, factory }) UMD 外壳。id 取 package.json 的 name，
+// window.__ModuleLoader__.load({ id, factory }) 这层 UMD 外壳。id 取 package.json 的 name，
 // 与 dsh.client 模块表键一致。
-// 编排（外置判据、store 路径折叠、外壳拼装）统一住在 @jayyuen66/dsh-plugin-shared/
-// lib/build-client；本文件只声明入口、生成头与本仓自有的包名同源校验。
+// 编排（哪些依赖要外部化、store 路径折叠（collapseStorePaths）、外壳 拼装）统一实现在
+// @jayyuen66/dsh-plugin-shared/lib/build-client；本文件只声明入口、生成头与本仓自有的包名同源校验。
 // 运行：node build-client.mjs（或 pnpm build:client）。buildClient() 供测试导入。
 import path from "node:path";
 import { rolldown } from "rolldown";
@@ -34,7 +34,7 @@ export async function buildClient() {
       // 槽 key、descriptor id 与 `$mount` 的 package 位的包名同源：唯一定义在
       // lib/remote-shape.ts 的 OCR_BUNDLE_PACKAGE，src 侧只引常量、不再自带字面量。宿主按
       // 包名逐字匹配槽 key，对不上就是整张卡静默不渲染——而包名改名在别的环节没有症状。
-      // 判据是**带引号的字面量**而不是裸子串：裸 `includes` 会被任何「包含包名」的文本满足
+      // 这里匹配的是**带引号的字面量**而不是不加边界的子串：不加限定的 `includes` 会被任何「包含包名」的文本满足
       // （导入路径、注释、更长的包名），而这里要证的是「chunk 里恰好有一处 `"<pkg>"` 字符串
       // 字面量等于 package.json 的 name」。恰好 1 次 = 常量定义处这一处；0 次说明常量值与
       // package.json 的 name 已经分叉；超过 1 次说明有人绕开常量重新内联了字面量（两份

@@ -7,7 +7,7 @@
 # 一是工具链与大部分宿主依赖写成 catalog:，取值住在伞根的 pnpm-workspace.yaml，本仓这一份
 # 是投影下来的生成物；机器人改不到取值，改得到的只是 package.json 里那串引用写法。二是没走
 # catalog: 的字面版本（dependencies 里的 js-yaml、devDependencies 里的 react）——它们不在本仓
-# overrides 的覆盖范围内，机器人提的 PR 会真的换掉安装树，所以更得由人来判：要么在伞根改真源
+# overrides 的覆盖范围内，机器人提的 PR 会真的换掉安装树，所以更得由人来判断：要么在伞根改那份唯一来源
 # 再投影，要么在本仓改那一行并复跑 check。留着 npm 块只是让机器人持续造出这两种 PR。
 #
 # 但「本仓不会出现 npm 机器人 PR」这句话**不由这个文件保证**：Dependabot security updates
@@ -24,10 +24,10 @@ updates:
     open-pull-requests-limit: 3
     groups:
       # 本仓引用的 action 全部放进一组，避免每个 action 各占一个 PR 去抢同一个名额。
-      # 最后那条 `*` 是兜底而不是随手写的：上面几条按 `<owner>/<repo>` 逐项枚举，一旦
+      # 最后那条 `*` 是有意留下的后备，不是随手写的：上面几条按 `<owner>/<repo>` 逐项枚举，一旦
       # workflow 里新增未列出的 owner（未来的 docker/*、softprops/* 之类），那个 action
       # 会脱离分组、单独生成 PR 并和 open-pull-requests-limit 抢名额，而没有任何机制能
-      # 暴露这种漂移。兜底通配同样覆盖 `owner/repo/subpath` 形式（codeql-action 的 init、
+      # 会暴露出不一致。这条通配后备同样覆盖 `owner/repo/subpath` 形式（codeql-action 的 init、
       # analyze、upload-sarif 就是三条不同的引用，但归同一个 owner/repo 条目）。
       actions:
         patterns:

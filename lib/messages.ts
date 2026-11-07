@@ -33,7 +33,7 @@ export interface OcrReviewMessages {
   readonly execTimedOut: string;
   /** 调用被取消。 */
   readonly execAborted: string;
-  /** exit 127：命令词交下去没被系统找到（候选文件在 fs 判据之后消失了）。 */
+  /** exit 127：命令词交下去没被系统找到（候选文件在 fs 的判断通过之后消失了）。 */
   readonly execNotFound: string;
   /** 前置短路的拒绝理由：随包依赖与 PATH 两条路都没有候选，连进程都不起。
    *  与 `execNotFound` 的分工是「找都没找到」对「找到了但跑不起来」，两条都留着。
@@ -53,14 +53,14 @@ export interface OcrReviewMessages {
   readonly detailSeparator: string;
   /** stdout 触到字节上限的说明。 */
   readonly stdoutTruncated: string;
-  /** 截断后完整输出的落盘位置。 */
+  /** 截断后完整输出的写到磁盘位置。 */
   readonly outputSpill: string;
   /** 后台模式的轮询指引（ocr_session 三步）。 */
   readonly backgroundPolling: string;
-  // ── 官方作业面（ctx.jobs）：写进模型可见 detail / 环里的说明 ──────────────
+  // ── 官方作业服务（ctx.jobs）：写进模型可见 detail / 环里的说明 ──────────────
   /** 会话被停止/关闭时 `job_kill` 的理由（模型侧 job_output 读得到）。 */
   readonly jobReasonSessionStopped: string;
-  /** 兜底 deadline 到点时 `job_kill` 的理由（{minutes} = 实际窗口的分钟数）。 */
+  /** 兜底的 deadline 到点时 `job_kill` 的理由（{minutes} = 实际窗口的分钟数）。 */
   readonly jobReasonTimeout: string;
   /** 插件卸载时 `job_kill` 的理由。 */
   readonly jobReasonUnload: string;
@@ -73,7 +73,7 @@ export interface OcrReviewMessages {
   readonly missingRequiredArgs: string;
   readonly bodyMustBeObject: string;
   readonly outputFileMissing: string;
-  /** --output 落盘结果超过读取上限（不整份读进内存）。 */
+  /** --output 写到磁盘结果超过读取上限（不整份读进内存）。 */
   readonly outputFileTooLarge: string;
   /** 非零退出时附上 --output 里已发布的 coverage.failed 明细。 */
   readonly failureCoverage: string;
@@ -240,7 +240,7 @@ export interface OcrReviewMessages {
   readonly keyNotResolvable: string;
   /**
    * key 存在于 OCR 运行时不可达的凭据层（{source}）：宿主 resolve 得到、OCR 子进程
-   * 取不到（宿主净化环境 / get-cred 刻意不读被审查仓库）。写盘前拒绝的假绿闸。
+   * 取不到（宿主净化环境、get-cred 刻意不读被审查的仓库）。在写到磁盘之前拦住漏报的那道闸。
    */
   readonly keyNotReachable: string;
   readonly credScriptMissing: string;

@@ -1,13 +1,13 @@
-// 同步写/删除调用的落点守卫（补 oxlint.config.ts 里那几条文件级豁免管不到的两面）。
+// 同步写/删除调用落在哪些文件（补 oxlint.config.ts 里那几条文件级豁免管不到的两类文件）。
 //
 // 共享基线的 node/no-sync 豁免现在按文件生效（oxlint.config.ts 的 syncIoScopes），
-// 越界落点由 lint 直接判红。本用例管的是 lint 给不出的两件事：
+// 越界写到哪儿由 lint 直接判红。本用例管的是 lint 给不出的两件事：
 //   1. 名单里每个名字都必须在语料里真的出现过 —— 改名或删掉调用之后，一条不再命中任何
 //      代码的豁免就是死配置，lint 对它完全沉默；
-//   2. build-*.mjs 那批脚本的落点 —— 它们被 SCRIPTS_OVERRIDES 整条关掉 node/no-sync，
-//      lint 在那里不提供这条判据。
+//   2. build-*.mjs 那批脚本的位置 —— 它们被 SCRIPTS_OVERRIDES 整条关掉 node/no-sync，
+//      lint 在那里不管这一条。
 //
-// 判据表**独立写死在这里**、不从 oxlint.config.ts 派生：派生的话配置与判据会一起漂，
+// 这张表**独立写死在这里**、不从 oxlint.config.ts 派生：派生的话配置和这份表会一起变得不一样，
 // 两边一起错时仍然全绿。
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -17,7 +17,7 @@ const ROOT = path.join(import.meta.dirname, "..");
 
 const SOURCE_EXT = /\.(?:ts|mts|mjs)$/u;
 
-/** 生产面与测试面的源文件清单（相对仓根、`/` 分隔）。 */
+/** 生产代码与测试代码的源文件清单（相对仓根、`/` 分隔）。 */
 function listSources(): string[] {
   const files = ["build-client.mjs", "build-host.mjs", "host.ts"];
   for (const dir of ["lib", "scripts", "src", "test"]) {
@@ -40,7 +40,7 @@ interface SyncRule {
 
 const isTest = (file: string): boolean => file.startsWith("test/");
 
-/** 与 oxlint.config.ts 的 syncIoScopes 同一批名字，但落点写死在这里。 */
+/** 与 oxlint.config.ts 的 syncIoScopes 同一批名字，但位置写死在这里。 */
 const RULES: readonly SyncRule[] = [
   { name: "mkdirSync", allowed: isTest },
   { name: "truncateSync", allowed: isTest },
@@ -79,8 +79,8 @@ const SOURCES: SourceFile[] = listSources().map((file) => ({
   text: readFileSync(path.join(ROOT, file), "utf8"),
 }));
 
-describe("同步写/删除调用的落点守卫", () => {
-  it("判据自身能红：生产面越界与注释提及分别有不同结果", () => {
+describe("同步写/删除调用落到哪个文件的守卫", () => {
+  it("这张表自己会失败：生产代码越界和注释里提到，分别给出不同结果", () => {
     // 负例先行：不做这一步的话，「真实语料零违规」与「扫描器根本没生效」逐字节相同。
     expect(
       violationsOf([{ path: "lib/evil.ts", text: "rmSync(tmp, { recursive: true });" }]),
@@ -92,12 +92,12 @@ describe("同步写/删除调用的落点守卫", () => {
     expect(
       violationsOf([{ path: "lib/y.ts", text: "// 不用 writeFileSync，走原子写。" }]),
     ).toStrictEqual([]);
-    // 允许的落点不红。
+    // 允许的写法不红。
     expect(violationsOf([{ path: "host.ts", text: "rmSync(tmp);" }])).toStrictEqual([]);
   });
 
-  it("语料下限：清单非空、每个白名单名字都真的在语料里出现过", () => {
-    // 空集不打 ✓：扫描面读不到时这条必须红，而不是报绿。
+  it("语料的下限：清单非空、每个白名单里的名字都真的在语料里出现过", () => {
+    // 空集不打 ✓：扫描读不到文件时这条必须判失败，而不是报绿。
     expect(SOURCES.length).toBeGreaterThan(30);
     expect(SOURCES.map((source) => source.path)).toContain("host.ts");
     for (const rule of RULES) {

@@ -1,4 +1,4 @@
-// scripts/get-cred.mjs 的进程级测试：它就是 OCR 那一侧的 api_key_cmd，
+// scripts/get-cred.mjs 的进程级测试：它被写进 OCR 配置里当 api_key_cmd，
 // 只能按「另起进程 → 看 stdout/exit code」的契约来验。
 //
 // 重点验的是**不写死路径**之后的数据目录优先级（参数 > $DSH_HOME > homedir()/.dsh）
@@ -50,7 +50,7 @@ async function runCred(
   let stdout = "";
   let stderr = "";
   // 没传 `stdio` ⇒ spawn 的返回类型是 `ChildProcessWithoutNullStreams`，`stdout`/`stderr`
-  // 按官方 @types/node 恒为 Readable（`?.` 在这里是恒真守卫，不是缺流兜底）。
+  // 按官方 @types/node 永远是 Readable（`?.` 在这里是一个总是成立的守卫，不是缺流时的兜底）。
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
@@ -60,7 +60,7 @@ async function runCred(
     stderr += chunk;
   });
   // events.once 在子进程发 error 事件时会 reject，等价于原先显式的 error 监听。
-  // 超时兜底：脚本挂起时由 signal 中止等待、杀掉子进程并点名卡住的参数，
+  // 超时的兜底处理：脚本挂住时由 signal 中止等待、杀掉子进程并点名卡住的那个参数，
   // 否则要等 vitest 的整用例超时，且失败信息看不出是哪一组 args。
   const controller = new AbortController();
   const timer = setTimeout(() => {

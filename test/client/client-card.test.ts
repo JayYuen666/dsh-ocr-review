@@ -1,6 +1,6 @@
 // ocr-review 卡片的 locale 接线与双语（@deepseek-ai/dsh-client-locale 契约）。
 //
-// 本文件住在 test/client/：client 程序（tsconfig.client.json）按**目录**收录成员，
+// 本文件位于 test/client/：client 程序（tsconfig.client.json）按**目录**收录成员，
 // 宿主程序按同一目录排除——归属由路径决定，不靠两份清单逐文件登记。
 //
 // 与 ctx-observe 的同名测试同形态，但**没有 jsdom / @testing-library 可用**
@@ -59,7 +59,7 @@ import type { ConfigForm, ConfigFormSnapshot } from "@deepseek-ai/dsh-client-ui-
 type Snap = ConfigFormSnapshot<Record<string, unknown>>;
 
 /** 官方 `ConfigFormSnapshot` 的合法形状（6 位全必选）：`value` 在首个快照受理前才是
- *  undefined，`writable` 说的是宿主文档收不收写——桩件只能送官方真会送的那些形状。 */
+ *  undefined，`writable` 说的是宿主收不收写入——测试替身只能交官方真会交的那几种形状。 */
 function snap(over: Partial<Snap> = {}): Snap {
   return {
     status: "ready",
@@ -191,8 +191,8 @@ function textOf(node: unknown): string {
 /**
  * `ctx.configForms.get(entryId)` 交回的那张共享表单的替身：直接 `extends` 官方
  * `ConfigForm<Record<string, unknown>>`（getSnapshot/subscribe/mutate/set/unset 五位齐备才算
- * 桩件，缺一位就编译失败——src 那边换掉手抄镜像后，漂移由这里钉住）。契约里**没有** dispose：
- * 表单由 provider 持有并在自己的 fiber 上统一回收。`set`/`unset`/`mutate` 带受理位
+ * 测试替身，少一个字段就编译失败——src 那边换掉照抄的镜像之后，两边不一致由这里查出来）。官方声明里**没有** dispose：
+ * 表单由 provider 持有，并在自己的 fiber 上统一回收。`set`、`unset`、`mutate` 带回是否受理
  * `Promise<boolean>`：true=宿主受理，false=拒绝或被跳过，只有传输失败才 reject。
  * 这里仍留一根会抛的 dispose 绊线（makeCtx 内接上计数器）：把 `scope.dispose()` 写回 slot
  * disposer 这类回退会立刻炸在这里，而不是像 0.1.6 那样静默让之后的每次保存都落空。
@@ -208,7 +208,7 @@ function makeScope(): StubForm {
     subscribe: (): (() => void) => noop,
     set: async (): Promise<boolean> => true,
     unset: async (): Promise<boolean> => true,
-    // 官方 ConfigForm 的第五位（路径级原子写入）：本卡不走它，但类型面要求它在位。
+    // 官方 ConfigForm 的第五位（路径级原子写入）：本卡不走它，但类型上要求它在位。
     mutate: async (): Promise<boolean> => true,
   };
 }
@@ -216,7 +216,7 @@ function makeScope(): StubForm {
 /** apply 的入参类型（ClientCtx 未导出，从函数签名上取，避免两头漂移）。 */
 type CardCtx = Parameters<typeof apply>[0];
 
-/** 替身 client ctx 的观测面：locale 注册、bind、slots、表单取用都被记下来供断言。 */
+/** 替身 client ctx 的记录点：locale 注册、bind、slots、表单取用都被记下来供断言。 */
 interface CardCtxHarness {
   ctx: CardCtx;
   /** 注册进官方 locale 的入参（命名空间 + 一次交齐的两语字典）。
@@ -228,7 +228,7 @@ interface CardCtxHarness {
   /** `ctx.configForms.get(entryId)` 收到过的条目 id（0.1.7 起 == 设置命名空间）。 */
   formEntryIds: string[];
   slots: string[];
-  /** slots.register 收到的 desc 里与装配相关的两项（钉住槽位名与 key 没被顺手改掉）。 */
+  /** slots.register 收到的 desc 里和装配相关的两项（钉住槽位名和 key 没被顺手改掉）。 */
   slotDescs: { name: string; key: string | undefined }[];
   effects: (() => void)[];
   slotCleanups: (() => void)[];
@@ -256,7 +256,7 @@ function makeCtx(options: { bound?: Translate } = {}): CardCtxHarness {
     // 两处不得已的显式标注：
     //  - `effect`：官方是**两**个重载（同步 `Disposable<Promise<void>>` 与可 await 的
     //    `AsyncDisposable<Promise<void>>`，后者还是 PromiseLike），单个箭头签名同时满足
-    //    不了两边，故一次性投影到官方面；桩件只回收同步 disposer，那个返回面没人消费。
+    //    不了两边，所以一次性投影到官方的类型上；测试替身只回收同步的 disposer，那个返回值没人用。
     //  - `register`：官方是**双重载**（`inject?: undefined` 与 `inject: (…) => I`），
     //    重载目标推不出上下文参数类型（TS7006），故按 `unknown` 收、在桩内一次性投影
     //    回本卡实际传的那一重载。
@@ -461,7 +461,7 @@ const saveBarOf = (t: Translate, state: Partial<SaveBarState> = {}): string =>
 // src 绑上官方 `ConfigForm` 之后，这里删掉了 `fieldOf(snap,"status")` 那套逐位再解析
 // （含 `isRecord(rawValue)` 与 `writableValue === true` 两处降级）。它们能表达的形状
 // （status 越界 / writable 非布尔 / value 非对象）在官方快照上**不可表示**——provider
-// 已按命名空间 schema decode/derive 过。下面两条钉住的正是官方真会送来的那两态。
+// 已经按命名空间的 schema 做过 decode 和 derive。下面两条钉住的正是官方真的会送来的那两种状态。
 
 function scopeWith(initial: Snap): { form: StubForm; emit: (next: Snap) => void } {
   let current = initial;
@@ -514,18 +514,18 @@ describe("apply 的官方 locale 接线", () => {
 
   it("inject 声明 locale；两语字典一次性注册进官方 locale", () => {
     // inject 清单就是装配契约：`settingsScope` 在 installed 0.1.7 全树零命中，留着它整条
-    // client 入口挂不上（症状正是「设置卡静默消失」）。替代面 = configForms（installed
+    // client 入口挂不上（症状正是「设置卡静默消失」）。替代入口 = configForms（installed
     // dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98 的 Context 增强、
     // :142 的 get<T>(entryId): ConfigForm<T>）。精确全等，不放宽为包含判定。
     expect(inject).toStrictEqual(["slots", "configForms", "locale"]);
     const harness = makeCtx();
     apply(harness.ctx);
     // 表单按 **profile 条目 id** 取（0.1.7 起设置命名空间即条目 id），本包那一行是
-    // cordis.patch.yml 里的裸 id `ocr-review`（与下方装配用例同一条判据）。
+    // cordis.patch.yml 里的不带前缀的 id `ocr-review`（和下面装配那条用例用同一个判断）。
     expect(harness.formEntryIds).toStrictEqual([PLUGIN_ENTRY_ID]);
     expect(harness.slots).toStrictEqual([CARD_SLOT, BADGE_SLOT, SECTION_SLOT, ACTIVATION_SLOT]);
     // 官方类型化 register：一次调用带齐两语，故 (命名空间, locale) 的展开结果与旧的两份
-    // 逐语注册逐字相同——「两语都注册到本包命名空间」这条判据没有松动。
+    // 每种语言的注册逐字相同——"两种语言都注册到本包命名空间"这一条没有松动。
     expect(
       harness.registered.flatMap((row) =>
         Object.keys(row.dicts).map((localeId) => [row.ns, localeId]),
@@ -576,7 +576,7 @@ describe("apply 的官方 locale 接线", () => {
     apply(harness.ctx);
     expect(harness.formEntryIds).toStrictEqual([PLUGIN_ENTRY_ID]);
     // 一次注册带齐两语（官方类型化 register），第二次 apply 什么都没加——旧写法在这里是
-    // 两份逐语注册、第二次 apply 后仍是 2 条，判据（不重复注册）完全一致。
+    // 两份按语言的注册、第二次 apply 之后仍然是 2 条，判断（不重复注册）完全一致。
     expect(harness.registered).toHaveLength(1);
     expect(harness.registered.flatMap((row) => Object.keys(row.dicts))).toStrictEqual(["zh", "en"]);
   });
@@ -584,7 +584,7 @@ describe("apply 的官方 locale 接线", () => {
   // ── 0.1.7 装配契约：入口从 settingsScope 换成 ctx.configForms（迁移回归锚点）────
   it("0.1.7 装配：inject 不再索要 settingsScope；表单按条目 id 取一次；disposer 不销毁表单", () => {
     // `settingsScope` 在 installed 0.1.7 全树零命中，留在清单里 = 整条 client 入口挂不上
-    //（症状正是「设置卡静默消失」）。替代面 = configForms（installed
+    //（症状正是「设置卡静默消失」）。替代入口 = configForms（installed
     // dsh-client-ui-settings/lib/types/client/config-form.d.ts:94-98 的 Context 增强、
     // :142 的 get<T>(entryId)）。本文件跑在 tsconfig.client.json 的浏览器工程里（types:[]，
     // 读不了 cordis.patch.yml），条目 id 与那一行的对拍靠上面 formEntryIds 的精确断言 +
@@ -595,9 +595,9 @@ describe("apply 的官方 locale 接线", () => {
     // 只取一次，取的是本包在 cordis.patch.yml 里声明的那一行 `ocr-review`
     //（0.1.7 起设置命名空间即条目 id；本包没有 danger-guard 那种持 Config 的 bulkhead 行）。
     expect(harness.formEntryIds).toStrictEqual([PLUGIN_ENTRY_ID]);
-    // 槽位名与「只注册这一张槽」在此钉住；槽 key 的**值**由 node 侧
+    // 槽位名和"只注册这一张槽"在这里钉住；槽 key 的**值**由 node 那侧
     // test/build-client.test.ts 用 profileBundleName() 从
-    // `~/.dsh/profiles/web/package.json` 解析钉住（宿主派发的是 bundle 包名：installed
+    // `~/.dsh/profiles/web/package.json` 解析出来钉住（宿主派发用的是 bundle 包名：
     // dsh-client-ui-plugin-manager/lib/client.js:1821 `entryKey: pkg.name` +
     // slot-contract.d.ts:96-100）。本工程 types:[]（浏览器项目）读不了文件，故不能在此
     // 解析；反过来也**不硬抄**那串包名——硬抄一个错值就会像之前那样一路绿到页面上什么都不渲染。
@@ -613,7 +613,7 @@ describe("apply 的官方 locale 接线", () => {
       ACTIVATION_SLOT,
     ]);
     // 两条 keyed 槽（卡片、启用指引）必须同键，且那个键既不是空串也不是裸条目 id：
-    // renderer 按逐字相等匹配 entryKey，退回裸 id 就等于让表面静默消失。
+    // renderer 按逐字相等匹配 entryKey，退回不带前缀的 id 就等于让表面静默消失。
     const keyedSlots = harness.slotDescs.filter((one) => one.key !== undefined);
     expect(keyedSlots.map((one) => one.name)).toStrictEqual([CARD_SLOT, ACTIVATION_SLOT]);
     const cardKey = keyedSlots[0]?.key;
@@ -674,7 +674,7 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
       .split(" ")
       .filter((token) => token !== "中文")
       .join(" ");
-    // 剔除后必须还是那张卡：整串被抹空时下面这条 HAN 断言会恒真，测不出任何漏译。
+    // 剔除后必须还是那张卡：整串被抹空时下面这条 HAN 断言会永远成立，测不出任何漏译。
     expect(enWithoutSelfName).toContain("Apply to OCR config");
     expect(enWithoutSelfName).not.toMatch(HAN);
     const zhHint = tZh("keyScriptMissing");
@@ -694,7 +694,7 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(withVerify(null)).not.toContain("装载期端点自检");
   });
 
-  it("provider 区三条降级路径按语言（含宿主没给原因时的兜底）", () => {
+  it("provider 区三条降级路径按语言（含宿主没给原因时顶上的那句）", () => {
     const loading = (t: Translate): string => textOf(buildProviderSection(depsWith(t)));
     expect(loading(tZh)).toContain("加载 providers…");
     expect(loading(tEn)).toContain("loading providers…");
@@ -882,7 +882,7 @@ const ZH_VERSION_EXPECTED = "本插件的契约按 ocr 1.13.3 逐条核对";
 const ZH_BADGE_PATH = "ocr 来自 PATH";
 
 /**
- * `OcrBinaryView` 的夹具构造口。`measuredVersion` 是必填的（null = 还没测过），
+ * `OcrBinaryView` 的夹具构造函数。`measuredVersion` 是必填的（null = 还没测过），
  * 逐处手写容易漏成一侧有、一侧没有，集中一处才漂不了。
  *
  * 三个可选键用 `null` 表「宿主没报这一档」（键必须整个缺席，`exactOptionalPropertyTypes`
@@ -913,7 +913,7 @@ function viewOf(
   };
 }
 
-/** 读取器替身里不参与本组用例的方法：调到即失败（文本面用例不该顺手证明别的方法可用）。 */
+/** 读取器替身里不参与本组用例的方法：调到即失败（文本相关的用例不该顺手证明别的方法可用）。 */
 async function unusedReaderMethod(): Promise<never> {
   throw new Error("unused reader method");
 }
@@ -1072,7 +1072,7 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     expect(String(fieldProps(passed, PROBE_RESULT)?.className)).toContain("ocr-ok");
   });
 
-  it("loadCliStatus 只读 ocrBinary 那半，读不到（含没有远程面）都归成 null", async () => {
+  it("loadCliStatus 只读 ocrBinary 那半，读不到（含没有远程通道）都归成 null", async () => {
     const stub = readerStub([
       async () => ({ ocrBinary: { source: "path", path: PATH_LAUNCHER } }),
       // 宿主没带这个字段（旧 host）与形状不合（域外的 source）都只能算「没报」。
@@ -1086,7 +1086,7 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     });
     await expect(loadCliStatus(stub.reader)).resolves.toBeNull();
     await expect(loadCliStatus(stub.reader)).resolves.toBeNull();
-    // 部署里没有远程面：三处贡献点共用这一个口，判据必须在口上而不是各点各写一份。
+    // 部署里没有远程接口：三处贡献点共用这一个入口，判断必须写在入口上，不能各写一份。
     await expect(loadCliStatus(undefined)).resolves.toBeNull();
     expect(stub.calls()).toBe(3);
   });
@@ -1101,7 +1101,7 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
   });
 });
 
-/** 详情页 subject 的三种面：本判据只读 kind 与 pkg.name，其余字段随官方形状填齐。
+/** 详情页 subject 的三种形态：这一条只读 kind 和 pkg.name，其余字段按官方形状填齐。
  *  整份 PluginPackageRef 手写而不 as 断言，是为了让宿主加必填字段时这里先编译红。 */
 function subjectOf(over: { name: string; kind?: "bundle" | "row" | "item" }): PluginsSubject {
   const kind = over.kind ?? "bundle";
@@ -1147,7 +1147,7 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
     ] satisfies (OcrBinaryView | null)[]) {
       expect(cliBadgeText(tEn, status)).not.toMatch(HAN);
     }
-    // 短文案与整句状态文本共用同一份判据，但必须各说各的话（标题旁放不下整句）。
+    // 短文案和整句状态文本共用同一份判断，但必须各说各的话（标题旁边放不下整句）。
     expect(cliBadgeText(tZh, viewOf({ source: "none", path: null }))).not.toBe(
       binaryStatusText(tZh, viewOf({ source: "none", path: null })),
     );
@@ -1427,7 +1427,7 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
         },
       ),
     );
-    // 重试只会重写真正没落盘的那一个；已写入的若留在 touched 上会被重复提交。
+    // 重试只会重写真正没写到磁盘的那一个；已写入的若留在 touched 上会被重复提交。
     expect(touchedAfter).toStrictEqual({ timeoutMinutes: 30 });
     expect(error).toContain("timeoutMinutes");
     expect(error).not.toContain("maxComments");

@@ -1,6 +1,6 @@
 // lib/cli.ts —— 纯函数：把 ocr_* 工具的入参安全地构造成 ocr CLI 命令。
-// 无 ctx、无副作用，可独立单测。防注入两道闸（取值判据全在 lib/argv-guard.ts，
-// 本文件只决定哪个槽位喂给它、如何拼进命令）：
+// 没有 ctx、没有副作用，可以单独测。防注入的两道闸（取值的判据全在 lib/argv-guard.ts，
+// 本文件只决定哪个槽位交给它校验、以及如何拼进命令）：
 //   1. 所有用户可控字符串一律经 shq() 单引号转义；
 //   2. 枚举型值（--format / session 子命令）先白名单钳制、未知回默认——
 //      转义对「本该只有三个取值」的参数不是修复，白名单才是。
@@ -12,14 +12,14 @@
 // 注入防线与此并行，不受语言影响：拼进 argv 的值全部经 shq()，枚举一律白名单钳制，
 // 校验闸的调用位置与抛错先后次序都不因文案迁移而改变。
 //
-// 契约依据（open-codereview.ai/docs，判据以 CLI 侧源码逐条核对）：核对所依据的那一版写在
+// 依据的对外契约（open-codereview.ai/docs，逐条以 CLI 侧源码核对）：核对所依据的那一版写在
 // EXPECTED_OCR_CLI_VERSION，本注释不重述数字，以免两处各自漂移。
 //   - ocr review：workspace（默认）/ commit（-c）/ range（--from/--to）三模式互斥。
 //   - ocr scan：--path 逗号分隔；二者都接受 --format/--output/--audience/--exclude。
 //   - ocr delegate preview / rule：--format json 机器可读，reviewable_files
 //     / groups 结构见 docs。delegate 无 LLM 消耗，秒级返回。
 //   - 所有工具统一走 --output <临时文件>：评审 JSON/文本量大，而本包下发给宿主的
-//     stdout 上限（STDOUT_MAX_BYTES）会截断，落盘读取可避免「截断当完整」误判
+//     stdout 上限（STDOUT_MAX_BYTES）会截断，写到磁盘读取可避免「截断当完整」误判
 //     （zvec-grep 同款思路）。
 
 import { existsSync, realpathSync, statSync } from "node:fs";
@@ -56,7 +56,7 @@ const PATH_LIST_LIMIT = 2000;
 const DELEGATE_PATHS_LIMIT = 200;
 
 /** 会话过滤列表（severity/category）的条数上限。它拦的是失控输入的长度，不是取值域：
- *  severity 的合法取值另由白名单收口，拿枚举个数当上限会把「合法取值 + 一个重复值」误报成
+ *  severity 的合法取值另由一份白名单约束，拿条目个数当上限会把「合法取值加上一个重复值」误报成
  *  超限。 */
 const SESSION_FILTER_LIST_LIMIT = 50;
 
@@ -78,12 +78,12 @@ const BACKGROUND_FLAG = "--background";
  * 声明归 package.json 的 `ocrCliVersion`（发布出去的包页面上看得到，用户据此装对应版本），
  * 这里是它在本包代码里的唯一镜像：test/publish-manifest.test.ts 逐字断言两处相等，
  * test/readme-parity.test.ts 再断言两侧 README 写的也是它。三处只有一处是人写的、
- * 靠门禁钉住另两处，就不会出现「README 教用户装 A、代码按 B 校验」这种两边各自自洽的错。
+ * 靠门禁钉住另两处，就不会出现「README 教用户装 A、代码按 B 校验」这种两边各自自洽的错误。
  */
 export const EXPECTED_OCR_CLI_VERSION = "1.13.5";
 
 /** 报错用的值形态（永不调用可能被劫持的 toJSON/toString）。host.ts 的入参闸
- *  （effort/wait）复用同一口径，故导出。 */
+ *  （effort、wait）复用同一种做法，所以导出。 */
 export function describeValue(value: unknown): string {
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
     return String(value);
@@ -149,7 +149,7 @@ export interface ReviewScopeArgs {
   timeoutMinutes?: unknown;
   maxTools?: unknown;
   maxTokens?: unknown;
-  /** 全运行 token 预算（input+output）闸门，超出即停止派发。 */
+  /** 全运行 token 预算（input+output）上限，超出即停止派发。 */
   maxTokensBudget?: unknown;
   provider?: unknown;
   model?: unknown;
@@ -202,13 +202,13 @@ export interface BuiltCommand {
 const DECIMAL_INTEGER_TEXT = /^\d+$/u;
 
 /**
- * 数值槽位的**唯一**取值口：只接受 `number` 与纯十进制数字串，其余一律 null。
+ * 数值槽位的**唯一**读取处：只接受 `number` 与纯十进制数字串，其余一律 null。
  *
  * 为什么单列一份：`Number()` 会把 true 当 1、把 [] 当 0、把 "0x10" 当 16、把 "1e2" 当 100，
- * 于是错类型或怪写法的输入会被静默读成**另一个数**。数值 flag 与 session limit 两处槽位
- * 共用这一条判据，包里就不会存在第二种数值口径（此前 session limit 用 `Number()`，
+ * 于是类型不对或写法奇怪的输入会被静默读成**另一个数**。数值 flag 和 session limit 两处槽位
+ * 共用这一条判断，包里就不会有第二种处理数值的做法（此前 session limit 用 `Number()`，
  * `{limit: "0x10"}` 被读成 16）。
- * 非安全整数（1e300、1e21）与非法形态同样 null，由调用点按各自的范围判据拒绝。
+ * 非安全整数（1e300、1e21）和非法形态同样返回 null，由调用点按各自的范围判断拒绝。
  */
 function decimalInteger(value: unknown): number | null {
   const isDecimalText = typeof value === "string" && DECIMAL_INTEGER_TEXT.test(value.trim());
@@ -224,7 +224,7 @@ function decimalInteger(value: unknown): number | null {
  * 负数/非整数由 OCR 侧报错，但桥接层先做同源校验给出更早的错误）。
  * value 为 undefined/null 时省略 flag（跟随 OCR flag 默认值）。
  *
- * 注入面：数值经 `String(num)` 落进命令串（不走 shq）。数值 token 结构上不可能带
+ * 注入：数值经 `String(num)` 落进命令串（不走 shq）。数值 token 结构上不可能带
  * shell 元字符；安全整数经 String() 只产出 `-?[0-9]+`，而 min ≥ 0 挡掉负号。
  */
 function pushIntFlag(
@@ -292,7 +292,7 @@ function repoFileOf(
   return resolveRepoFile(repo, value, name, maxBytes, messages);
 }
 
-/** 预览与正常审查共用的选择面：exclude、rule、max-git-procs。 */
+/** 预览与正常审查共用的选项：exclude、rule、max-git-procs。 */
 function selectionFlags(
   args: ReviewScopeArgs | ScanScopeArgs,
   repo: string,
@@ -314,7 +314,7 @@ function selectionFlags(
 /** 模式参数解析：workspace（默认）/commit/branch 互斥，非法组合与错类型抛错。
  *
  * 互斥判定必须在两个模式分支之前一次做完：若先判 commit（`commit 非空` 时条件
- * 恒真），后面的「branch 与 commit 互斥」就永不可达，`{scope:branch, commit:x}`
+ * 永远成立），后面的「branch 与 commit 互斥」就永不可达，`{scope:branch, commit:x}`
  * 会被静默降级成 commit 审查——审错范围却按结论上报。 */
 const KNOWN_SCOPES: ReadonlySet<string> = new Set(["workspace", "commit", "branch"]);
 
@@ -390,12 +390,12 @@ function pushTextFlag(
   }
 }
 
-/** 只作用于 LLM 阶段的说明面 flag：--background / --provider / --model。
+/** 只作用于 LLM 阶段的说明类 flag：--background / --provider / --model。
  *  preview 不建 LLM 运行时，故这三个值不参与文件选择（`agent.Preview` 的入参里没有
  *  Background，也不加载 provider 配置）；非 preview 分支与 delegate preview 各自按需调用。
  *  注意：ocr 的 --exclude 是 String 类型（实测多个 flag 实例只认最后一个，逗号分隔才生效）
  *  ——多值必须合并为一个 flag 逗号连接，绝不能展开多个。exclude 与 rule/maxGitProcs 同属
- *  选择面，住在 selectionFlags。 */
+ *  这些选项，定义在 selectionFlags。 */
 function backgroundFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[] {
   const parts: string[] = [];
   pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
@@ -419,7 +419,7 @@ function backgroundFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): st
  *    →补 KILL 全部目标，自我清场的组 KILL 排在最后一步。）
  *  - 硬退出：守护随 launchd 收养后 ppid 改变，监视循环探测 ppid != 初始值 →
  *    reap 后退出。TERM 先行是因 OCR 原生 signal.Notify
- *    （cmd/opencodereview/interrupt.go 的 signal.Notify）会优雅落盘会话清单再退。
+ *    （cmd/opencodereview/interrupt.go 的 signal.Notify）会优雅写到磁盘会话清单再退。
  *
  * 组语义：dsh shell runner 以 detached:true（setsid）启动 `bash -c <cmd>`，
  * 守护即组长，`kill -- -$$` 覆盖组内任意深度后代；守护另有组长判定，非组长
@@ -430,7 +430,7 @@ function backgroundFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): st
  *  - 组长场景（detached 复刻 runner）dsh 硬退出后 +2s：stub 走 trap 优雅收尾、
  *    孙进程随组消亡——只杀 $ocr 与其直接子级会漏孙进程（实测泄漏被收养）；
  *  - 非组长场景守护收 TERM：stub/stub 包装层/孙进程全部消亡。
- * 降级口径：宿主文件沙箱围栏会把进程信息类命令一并 EPERM 拒绝（实测 /bin/ps），于是
+ * 退化时的做法：宿主的文件沙箱围栏会把进程信息类命令一并 EPERM 拒绝（实测 /bin/ps），于是
  * 一次性探测 ps 与 pgrep 两个可用性（HAVEPS / HAVEPG）。**任一不可用就不挂守护**：原样
  * 跑命令、把进程树交回宿主，并向 stderr 报一次（不是每 2 秒刷屏）。为什么是「整条不挂」
  * 而不是「挂个残缺版」——pgrep 只出现在后代快照 desc() 里，它不可用时 cs 恒空，reap
@@ -442,7 +442,7 @@ export function wrapWithHostReaper(command: string, messages: OcrReviewMessages)
   // reaper 整条链是 POSIX shell：bash 的 trap/作业控制，加上 ps / pgrep / kill 的
   // 进程组语义。Windows 上这三样都不成立（没有 `bash -c` 可言、kill 不认 -TERM
   // 进程组），硬包只会得到 execNotFound 而**不是**任何降级——所以这里按平台闸直接
-  // 放行裸命令：不收割，但能跑。前台另有调用方的超时兜底，代价是宿主硬退出后 OCR
+  // 交回传入的命令：不套收割守护，但能跑。前台还有调用方自己的超时兜着，代价是宿主硬退出后 OCR
   // 可能留一个孤儿（Windows 上 launchd 式的收养本身也不存在）。
   if (process.platform === "win32") {
     return command;
@@ -452,11 +452,11 @@ export function wrapWithHostReaper(command: string, messages: OcrReviewMessages)
     // 不探测的代价有两层，且都是静默的：监视循环每 2 秒 fork 一次注定失败的 ps，整场评审
     // 刷满 "Operation not permitted"；更要紧的是 ppid 比对两边都拿到空串、恒成立，于是
     // 「dsh 硬退出 → 守护自杀」这条**本守护的主要目的**其实一直没生效。探测一次把两条路
-    // 分开：可用走原口径；不可用退化为纯 kill -0 监视（见下面 while 判据）——少一条看护
-    // 好过让恒真判据蒙混过去，两种失效都是静默的，显式分叉才诚实。
+    // 分开：可用时按原来的做法；不可用时退化成只用 kill -0 监视（见下面 while 的条件）——少一条看护
+    // 也好过让一个永远成立的条件蒙混过去，两种失效都不出声，明着分出两条路才诚实。
     `p0=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' '); [ -n "$p0" ] && HAVEPS=1 || HAVEPS=0`,
     // pgrep 必须单独探：它只出现在后代快照 desc() 里，探不到时 cs 恒空 ⇒ reap 只杀得掉
-    // 中间 bash 壳，真命令与孙进程全部存活。探针取 `pgrep -P 1`：PID 1 必然存在，但它的
+    // 中间 bash 壳，真命令与孙进程全部存活。那次 pgrep 探测取 `pgrep -P 1`：PID 1 必然存在，但它的
     // 子进程集合可能为空（PID 命名空间里只有一个进程），那时 pgrep 以 1 退出——1 是
     // 「没有匹配」而非不可用；2/3（语法错误、致命错误）与 exec 失败（126/127）才算被拒。
     `pgrep -P 1 >/dev/null 2>&1; [ $? -lt 2 ] && HAVEPG=1 || HAVEPG=0`,
@@ -469,15 +469,15 @@ export function wrapWithHostReaper(command: string, messages: OcrReviewMessages)
     `desc() { for k in $(pgrep -P "$1" 2>/dev/null); do desc "$k"; printf '%s ' "$k"; done; }`,
     // 组长判定：生产 detached:true(setsid) 恒为组长，组杀精确覆盖本命令树；
     // 非组长（手测/异常）绝不组杀——否则会误伤宿主组，改用递归后代回退。
-    // HAVEPS=0 时 isl 恒假：拿不到 pgid 就不组杀，只走后代回退那一档（宁可漏杀不可误伤）。
+    // HAVEPS=0 时 isl 永远不成立：拿不到 pgid 就不组杀，只走后代回退那一档（宁可漏杀不可误伤）。
     `isl() { [ "$HAVEPS" = 1 ] && [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" = "$$" ]; }`,
     // 快照 cs 必须在 TERM 之前（后代被收养后 pgrep 断链）。KILL 单遍：KILL 不可
     // 捕获；僵尸是 kill -0 假阳性，循环补杀会死等。自毙（组 KILL）排最后一步：
     // trap 执行中同信号被 POSIX 丢弃，链必须先确保目标全部死亡再自我清场。
     `reap() { cs=$(desc "$ocr"); isl && kill -TERM -- -$$ 2>/dev/null; kill -TERM "$ocr" 2>/dev/null; for c in $cs; do kill -TERM "$c" 2>/dev/null; done; sleep 1; killmPid(){ kill -0 "$1" 2>/dev/null && kill -KILL "$1" 2>/dev/null; }; killmPid "$ocr"; for c in $cs; do killmPid "$c"; done; isl && kill -KILL -- -$$ 2>/dev/null; }`,
     `trap 'reap; exit 143' TERM INT`,
-    // HAVEPS=0 时退化为纯 kill -0 监视：判据里的 ps 短路掉，不再每 2 秒 fork 一个注定
-    // 失败的 ps。代价是硬退出看护失效（收不到 ppid 变化），换取零噪音与零无谓 fork。
+    // HAVEPS=0 时退化成只用 kill -0 监视：条件里的 ps 直接短路，不再每 2 秒 fork 一个注定
+    // 失败的 ps。代价是硬退出的看护失效（收不到 ppid 变化），换来没有噪音和不必要的 fork。
     `while kill -0 "$ocr" 2>/dev/null && { [ "$HAVEPS" = 0 ] || [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "$p0" ]; }; do sleep 2; done`,
     `kill -0 "$ocr" 2>/dev/null && reap`,
     `wait "$ocr"; exit $?`,
@@ -492,7 +492,7 @@ export function wrapWithHostReaper(command: string, messages: OcrReviewMessages)
  *  本包不再随包分发 `@alibaba-group/open-code-review`：那枚 optionalDependencies 让「装上
  *  本插件」顺带把外部 CLI 拖进 node_modules，而这条绝对路径又比用户自己装在 PATH 上的那份
  *  更先命中，于是用户升级了 CLI、本插件仍在跑随包那一份旧版——卡片报的版本与用户终端里跑的
- *  永远对不上，且没有任何线索指向「有两份」。装法交回用户自选，本函数只作兜底：部署自己把
+ *  永远对不上，也没有任何线索指向「有两份」。装法交给用户自己选，本函数只作兜底：部署自己把
  *  它放进依赖树时仍然可用，但排在 PATH 之后。做成入参是为了让两条分支在单测里都能构造。 */
 export type LauncherLocator = () => string | null;
 
@@ -501,7 +501,7 @@ export type LauncherLocator = () => string | null;
  *  「这台机器装没装」，而这一档的三条分支必须在单测里都可构造。 */
 export type SpecifierResolver = (specifier: string) => string;
 
-/** 随包兜底那一份的 package.json 说明符：解析到它才谈得上取它的 bin 入口。 */
+/** 指向随包分发那一份的 package.json 的说明符：解析到它才谈得上取它的 bin 入口。 */
 const OCR_PACKAGE_JSON = "@alibaba-group/open-code-review/package.json";
 
 function resolveFromOwnTree(specifier: string): string {
@@ -527,7 +527,7 @@ export function locateLauncher(
   return launcher;
 }
 
-/** ocr 可执行体的来源：PATH 上用户自装的那份 / 随包 JS 入口（兜底）/ 两处都没有。 */
+/** ocr 可执行体的来源：PATH 上用户自己装的那份、随包的 JS 入口（兜底），或者两处都没有。 */
 export type OcrBinarySource = "bundled" | "path" | "none";
 
 /** 外部 CLI 的安装来源：只用来挑一条**对得上号的**换版命令，不参与「能不能跑」的判定。 */
@@ -565,7 +565,7 @@ function realPathOrSelf(candidate: string): string {
 }
 
 /**
- * 从可执行体的位置推断装法。判据只有两条，且都是「真身在哪棵目录树下」这种事实：
+ * 从可执行体的位置推断安装方式。判据只有两条，而且都是「真身在哪棵目录树下」这种事实：
  *  - `node_modules` → npm 一类的包管理器装法（`~/.nvm/…/lib/node_modules`、
  *    brew 装的 node 的 `/opt/homebrew/lib/node_modules`、Windows 的 `%APPDATA%\npm\node_modules`）。
  *  - `Cellar` / `homebrew` → formula 装法（Apple Silicon `/opt/homebrew/Cellar`、
@@ -594,7 +594,7 @@ const OCR_NPM_PACKAGE = "@alibaba-group/open-code-review";
 /**
  * 给人照抄的两条命令。两条不对称是有原因的，不是漏写：
  *  - npm 那条恒带版本号（`npm i -g <包名>@<版本>` 覆盖安装即换版），因为本插件的契约
- *    只按 EXPECTED_OCR_CLI_VERSION 那一版核对过，把版本钉住就不会出现「装完才发现对不上」。
+ *    只按 EXPECTED_OCR_CLI_VERSION 那一版核对过，把版本写死就不会出现「装完才发现对不上」。
  *  - brew 那条不带版本：homebrew/core 只有一份 stable formula，没有 `open-code-review@x.y`
  *    这种版本化 formula，装/升出来就是上游最新。所以它必须和一句「钉不住版本」的说明
  *    一起出现（文案在 lib/messages.ts），不能让用户以为 `brew install` 得到的是这一版。
@@ -620,22 +620,22 @@ export function ocrCommandsFor(
 /**
  * 只用文件系统的事实回答：`ocr` 这个候选在哪条路上找得到。
  *
- * 为什么需要：`ocrCommand()` 在两条路都没有候选时**假设** PATH 上有裸 `ocr`，而这个假设
+ * 为什么需要：`ocrCommand()` 在两条路都没有候选时**假设** PATH 上按 `ocr` 这个名字解析得到命令，而这个假设
  * 过去只有等子进程 exit 127 才暴露——用户看到的是「ocr 命令不存在」而不是「哪条路都
- * 没找到」。本函数给设置页的状态行与工具的前置短路同一个可先问的判据。
+ * 没找到」。本函数给设置页的状态行和工具的前置短路提供同一个可以事先问的判断。
  *
- * 口径：
+ * 规则：
  *  - PATH 先、随包入口后：用户在终端里 `which ocr` 看到的那一份，就是本插件跑的与卡片
  *    报的那一份。两处顺序一致是这条功能最基本的诚实性要求。
  *  - 只回答「找不找得到」，不回答「跑不跑得起来」：丢执行位、入口是符号链接指向空缺
- *    这类事实在真实 spawn 那一侧由子进程自己报（比 fs 侧猜权限准确得多），本判据也不
+ *    这类事实在真正 spawn 的时候由子进程自己报（比在 fs 里猜权限准确得多），这个判断也不
  *    为此引入 `accessSync` 或 mode 位运算。
  *  - 因此误报方向是安全的：`none` 只在两条路都没有候选文件时给出，而前置短路只认
  *    `none`——不会把一套能跑的环境挡掉。
  *  - Windows 永不报 `bundled`：`ocrCommand()` 在那边刻意跳过随包入口（shebang 脚本
- *    pwsh/cmd 无法直执行），两处口径必须一致，否则状态说可用、命令却走另一条路。
+ *    pwsh 和 cmd 没法直接执行），两处的规则必须一致，否则状态说可用、命令却走另一条路。
  *  - 「包在但平台二进制缺失」不在这里判——那要读 OCR 自己的内部布局（平台子包名与
- *    bin 文件名），抄进本包就等于养一条随上游漂移的判据；那一档由 launcher 自己那句
+ *    bin 的文件名），抄进本包就等于留下一条会随上游变化的判断；那一档由 launcher 自己那句
  *    `[ERROR] OpenCodeReview binary not found`（exit 1）报出来。
  * @param env - 进程环境（默认生产那一份；单测注入 stub 以构造 PATH 形态）。
  * @param locate - 随包 launcher 的定位口（默认即 `ocrCommand()` 用的那一个）。
@@ -678,10 +678,10 @@ const memoBox: { value?: string } = {};
 
 /**
  * 解析出的 `ocr` 命令词（已 shq 转义）：PATH 上用户自装那份的绝对路径，退一步是随包入口
- * 的绝对路径，两处都没有候选时才是裸 `ocr`。
- * 命令词一律取自 `resolveOcrAvailability()`，与设置页状态行、工具前置短路同一份判据——
+ * 的绝对路径，两处都没有候选时才是不带路径的 `ocr`。
+ * 命令词一律取自 `resolveOcrAvailability()`，和设置页状态行、工具的前置短路用同一份判断——
  * 分成两套就会各说各话：卡片报「PATH 上那份」，实际跑的却是随包那份。
- * 两条路都没有候选时仍交回裸 `ocr` 而不是抛错：装载期不许因为一个外部命令缺席把五个工具
+ * 两条路都没有候选时仍交回不带路径的 `ocr` 而不是抛错：装载期不许因为一个外部命令缺席把五个工具
  * 一并拖下线（本包目标平台是 POSIX 优先，Windows 那半见下面）。
  * 惰性求值 + 每进程记忆一次，与 dsh 核心解析 @vscode/ripgrep 同款：解析失败绝不在装载期抛。
  * 导出给同包的命令构造单测——它们按同一个解析结果写期望值，测试与生产同源，
@@ -697,8 +697,8 @@ export function ocrCommand(
 ): string {
   if (memo.value === undefined) {
     // Windows 不取绝对路径：`C:\dir\ocr.exe` 这种带反斜杠与空格的词在 cmd 里单引号不是
-    // 引号，交回裸 `ocr` 让 shell 自己按 PATHEXT 解析才可靠（与 wrapWithHostReaper/
-    // withHomeEnv 的 win32 放行同一口径）。随包 launcher 是 shebang 脚本，pwsh/cmd 也
+    // 引号，交回不带路径的 `ocr` 让 shell 自己按 PATHEXT 解析才可靠（与 wrapWithHostReaper/
+    // withHomeEnv 在 win32 上的放行是同一种做法）。随包的 launcher 是 shebang 脚本，pwsh 和 cmd 也
     // 无法直接执行，故 resolveOcrAvailability 在 Windows 上根本不报 bundled。
     const windows = process.platform === "win32";
     const hit = resolveOcrAvailability(env, locate, process.platform).path;
@@ -731,7 +731,7 @@ export function withHomeEnv(command: string, home: string | undefined): string {
 /**
  * `ocr llm test` 命令词（select 的 autoVerify 与卡片「测试连接」共用）。
  * 必须与五个工具走同一个解析源（ocrCommand()）：卡片验的那一份与评审吃的那一份必须是同一
- * 个二进制，否则「测试连接通过」这句回执毫无价值。硬编码裸 `ocr` 在随包兜底装法下还会永远
+ * 个二进制，否则「测试连接通过」这句回执毫无价值。若把命令词写死成不带路径的 `ocr`，在走随包入口那种装法时还会永远
  * exit 127。`--color` 是 root 持久 flag（color.go:35-39），子命令合法。
  */
 export function buildLlmTestCommand(): string {
@@ -751,7 +751,7 @@ export function buildVersionCommand(): string {
  * 从 `ocr version` 的回执里取版本号。上游那句自述是 `open-code-review <Version> <os>/<arch>`
  * （`cmd/opencodereview/root.go` 的 versionString），而 `<Version>` 有两种**都在野外**的形态：
  * 上游自己那层 Go 构建把 git tag 整个塞进去、带 `v` 前缀与 commit 段，包管理器装到 PATH 上
- * 那份只有裸数字。上游自己那层 npm 包装的 parseVersionOutput 只认带 `v` 的一种，本包两种都得
+ * 那份只有不带 `v` 前缀的数字版本号。上游自己那层 npm 包装的 parseVersionOutput 只认带 `v` 的一种，本包两种都得
  * 读——按包管理器装法的用户按下「检测版本」却看到「没有版本号」，这个功能对他就是失效的。
  * 锚在产品名上而不是「文本里第一个像版本号的串」：launcher 那句升级提示里也带一个版本号，
  * 那是**可用的新版本**而非本机装的这份，抓错就把建议读成了现状。
@@ -765,8 +765,8 @@ export function parseOcrVersion(text: string): string | null {
 /**
  * `--format` 交给 OCR 的取值：本包只认 json——`lib/parse.ts` 的解析层只解 JSON 一份形状。
  *
- * 白名单（`resolveOutputFormat`）管的是注入面，它放行的 text/sarif 在这里被拒：
- * 那两个值没有下游，交下去只会换回一条「OCR 输出解析失败」，把「参数不在本包支持面内」
+ * 白名单（`resolveOutputFormat`）管的是注入，它放行的 text/sarif 在这里被拒：
+ * 那两个值没有下游，交下去只会换回一条「OCR 输出解析失败」，把「参数不在本包支持范围内」
  * 说成 OCR 的错。`format` 不在任何工具的 parameters 里，走到这里的只有 PTC/直连调用方。
  */
 function jsonOnlyFormat(value: unknown, messages: OcrReviewMessages): ReviewOutputFormat {
@@ -781,7 +781,7 @@ function jsonOnlyFormat(value: unknown, messages: OcrReviewMessages): ReviewOutp
  * 构造 `ocr review` 命令。--output 固定为调用方给定的临时文件路径（防截断），
  * --audience agent --format json 是默认（结构化、无进度行）。
  * outputPath 缺省（后台模式）省略 --output：结果以 OCR 会话记录为准。
- * 返回裸命令；宿主回收守护由调用方（host.ts）在执行点套 wrapWithHostReaper。
+ * 返回的命令串不含宿主回收守护，它由调用方（host.ts）在执行点套 wrapWithHostReaper 加上去。
  */
 export function buildReviewCommand(
   args: ReviewScopeArgs,
@@ -798,8 +798,8 @@ export function buildReviewCommand(
       throw new Error(messages.previewRejectsResume);
     }
     parts.push("--preview", ...scopeFlags(args, messages), ...selectionFlags(args, repo, messages));
-    // preview 的选择面里有 MaxTokens：`agent.Preview` 用模板的每文件 prompt 上限把超限
-    // 文件标成不审，不转发就会让预览与同参数的实跑给出两份不同的清单。其余调优面
+    // preview 的选项里有 MaxTokens：`agent.Preview` 用模板的每文件 prompt 上限把超限
+    // 文件标成不审，不转发就会让预览与同参数的实跑给出两份不同的清单。其余调优项
     // （effort/provider/model/background*/noFilter/并发/超时/工具次数/预算）只作用于
     // LLM 阶段，preview 不建运行时，它们没有可消费的下游。
     pushIntFlag(parts, MAX_TOKENS_FLAG, args.maxTokens, 0, messages);
@@ -819,8 +819,8 @@ export function buildReviewCommand(
   pushIntFlag(parts, "--max-tokens", args.maxTokens, 0, messages);
   pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
   const scopeParts = scopeFlags(args, messages);
-  // 选择面（exclude/rule/max-git-procs）只经 selectionFlags 一处拼装；说明面另有
-  // backgroundFlags。两个 helper 各自的判据不会被第三个手写副本绕过。
+  // 选择性参数（exclude、rule、max-git-procs）只经 selectionFlags 一处拼装；参数说明另有
+  // backgroundFlags。这两个 helper 各自的判断不会被第三份手写的副本绕过。
   parts.push(
     ...scopeParts,
     ...selectionFlags(args, repo, messages),
@@ -871,7 +871,7 @@ export function buildScanCommand(
   const parts: string[] = [ocrCommand(), "scan", "--audience", "agent", "--format", outputFormat];
   if (preview) {
     parts.push("--preview");
-    // scan 的选择面同样读模板 MaxTokens（selectScanItems 用它把超限文件标成
+    // scan 的选项同样读模板 MaxTokens（selectScanItems 用它把超限文件标成
     // ExcludeTooLarge），故与 review 一致转发 --max-tokens；批次/提供方/模型等只用于
     // 后续 LLM 阶段。
     pushIntFlag(parts, MAX_TOKENS_FLAG, args.maxTokens, 0, messages);
@@ -955,8 +955,8 @@ export function buildDelegateRuleCommand(
   messages: OcrReviewMessages,
 ): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
-  // commaList 已保证「数组元素必须是字符串」+ NUL 检查（错类型不再被静默丢弃：
-  // 少一个路径 = 少审一个文件，结果却以「全部已审」口径报告）。
+  // commaList 已经保证「数组元素必须是字符串」并做 NUL 检查（类型不对不再被静默丢掉：
+  // 少一个路径 = 少审一个文件，结果却按「全部已审」报告）。
   const paths = commaList(args.paths, "paths", DELEGATE_PATHS_LIMIT, messages).map((filePath) =>
     shq(filePath),
   );
@@ -1017,7 +1017,7 @@ export interface SessionArgs {
   after?: unknown;
   severity?: unknown;
   category?: unknown;
-  /** export 的 HTML 落盘路径（宿主注入，不是模型参数）。 */
+  /** export 的 HTML 写到磁盘路径（宿主注入，不是模型参数）。 */
   output?: unknown;
   /** 输出 comments 子命令结构（comments/show/compare/export）。 */
   action?: unknown;
@@ -1043,14 +1043,14 @@ function severityFilter(value: unknown, messages: OcrReviewMessages): string[] {
 
 /** session list --limit：缺省 10（OCR 原生默认 20，本包收紧；OCR 的 0=不限在本包
  * 上限 100 下无意义）。显式给出时必须是 1-100 的整数（与工具 description 的承诺
- * 一致），越界/错类型抛错而不是钳制——静默钳到 1 会把「想看更多」的 0 变成
- * 「只看一条」。数字字符串接受（"3"），与 pushIntFlag 的数值槽位同一口径。 */
+ * 一致），越界或类型不对就抛错而不是夹住——静默夹到 1 会把「想看更多」的 0 变成
+ * 「只看一条」。数字字符串接受（"3"），和 pushIntFlag 的数值槽位用同一种做法。 */
 function sessionLimit(value: unknown, messages: OcrReviewMessages): number {
   if (value === undefined || value === null) {
     return 10;
   }
-  // 取值口径与 pushIntFlag 共用同一枚 decimalInteger：数字字符串 "3" 接受，
-  // 而 `Number()` 才会放行的 "0x10" / "1e2" 一律抛错（错写法不该被静默读成另一个数）。
+  // 取值的规则和 pushIntFlag 共用同一个 decimalInteger：数字字符串 "3" 接受，
+  // 而只有 `Number()` 才会放行的 "0x10"、"1e2" 一律抛错（写错不该被静默读成另一个数）。
   const num = decimalInteger(value);
   if (num === null || num < 1 || num > 100) {
     throw new Error(format(messages.sessionLimitRange, { received: describeValue(value) }));
@@ -1191,7 +1191,7 @@ function inferSessionAction(
   return ctx.id === "" ? "list" : "show";
 }
 
-/** 构造 `ocr session list/show/comments/compare/export` 命令（历史评审会话闭环）。 */
+/** 构造 `ocr session list/show/comments/compare/export` 命令（把历史评审会话这条链路走完整）。 */
 export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessages): BuiltCommand {
   const repo = assertAbsoluteRoot(args.repo, messages);
   const action = idValue(args.action, "action", messages);

@@ -1,4 +1,4 @@
-// lib/remote-shape.ts —— 设置卡读面（Typert Remote）两侧共用的**线上形状**。
+// lib/remote-shape.ts —— 设置卡与宿主两侧共用的**线上数据形状**（Typert Remote）。
 //
 // 为什么单列：宿主侧的服务实现与客户端读取器分属两个产物（host.js / client.js），
 // 各自内联一份 lib/。形状放在这个零依赖叶子上，两边引的是同一份声明；写成
@@ -19,10 +19,10 @@ export const OCR_BUNDLE_PACKAGE = "@jayyuen66/dsh-ocr-review";
 /**
  * 拒绝回执的**种类码**（`status` 位）的唯一出处。
  *
- * 不是 HTTP 状态：本包已无 HTTP 面，卡片只读 `error`。集中定义的理由是它此前只是裸
- * `number`：宿主实现在十几处各写一次字面量、类型收不到任何提示，调用方也分不清
+ * 不是 HTTP 状态：本包已无 HTTP 接口，卡片只读 `error`。集中定义的理由是它此前只是一个不带
+ * 名字的 `number`：宿主实现在十几处各写一次字面量、类型收不到任何提示，调用方也分不清
  * 「本包自定的种类码」与顺手塞进来的 HTTP 状态码。测试仍**独立写死**数字（不从这份表
- * 派生），否则两边一起错时判据会跟着错。
+ * 派生），否则两边一起出错时判据会跟着一起错。
  *
  * · `invalid`：入参/配置不合法，卡片改完就能重试。
  * · `internal`：宿主侧读取或执行失败（读不到配置、子进程起不来），不是改参数能解决的。
@@ -33,8 +33,8 @@ export const OCR_REFUSE_STATUS = {
 } as const;
 
 /** 请求被本包拒绝时的回执。`status` 是本包保留的拒绝种类码（见 {@link OCR_REFUSE_STATUS}，
- *  不是 HTTP 状态：本包已无 HTTP 面），卡片只读 `error`；两侧线上形状与
- *  test/remote.test.ts 都按这一枚钉住，删它等于改契约。 */
+ *  不是 HTTP 状态：本包已经不自己开 HTTP 接口），卡片只读 `error`；两侧的线上数据形状和
+ *  test/remote.test.ts 都按这一个字段钉住，删掉它等于改动对外声明。 */
 export interface OcrRemoteRefused {
   readonly ok: false;
   readonly error: string;
@@ -107,8 +107,8 @@ export interface OcrProbeOk {
 
 export type OcrProbeReply = OcrProbeOk | OcrRemoteRefused;
 
-/** MCP 配置读面：`json` 是 `mcp_servers` 的 pretty JSON（不含其他配置/keys）；
- *  `revision` 是这一支的摘要，保存时原样交回，作为「读-改-写」之间没人插队的基线。 */
+/** MCP 配置的读取结果：`json` 是 `mcp_servers` 的 pretty JSON（不含其他配置和 keys）；
+ *  `revision` 是这一份的摘要，保存时原样交回，用来确认「读—改—写」之间没有别人插队。 */
 export interface OcrMcpOk {
   readonly ok: true;
   readonly json: string;
@@ -117,7 +117,7 @@ export interface OcrMcpOk {
 
 export type OcrMcpReply = OcrMcpOk | OcrRemoteRefused;
 
-/** MCP 配置写面入参：原始 JSON 文本，由宿主校验后写入；`revision` 是读侧交回的基线，
+/** MCP 配置写入的入参：原始 JSON 文本，由宿主校验后写入；`revision` 是读取那侧交回的基线，
  *  缺省表示不带基线（旧客户端），宿主跳过冲突比较。`exactOptionalPropertyTypes` 下显式
  *  `revision: undefined` 与「没带这一位」同义，两者都按「没有基线」处理。 */
 export interface OcrMcpSaveRequest {
@@ -125,7 +125,7 @@ export interface OcrMcpSaveRequest {
   readonly revision?: string | undefined;
 }
 
-/** MCP 配置写面回执：`count` 是保存后的 server 条数，`revision` 是该版内容的新摘要。 */
+/** MCP 配置写入的回执：`count` 是保存后的 server 条数，`revision` 是这一版内容的新摘要。 */
 export interface OcrMcpSaved {
   readonly ok: true;
   readonly count: number;
