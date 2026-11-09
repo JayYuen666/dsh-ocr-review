@@ -73,6 +73,9 @@ const GET_CRED_FILE = "get-cred.mjs";
 const SENSENOVA_MODEL = "deepseek-v4-flash";
 const SENSENOVA_LITE_MODEL = "sensenova-6.8-flash-lite";
 const SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1";
+const DEEPSEEK_NAME = "deepseek";
+const DEEPSEEK_MODEL = "deepseek-chat";
+const DEEPSEEK_URL = "https://api.deepseek.com";
 /** parseApiKeyCmd 用例共用的样本脚本路径与 amd 那条的真实型号。 */
 const SAMPLE_SCRIPT = "/a/get-cred.mjs";
 const AMD_MODEL = "DeepSeek-V4-Flash";
@@ -705,6 +708,37 @@ describe("renderSelectedConfig", () => {
     expect(entry["api_key"]).toBeUndefined();
   });
 
+  it("内置 provider 名写 providers 桶，自定义名仍写 custom_providers", () => {
+    // OCR 的 resolver 按名字分桶：内置名读 providers，读不到会直接报
+    // "provider … is not configured in providers section"。
+    const preset: DshProvider = {
+      name: DEEPSEEK_NAME,
+      displayName: "DeepSeek",
+      apiKeyEnv: "DEEPSEEK_API_KEY",
+      apiKeyEnvInvalid: null,
+      protocol: "openai",
+      baseURL: DEEPSEEK_URL,
+      models: [{ id: DEEPSEEK_MODEL, name: "DeepSeek Chat" }],
+    };
+    const out = renderOf({
+      existingText: '{"custom_providers":{"keep":{"url":"x"}}}',
+      configLabel: CONFIG_LABEL,
+      providers: [preset],
+      provider: DEEPSEEK_NAME,
+      model: DEEPSEEK_MODEL,
+      apiKeyCmd: cmd,
+    });
+    const doc = JSON.parse(out) as {
+      providers: Record<string, Record<string, unknown>>;
+      custom_providers: Record<string, Record<string, unknown>>;
+    };
+    expect(doc.providers[DEEPSEEK_NAME]?.["model"]).toBe(DEEPSEEK_MODEL);
+    expect(doc.providers[DEEPSEEK_NAME]?.["api_key_cmd"]).toBe(cmd);
+    expect(doc.custom_providers[DEEPSEEK_NAME]).toBeUndefined();
+    // 不相关的自定义条目不能被这一笔写丢。
+    expect(doc.custom_providers["keep"]).toStrictEqual({ url: "x" });
+  });
+
   it("provider 不在 dsh 配置列表 / model 不在列表时报错", () => {
     expect(() =>
       renderOf({
@@ -1160,6 +1194,25 @@ describe("loadOcrConfig", () => {
     expect(withPlain.current.url).toBe("");
   });
 
+  it("内置 provider 读 providers 桶；静态 api_key 与 cmd 同时存在时按文档判静态优先", () => {
+    const preset = loadOcrConfig(
+      `{"provider":"${DEEPSEEK_NAME}","providers":{"${DEEPSEEK_NAME}":{"model":"${DEEPSEEK_MODEL}","url":"${DEEPSEEK_URL}","api_key_cmd":"node x D"}}}`,
+    );
+    expect(preset.current.model).toBe(DEEPSEEK_MODEL);
+    expect(preset.current.url).toBe(DEEPSEEK_URL);
+    expect(preset.current.keyIsDynamic).toBe(true);
+    // 文档：静态 api_key 永远优先，api_key_cmd 被忽略并告警；卡片必须显示真正生效的那条。
+    const both = loadOcrConfig(
+      `{"provider":"${DEEPSEEK_NAME}","providers":{"${DEEPSEEK_NAME}":{"api_key":"sk","api_key_cmd":"node x D"}}}`,
+    );
+    expect(both.current.keyIsDynamic).toBe(false);
+    // 旧版本把内置名误写进 custom_providers：读侧仍要能显示，避免用户看不到自己的配置。
+    const legacy = loadOcrConfig(
+      `{"provider":"${DEEPSEEK_NAME}","custom_providers":{"${DEEPSEEK_NAME}":{"model":"legacy"}}}`,
+    );
+    expect(legacy.current.model).toBe("legacy");
+  });
+
   it("config 顶层非对象 / 坏 JSON ⇒ 空 current；custom_providers 非对象 ⇒ 条目字段清空但顶层 provider 保留", () => {
     expect(loadOcrConfig("[1,2]").current.provider).toBe("");
     expect(loadOcrConfig('"str"').raw).toStrictEqual({});
@@ -1215,7 +1268,7 @@ describe("renderSelectedConfig 的写侧检查（坏 JSON 绝不覆盖用户配�
     expect(doc.language).toBe("en");
   });
 
-  it("同条目残留明文 api_key 被清除（api_key_cmd 优先）", () => {
+  it("同条目残留明文 api_key 被清除（写动态命令时不留明文）", () => {
     const rendered = renderOf({
       ...base,
       existingText: JSON.stringify({
@@ -1271,10 +1324,46 @@ describe("migratePlaintextKeys", () => {
     expect(doc.custom_providers["unknown"]!["api_key"]).toBe("sk-other");
   });
 
+  it("内置 provider（providers 桶）同样迁移明文 api_key", async () => {
+    const paths = makePaths();
+    writeFileSync(
+      paths.ocrConfigJson,
+      JSON.stringify({
+        provider: DEEPSEEK_NAME,
+        providers: {
+          [DEEPSEEK_NAME]: { url: "u", protocol: "openai", model: "m", api_key: "sk-secret" },
+        },
+      }),
+    );
+    const gateway = makeGateway({
+      descriptors: descriptorsWithValue({
+        providers: {
+          deepseek: {
+            apiKeyEnv: "DEEPSEEK_API_KEY",
+            api: "openai-completions",
+            baseURL: DEEPSEEK_URL,
+            models: [{ id: DEEPSEEK_MODEL, name: "DeepSeek Chat" }],
+          },
+        },
+      }),
+      configured: ["DEEPSEEK_API_KEY"],
+      sources: { DEEPSEEK_API_KEY: "file" },
+    });
+    const { migrated, skippedUnknown } = await migrateOf(gateway, paths);
+    expect(migrated).toStrictEqual([DEEPSEEK_NAME]);
+    expect(skippedUnknown).toStrictEqual([]);
+    const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as {
+      providers: Record<string, Record<string, unknown>>;
+    };
+    expect(doc.providers[DEEPSEEK_NAME]!["api_key_cmd"]).toContain("DEEPSEEK_API_KEY");
+    expect(doc.providers[DEEPSEEK_NAME]!["api_key"]).toBeUndefined();
+  });
+
   it("已有非空 api_key_cmd 的条目不覆写（那条命令此刻正在生效），记 skippedUnknown", async () => {
-    // odr 侧 api_key_cmd 优先于 api_key：用户手写的命令可能带额外参数、走 vault、包一层
+    // 已有非空 api_key_cmd 的条目不覆写：用户手写的命令可能带额外参数、走 vault、包一层
     // sh。本函数的职责是「补一条动态读凭据的命令」，不是「把用户的命令换成我们的」——
-    // 静默替换等于在没有回执的情况下改掉一个正在工作的配置。
+    // 静默替换等于在没有回执的情况下改掉一个正在工作的配置。注意文档优先级是静态
+    // api_key 更高；两者并存时卡片会按明文告警，迁移不会替用户裁决删哪一边。
     const paths = makePaths();
     const userCmd = "/usr/local/bin/vault-get OPENCODEGO_API_KEY --field key";
     writeFileSync(
@@ -1862,6 +1951,32 @@ describe("repointDanglingKeyScripts", () => {
       );
       expect(entryOf(doc, "opencodego")["temperature"]).toBe(0.2);
       expect(doc["language"]).toBe("中文");
+    } finally {
+      removeTmpSandbox();
+    }
+  });
+
+  it("providers 桶（内置 provider）里的悬空脚本同样重指向", () => {
+    const paths = makePaths();
+    try {
+      const live = { script: paths.getCredScript, dshHome: current.dshHome };
+      const stale = buildApiKeyCmd(
+        "/old/scripts/get-cred.mjs",
+        "DEEPSEEK_API_KEY",
+        "/old/.dsh",
+        zh,
+      );
+      const doc: Record<string, unknown> = {
+        provider: DEEPSEEK_NAME,
+        providers: { [DEEPSEEK_NAME]: { api_key_cmd: stale, temperature: 0.1 } },
+      };
+      const result = repointDanglingKeyScripts(doc, live, zh);
+      expect(result.repointed).toStrictEqual([DEEPSEEK_NAME]);
+      const entry = (doc["providers"] as Record<string, Record<string, unknown>>)[DEEPSEEK_NAME]!;
+      expect(entry["api_key_cmd"]).toBe(
+        buildApiKeyCmd(live.script, "DEEPSEEK_API_KEY", current.dshHome, zh),
+      );
+      expect(entry["temperature"]).toBe(0.1);
     } finally {
       removeTmpSandbox();
     }

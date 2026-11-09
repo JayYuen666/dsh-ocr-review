@@ -6,6 +6,52 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.14
+
+一轮审计收口：provider 写入按 OCR 的内置名分桶、key 状态改按「静态 `api_key` 优先」判定，
+`ocr_scan` 会话可见性、preview 无效参数、导出目录 TTL、delegate preview 回执与 MCP
+URL/header 校验一并修正。对外工具与 Remote 方法名单不变；`saveMcp` 成功回执新增
+`warnings`（旧客户端忽略即可）。
+
+### Fixed
+
+- **provider 按名字分桶**（`lib/config-store.ts`、`lib/ocr-config.ts`）：OCR 的 resolver
+  先查内置名表 `providers.<name>`，未命中才读 `custom_providers.<name>`。此前一律写
+  `custom_providers`，dsh 的 provider 名只要命中内置名（`deepseek`、`openai`…），OCR
+  解析端点就直接报 "provider … is not configured in providers section"（`ocr llm test`
+  真机复现）。现在按 1.13.5 的 30 个内置名（trim + 小写比较）选桶；读当前配置、明文迁移
+  与悬空 `api_key_cmd` 重指向都覆盖两个桶，旧版本写错桶的配置仍能显示与自愈。
+- **key 状态按文档优先级**（`lib/config-store.ts`）：静态 `api_key` 优先于 `api_key_cmd`，
+  旧卡片只看后者，已配静态 key 的条目会被误报成「动态 key」。`keyIsDynamic` 现在要求
+  「有命令且无明文」；迁移写命令时同时删除明文，避免命令永远不生效。
+- **`ocr_scan` 会话可见性**（`host.ts`、`lib/scan-scope.ts`、`lib/cli.ts`）：scan 也会
+  经 `session.New` 落会话，而 `ocr_session` 总按 git 顶层查询；此前保留 CWD，子目录发起的
+  scan 会话永远列不出来。现在 workdir 规范到 git 顶层，`path`/`exclude` 从原始目录重基，
+  `rule` 仍按原始 repo 解析（`fileRoot`），扫描范围不变；重基后的相对 `path` 统一用 `/`
+  （Windows 也一致，与 `exclude` 模式同一表示）。
+- **preview 忽略参数回执**（`lib/preview-params.ts`、`host.ts`）：preview 不运行 LLM，
+  显式传入的 `provider`/`model`/`effort` 等参数现在回在 `ignoredParams` 里并附提示，
+  不再静默丢弃。
+- **delegate preview 回执与旗标**（`lib/cli.ts`、`host.ts`）：回执补
+  `totalFiles`/`excludedCount`（清单保持完整）；命令构建不再拼 `--provider`/`--model`
+  ——OCR 的 delegate flag 组只注册了 `--background`，传了会变成 cobra unknown flag。
+- **MCP URL 跨解析器歧义**（`lib/mcp-config.ts`）：`http:///nohost`、反斜杠、空白/控制
+  字符此前能过 WHATWG `new URL()`，Go 侧 `url.Parse` 却给出空 Host。现在先要求显式
+  authority、拒绝反斜杠与空白，再交 `URL.canParse` 复核。
+- **MCP header 环境变量**（`lib/mcp-config.ts`、`lib/remote-shape.ts`、`src/client-entry.ts`）：
+  remote header 里 `$VAR` 在 OCR 运行时展开为空会直接连接失败。保存成功时回非阻断
+  `warnings`，设置卡在「已保存」后逐条显示，不再把保存成功当成连接一定成功。
+- **导出目录 TTL**（`lib/tmp-cleanup.ts`、`host.ts`）：`ocr-session-export-*` 保留 7 天，
+  每次导出前按 mtime 清掉过期目录；只删本包前缀、只删真实目录，清理失败不挡导出。
+- **状态契约补 `failed`**（`lib/parse.ts`、`lib/tool-schemas.ts`）：摘要枚举补齐 OCR
+  manifest 的完整状态集；解析层对 `failed` 仍判 `ok=false`，不进摘要。
+
+### Verification
+
+- `npm run check`：typecheck、lint、双构建、**681 用例**、四项 100% 覆盖率与 oxfmt 全绿。
+- 真机核对：隔离 profile 启动 dsh 并成功调用 `ocr_llm`；`ocr llm test` 复现内置 provider
+  分桶报错后验证修复；scan 子目录会话不可见由真实 OCR + mock LLM 复现后验证修复。
+
 ## 0.1.13
 
 修复 0.1.12 引入的 web 启动失败：设置卡组件收回 `client.js` 内联，移除对 `@jayyuen66/dsh-plugin-shared/client` 的模块表外置与 `cordis.patch.yml` 里的 shared 供应行。对外工具与 Remote 方法名单不变；0.1.12 里遇到「应用无法启动或已意外停止」的用户升级本版即可，不需要再把 shared 装成 profile 的直接依赖。

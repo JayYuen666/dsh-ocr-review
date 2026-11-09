@@ -125,11 +125,13 @@ export interface OcrMcpSaveRequest {
   readonly revision?: string | undefined;
 }
 
-/** MCP 配置写入的回执：`count` 是保存后的 server 条数，`revision` 是这一版内容的新摘要。 */
+/** MCP 配置写入的回执：`count` 是保存后的 server 条数，`revision` 是这一版内容的新摘要。
+ *  `warnings` 是非阻断提示（如 header 引用的环境变量当前为空），旧宿主可以不带。 */
 export interface OcrMcpSaved {
   readonly ok: true;
   readonly count: number;
   readonly revision: string;
+  readonly warnings?: readonly string[];
 }
 
 export type OcrMcpSaveReply = OcrMcpSaved | OcrRemoteRefused;

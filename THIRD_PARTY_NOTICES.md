@@ -72,7 +72,7 @@ SOFTWARE.
 | `ocr llm test` / `providers` / `models` | select 后的连通性验证与 LLM 清单查询 |
 | `ocr auth status` | 设置卡查询 ChatGPT 登录态；登录/登出仍由用户在终端执行 |
 | `config.json` 的 `mcp_servers` 与 `providers.chatgpt.model` | MCP 管理区与 ChatGPT provider 选择；只改对应分支，不写 key |
-| `config.json` 的 `custom_providers.<name>.{url,protocol,model,api_key_cmd}` | provider/model 的应用配置；key 经 `api_key_cmd` 动态读取，绝不落明文 |
+| `config.json` 的 `providers.<name>` / `custom_providers.<name>.{url,protocol,model,api_key_cmd}` | provider/model 的应用配置（内置名落 `providers`，自定义名落 `custom_providers`）；key 经 `api_key_cmd` 动态读取，绝不落明文 |
 
 这些都是 CLI 的外层面，但不是任何文档承诺过的稳定 API——本包把约定钉在上面那一版正是为了
 守住这一组接口；上游变更时以本包的契约闸测试（`test/cli.test.ts`、`test/parse.test.ts`）为

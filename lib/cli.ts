@@ -163,6 +163,9 @@ export interface ReviewScopeArgs {
   /** 未知来源值：调用方（host.ts 直接 spread 模型入参）可塞任意类型，故按
    *  未知声明、由 resolveOutputFormat 白名单钳制。 */
   format?: unknown;
+  /** `--rule` 的解析根。scan 规范化到 git 顶层后，模型给的 rule 仍相对原始 repo；
+   *  host 把原始根放这里，命令的 workdir 才可以用规范化后的顶层。 */
+  fileRoot?: string;
 }
 
 export interface ScanScopeArgs {
@@ -189,6 +192,8 @@ export interface ScanScopeArgs {
   rule?: unknown;
   /** 同 ReviewScopeArgs.format：未知来源、白名单钳制。 */
   format?: unknown;
+  /** 同 ReviewScopeArgs.fileRoot：rule 的解析根（原始 repo，而非规范化后的顶层）。 */
+  fileRoot?: string;
 }
 
 export interface BuiltCommand {
@@ -303,7 +308,9 @@ function selectionFlags(
   if (excludes.length > 0) {
     parts.push("--exclude", shq(excludes.join(",")));
   }
-  const rule = repoFileOf(args.rule, repo, "rule", RULE_FILE_MAX_BYTES, messages);
+  // rule 的解析根可以与命令的 workdir 不同：scan 规范化到 git 顶层后，模型给的
+  // `rule.json` 仍相对它当初指定的 repo，不能用顶层去解析（会落到另一个文件）。
+  const rule = repoFileOf(args.rule, args.fileRoot ?? repo, "rule", RULE_FILE_MAX_BYTES, messages);
   if (rule !== null) {
     parts.push("--rule", shq(rule));
   }
@@ -934,8 +941,12 @@ export function buildDelegatePreviewCommand(
     "json",
     ...scopeFlags(scopeArgs, messages),
     ...selectionFlags(scopeArgs, repo, messages),
-    ...backgroundFlags(scopeArgs, messages),
   ];
+  // delegate preview 的原生 flag 里只有 --background：shared_flags.go 的
+  // registerDelegateFlags 没有注册 --provider/--model。这里不能复用 backgroundFlags
+  // （它还给 review 拼这两枚），否则直连调用方传了 provider/model 就会换成
+  // cobra 的 "unknown flag" 错误。
+  pushTextFlag(parts, BACKGROUND_FLAG, args.background, messages);
   const backgroundFile = repoFileOf(
     args.backgroundFile,
     repo,

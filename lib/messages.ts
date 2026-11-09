@@ -191,6 +191,8 @@ export interface OcrReviewMessages {
   readonly mcpSaveFailed: string;
   /** MCP 保存的基线已过期：盘上的 mcp_servers 在读过之后被别人改过。 */
   readonly mcpSaveConflict: string;
+  /** 保存成功但 header 引用的环境变量当前为空：OCR 连接时会展开为空并拒绝连接。 */
+  readonly mcpHeaderEnvWarning: string;
   /** ChatGPT 模型必填。 */
   readonly chatGptModelRequired: string;
   /** ChatGPT 配置写入成功。 */
@@ -325,6 +327,8 @@ export interface OcrReviewMessages {
   // ── 工具结果里的 hint ─────────────────────────────────────────────────────
   readonly previewHint: string;
   readonly filePreviewHint: string;
+  /** preview 下显式传入但不生效的参数清单（{params} = 逗号分隔的参数名）。 */
+  readonly previewIgnoredParams: string;
   readonly ruleHint: string;
   readonly sessionEmpty: string;
   readonly sessionTruncated: string;
@@ -474,6 +478,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     mcpSaveFailed: "写入 MCP 配置失败（{where}）：{cause}",
     mcpSaveConflict:
       "MCP 配置在读取之后已被改动（另一张设置卡或手工编辑），本次保存未写入。请重新载入后再保存。",
+    mcpHeaderEnvWarning:
+      "MCP server「{name}」的 header「{header}」引用了环境变量 {variable}，当前进程里没有值；OCR 连接时会展开为空并拒绝连接。若该变量只在 OCR 的 shell 环境里可忽略这条警告。",
     chatGptModelRequired: "ChatGPT 模型名必填",
     chatGptSaved: "已切换到 ChatGPT provider，模型：{model}",
     chatGptSaveFailed: "写入 ChatGPT 配置失败：{cause}",
@@ -490,7 +496,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     sessionCompareHint:
       "四桶含义：new=只在后一次出现；persisting=两次都有；resolved=只在前一次出现且后一次审过该文件；not_reviewed=只在前一次出现且后一次没审该文件（不算已解决）。",
     sessionExportHint:
-      "已导出为自包含 HTML 文件；路径在 sessionOutput 里，直接用浏览器打开即可（文件留在临时目录，不会自动删除）。",
+      "已导出为自包含 HTML 文件；路径在 sessionOutput 里，直接用浏览器打开即可（文件留在临时目录，过期后由后续导出自动清理）。",
     sourceSettingsUnavailable:
       "dsh 设置服务（ctx.settings）未装配：本插件需要它读取已配置的 provider 列表",
     sourceSettingsFailed: "调用 dsh 设置服务失败：{message}",
@@ -627,6 +633,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     filePreviewHint:
       "这是文件选择预览：没有调用 LLM、没有创建会话。要真正审查请去掉 preview 后重跑。" +
       "列表按上限截断；truncated=true 时请用 exclude/path 缩小范围。",
+    previewIgnoredParams:
+      "preview 模式不运行 LLM，以下参数已忽略：{params}。要去掉 preview 后重跑才会生效。",
     ruleHint:
       "按分组规则逐个审查对应文件，输出评论建议格式：{path, content, start_line, end_line, category, severity}。",
     sessionEmpty: "（暂无历史评审会话：先跑一次 ocr_review/ocr_scan 再查询）",
@@ -832,6 +840,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     mcpSaveFailed: "failed to write the MCP config ({where}): {cause}",
     mcpSaveConflict:
       "the MCP config changed after it was read (another settings card or a manual edit); nothing was written. Reload and save again.",
+    mcpHeaderEnvWarning:
+      'MCP server "{name}" header "{header}" references {variable}, which has no value in the current process; OCR will expand it to empty and refuse the connection. Ignore this warning if the variable exists only in OCR\'s shell environment.',
     chatGptModelRequired: "a ChatGPT model slug is required",
     chatGptSaved: "switched to the ChatGPT provider, model: {model}",
     chatGptSaveFailed: "failed to write the ChatGPT config: {cause}",
@@ -848,7 +858,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     sessionCompareHint:
       "Bucket meanings: new = only in the later run; persisting = in both; resolved = only in the earlier run and the later run reviewed that file; not_reviewed = only in the earlier run and the later run never looked at that file (not resolved).",
     sessionExportHint:
-      "Exported as a self-contained HTML file; the path is in sessionOutput — open it in a browser. It stays in the temp directory and is not deleted automatically.",
+      "Exported as a self-contained HTML file; the path is in sessionOutput — open it in a browser. It stays in the temp directory and older exports are cleaned up automatically.",
     sourceSettingsUnavailable:
       "the dsh settings service (ctx.settings) is not wired up: this plugin needs it to read the configured provider list",
     sourceSettingsFailed: "calling the dsh settings service failed: {message}",
@@ -1032,6 +1042,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "This is a file-selection preview: no LLM call and no session were created. Drop preview and " +
       "rerun to actually review. Lists are capped; when truncated=true, narrow the scope with " +
       "exclude/path.",
+    previewIgnoredParams:
+      "preview does not run the LLM; these parameters were ignored: {params}. They take effect only after dropping preview and rerunning.",
     ruleHint:
       "Review the files of each group against its rule and emit comment suggestions in the shape " +
       "{path, content, start_line, end_line, category, severity}.",

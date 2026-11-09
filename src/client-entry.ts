@@ -1625,7 +1625,10 @@ function useMcpPanel(
       } else {
         mcpDirtyRef.current = false;
         mcpRevisionRef.current = reply.revision;
-        setMcpMsg(t("mcpSaved"));
+        // 保存成功但 host 给了非阻断警告（如 header 的 $VAR 当前为空）：一起显示，
+        // 不要把“保存成功”当成“连接一定成功”。
+        const warnings = reply.warnings ?? [];
+        setMcpMsg([t("mcpSaved"), ...warnings].join("\n"));
       }
     } catch (error) {
       setMcpMsg(String(error));

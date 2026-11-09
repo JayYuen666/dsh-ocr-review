@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   applyChatGptModel,
+  headerEnvWarnings,
   mcpServersRevision,
   readMcpServers,
   saveMcpServers,
@@ -159,6 +160,15 @@ describe("mcp / chatgpt 配置读写", () => {
     ["remote 带 command", { server: { type: "remote", url: "https://x", command: "x" } }],
     ["remote 缺 url", { server: { type: "remote" } }],
     ["remote url 非 http", { server: { type: "remote", url: "ftp://x" } }],
+    // 跨解析器歧义形态：WHATWG 会把 `http:///nohost` 读成 host=nohost，而 OCR 的 Go
+    // `url.Parse` 给出 Host=""。这些必须在写盘前拒绝，否则失败点离用户动作很远。
+    ["remote url 三斜杠", { server: { type: "remote", url: "http:///nohost" } }],
+    ["remote url 无 host", { server: { type: "remote", url: "http://" } }],
+    ["remote url 只有路径", { server: { type: "remote", url: "http:///a/b" } }],
+    ["remote url 坏 authority", { server: { type: "remote", url: "http://[" } }],
+    ["remote url 反斜杠", { server: { type: "remote", url: String.raw`http://host\path` } }],
+    ["remote url 含空白", { server: { type: "remote", url: "http://exa mple.com" } }],
+    ["remote url 含控制字符", { server: { type: "remote", url: "http://host/\u0000x" } }],
     ["headers 非对象", { server: { type: "remote", url: "https://x", headers: [] } }],
     [
       "headers 值非字符串",
@@ -185,6 +195,72 @@ describe("mcp / chatgpt 配置读写", () => {
     expect(result.ok).toBe(false);
     expect(result.ok ? "" : result.error).toContain("MCP server「");
     expect(readFileSync(configPath, "utf8")).toBe(before);
+  });
+
+  it("url 只判语法、不封地址段：本机/私网/元数据地址按部署策略放行", async () => {
+    // 这是一条**决策用例**：插件本身不请求 URL，真正连接的是 OCR CLI；管理员面
+    // 允许配置本地 MCP server 是既定需求。若将来要做 SSRF 收敛，先改这条用例。
+    const target = path.join(root, "url-policy.json");
+    const urls = [
+      "http://127.0.0.1:8080/v1",
+      "http://localhost:9000/sse",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::1]:1234",
+      "https://mcp.example.com/v1?x=1",
+    ];
+    await Promise.all(
+      urls.map(async (url) => {
+        const result = await saveMcpServers(
+          target,
+          JSON.stringify({ server: { type: "remote", url } }),
+          zh,
+        );
+        expect({ url, ok: result.ok }).toStrictEqual({ url, ok: true });
+      }),
+    );
+  });
+
+  it("remote header 引用未设置的环境变量 ⇒ 保存成功但带非阻断警告", async () => {
+    const target = path.join(root, "header-warnings.json");
+    const missing = `OCR_MCP_MISSING_${process.pid}`;
+    const saved = await saveMcpServers(
+      target,
+      JSON.stringify({
+        srv: {
+          type: "remote",
+          url: "https://mcp.example.com",
+          headers: { Authorization: `Bearer $${missing}`, "X-Trace": `\${PATH}` },
+        },
+      }),
+      zh,
+    );
+    expect(saved.ok).toBe(true);
+    const warnings = saved.ok ? saved.warnings : [];
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(missing);
+    expect(warnings[0]).toContain("Authorization");
+    // 已设置的变量（PATH）不告警。
+    expect(warnings[0]).not.toContain("PATH");
+  });
+
+  it("headerEnvWarnings：异常形状不抛，同一 header 的重复变量只告警一次", () => {
+    const missing = `OCR_MCP_SHAPE_${process.pid}`;
+    const warnings = headerEnvWarnings(
+      {
+        notRecord: "x",
+        stdio: { type: "stdio", headers: { auth: `$${missing}` } },
+        noHeaders: { type: "remote", url: "https://x" },
+        badHeader: { type: "remote", headers: { auth: 1 } },
+        remote: {
+          type: "remote",
+          headers: { auth: `$${missing} \${${missing}}`, trace: `$${missing}` },
+        },
+      },
+      zh,
+    );
+    // A 里的两次引用去重成一条，B 再一条。
+    expect(warnings).toHaveLength(2);
+    expect(warnings.every((warning) => warning.includes(missing))).toBe(true);
   });
 
   it("写盘失败（配置路径是目录）⇒ 拒绝，且文案是写侧不是读侧", async () => {

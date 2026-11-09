@@ -122,7 +122,10 @@ const rulesCheckCmd = (
   messages: OcrReviewMessages = zh,
 ): BuiltCommand => buildRulesCheckCommand(args, messages);
 
-/** shq 的逆：剥外层单引号并还原 '\''。 */
+/** delegate preview 不认的两枚 flag：在多条断言里复用，避免重复字面量。 */
+const PROVIDER_FLAG = "--provider";
+const MODEL_FLAG = "--model";
+
 function shqUnwrap(quoted: string): string {
   if (!quoted.startsWith("'") || !quoted.endsWith("'")) {
     throw new Error(`not shq-quoted: ${quoted.slice(0, 40)}`);
@@ -677,7 +680,7 @@ describe("buildScanCommand", () => {
     expect(command).toContain("--provider 'p1'");
     expect(command).toContain("--model 'm1'");
     // 缺省省略，跟随 OCR 全局配置。
-    expect(scanCmd({ repo: "/r" }, "/o").command).not.toContain("--provider");
+    expect(scanCmd({ repo: "/r" }, "/o").command).not.toContain(PROVIDER_FLAG);
   });
 });
 
@@ -777,6 +780,20 @@ describe("version 探测：命令词与版本解析", () => {
 });
 
 describe("delegate 命令", () => {
+  it("preview：不拼 --provider/--model（delegate 原生 flag 没有它们）", () => {
+    // 直连调用方仍可能塞进这两个键；拼出来就是 cobra 的 unknown flag。
+    const args = {
+      repo: "/r",
+      background: "ctx",
+      provider: "p",
+      model: "m",
+    } as DelegatePreviewArgs;
+    const { command } = previewCmd(args);
+    expect(command).toContain("--background 'ctx'");
+    expect(command).not.toContain(PROVIDER_FLAG);
+    expect(command).not.toContain(MODEL_FLAG);
+  });
+
   it("preview：workspace 缺省、branch 带 merge-base 对", () => {
     const { command } = previewCmd({
       repo: "/r",
@@ -1434,7 +1451,7 @@ describe("1.13.3 新增参数：preview / noFilter / scan 开关 / max-git-procs
   it("scan preview 不带 LLM/provider 参数；scan 的 no-* / resume / maxGitProcs 透传", () => {
     const preview = scanCmd({ repo: root, preview: true, provider: "p" }, "/o").command;
     expect(preview).toContain(" scan --audience agent --format json --preview ");
-    expect(preview).not.toContain("--provider");
+    expect(preview).not.toContain(PROVIDER_FLAG);
     expect(() => scanCmd({ repo: root, preview: true, resume: "s" }, "/o")).toThrow(
       /preview 不读写会话/u,
     );

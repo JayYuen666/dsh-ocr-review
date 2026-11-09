@@ -197,6 +197,14 @@ import type {
   OcrTestReply,
 } from "./lib/remote-shape.ts";
 import { applyChatGptModel, readMcpServers, saveMcpServers } from "./lib/mcp-config.ts";
+import { SESSION_EXPORT_PREFIX, sweepStaleSessionExports } from "./lib/tmp-cleanup.ts";
+import { isPathInside, rebaseScanScope } from "./lib/scan-scope.ts";
+import {
+  REVIEW_PREVIEW_IGNORED,
+  SCAN_PREVIEW_IGNORED,
+  ignoredPreviewParams,
+  withPreviewIgnoredNote,
+} from "./lib/preview-params.ts";
 // provider 清单的来源层和外部 config.json 的写入层各自成模块（判据分在两侧，见那两个文件的头
 // 注释）：命名空间常量在 lib/provider-source.ts，脚本落在 lib/config-store.ts。
 import { PI_AI_NAMESPACE } from "./lib/provider-source.ts";
@@ -1776,10 +1784,10 @@ function realpathOrSelf(root: string): string {
  * 空，表现为「写得出会话却永远列不出来」。符号链接前缀同理：git 报的是 realpath，
  * 而 filepath.Abs 保留 `/tmp` 这类前缀。
  *
- * 为什么不统一提升所有工具：scan 靠 workdir 限定子目录（OCR 的 scan 路径
- * requireGit=false，保留 CWD 以免 `git ls-files` 走遍整个仓库），一并提升会把扫描
- * 范围扩到整个 monorepo。scan 又不落会话（只有 review 经 agent.New → session.New
- * 建会话），所以它保持原样就行，两侧本来就用同一套处理。
+ * 为什么 scan 也走这里：它同样会创建会话（`scan.NewAgent` 自动建 session.New），
+ * 会话目录同样按 RepoDir 编码。此前认为“scan 不落会话”所以保留 CWD，实测子目录发起的
+ * scan 会话在 `ocr_session`（总按顶层查询）里永远不可见。扫描范围改由 `rebaseScanScope`
+ * 把 path/exclude 从原始目录重基到顶层来保持，不再依赖 CWD。
  *
  * 非 git 目录（归档后的 checkout 等）回退到 realpath：会话仍按同一路径寻址。
  *
@@ -2008,7 +2016,12 @@ async function saveMcpReply(request: unknown, deps: SelectEndpointDeps): Promise
       revision,
     );
     return result.ok
-      ? { ok: true, count: result.count, revision: result.revision }
+      ? {
+          ok: true,
+          count: result.count,
+          revision: result.revision,
+          warnings: result.warnings,
+        }
       : { ok: false, error: result.error, status: OCR_REFUSE_STATUS.invalid };
   } catch (error) {
     // 设置项里的路径不合形态时 pluginPaths 会抛：这是**服务侧**故障，不是请求体错
@@ -2278,13 +2291,18 @@ async function runReviewPreview(run: PreviewRun): Promise<unknown> {
         raw: echoRaw(text, RAW_ECHO_LIMIT),
       });
     }
-    return { ...parsed.view, hint: messages.filePreviewHint };
+    const ignored = ignoredPreviewParams(args, REVIEW_PREVIEW_IGNORED);
+    return {
+      ...parsed.view,
+      ignoredParams: ignored,
+      hint: withPreviewIgnoredNote(messages.filePreviewHint, ignored, messages),
+    };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-/** scan 的预览支路（与 review 同形，只是不归一化 git 顶层）。 */
+/** scan 的预览支路（与 review 同形；repo 现在也规范化到 git 顶层）。 */
 async function runScanPreview(run: PreviewRun): Promise<unknown> {
   const { host, config, args, repo, signal, messages } = run;
   if (args["wait"] !== undefined && args["wait"] !== null && !waitOf(args["wait"], messages)) {
@@ -2315,7 +2333,12 @@ async function runScanPreview(run: PreviewRun): Promise<unknown> {
         raw: echoRaw(text, RAW_ECHO_LIMIT),
       });
     }
-    return { ...parsed.view, hint: messages.filePreviewHint };
+    const ignored = ignoredPreviewParams(args, SCAN_PREVIEW_IGNORED);
+    return {
+      ...parsed.view,
+      ignoredParams: ignored,
+      hint: withPreviewIgnoredNote(messages.filePreviewHint, ignored, messages),
+    };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2516,13 +2539,22 @@ function registerScanTool(
       // 找到 + 怎么装」，而不是让 bash 跑到 exit 127 再反推。
       const cliStatus = probe();
       assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
-      const repo = ocrRepo(args, exec, runMsgs);
-      const preview = previewOf(args["preview"], runMsgs);
+      const rawRepo = ocrRepo(args, exec, runMsgs);
+      // scan 与 review 一样会创建会话（OCR 的 scan.NewAgent 自动建），而 ocr_session 总按
+      // git 顶层查询；workdir 因此也用顶层。扫描范围由 rebaseScanScope 把 path/exclude
+      // 从原始目录重基过去来保持，不再依赖 CWD。
+      const rawReal = realpathOrSelf(rawRepo);
+      const canonical = await canonicalReviewRoot(host, rawRepo);
+      // 原始目录不在 git 顶层内（极少数：符号链接指向仓库外/顶层解析异常）时不提升，
+      // 否则 workdir 换了而 path 无法重基，扫描范围会被静默改变。
+      const repo = isPathInside(canonical, rawReal) ? canonical : rawReal;
+      const scanArgs = rebaseScanScope(args, rawReal, repo);
+      const preview = previewOf(scanArgs["preview"], runMsgs);
       if (preview) {
         return runScanPreview({
           host,
           config,
-          args,
+          args: scanArgs,
           repo,
           signal: exec.signal,
           messages: runMsgs,
@@ -2538,7 +2570,7 @@ function registerScanTool(
       await healKeyScriptPointer(host, config);
       const homeOverride = ocrHome(config);
       try {
-        const { command, workdir } = buildScanCommand({ ...args, repo }, outPath, runMsgs);
+        const { command, workdir } = buildScanCommand({ ...scanArgs, repo }, outPath, runMsgs);
         // 同 ocr_review：宿主回收守护（lib/cli.ts wrapWithHostReaper）。
         const guarded = wrapWithHostReaper(withHomeEnv(command, homeOverride), runMsgs);
         if (outPath === undefined) {
@@ -2652,7 +2684,10 @@ function registerDelegatePreviewTool(
         mode: parsed.mode,
         repository: parsed.repository,
         mergeBase: parsed.mergeBase === "" ? null : parsed.mergeBase,
+        // 清单保持完整（委托场景要拿全量文件），计数让调用方不必自己数数组。
+        totalFiles: parsed.totalFiles,
         reviewableCount: parsed.reviewable.length,
+        excludedCount: parsed.excluded.length,
         insertions: parsed.reviewable.reduce((acc, file) => acc + file.insertions, 0),
         deletions: parsed.reviewable.reduce((acc, file) => acc + file.deletions, 0),
         reviewableFiles: parsed.reviewable,
@@ -2799,7 +2834,10 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
         };
       }
       if (action === "export") {
-        const exportDir = mkdtempSync(path.join(tmpdir(), "ocr-session-export-"));
+        // 旧导出目录按 TTL 收走：HTML 是用户产物，不成功后立刻删，但也不能让
+        // tmpdir 无限增长。放在 mkdtemp 之前，本次新目录永远不会被这一趟清掉。
+        await sweepStaleSessionExports(tmpdir());
+        const exportDir = mkdtempSync(path.join(tmpdir(), SESSION_EXPORT_PREFIX));
         const output = path.join(exportDir, "review.html");
         try {
           const { command, workdir } = buildSessionCommand({ ...args, repo, output }, runMsgs);

@@ -22,7 +22,7 @@ import {
   rmSync,
   truncateSync,
 } from "node:fs";
-import { symlink } from "node:fs/promises";
+import { symlink, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,11 +35,17 @@ import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-
 import { MESSAGES } from "../lib/messages.ts";
 import { resolveOcrAvailability, EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 import type { OcrAvailabilityProbe } from "../host.ts";
+import { sweepStaleSessionExports } from "../lib/tmp-cleanup.ts";
+import { rebaseScanScope } from "../lib/scan-scope.ts";
 import { OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
 import { shq } from "../lib/argv-guard.ts";
 
 const OCR_DIR_NAME = ".opencodereview";
 const OCR_CONFIG_NAME = "config.json";
+/** 只在“原始目录不在 git 顶层内”的用例里用的仓库路径。 */
+const OUTSIDE_REPO = "/elsewhere";
+/** session export 产物文件名（多处以它为路径尾段）。 */
+const EXPORT_HTML = "review.html";
 
 /**
  * 临时 home 沙箱：宿主侧 `.dsh/` 与外部 ocr CLI 的 `.opencodereview/` 都在这里，
@@ -1522,13 +1528,60 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(sessionCommand).not.toContain(MONO_SUB);
     });
 
-    it("ocr_scan 不提升：workdir 保留传入的子目录", async () => {
-      // scan 靠 workdir 限定扫描范围（OCR 的 scan 路径 requireGit=false，保留 CWD），
-      // 一起提升会把扫描扩到整个 monorepo；而它不落会话，无需与 review 对齐。
+    it("ocr_scan 也提升：workdir 用顶层，原目录作为 --path 补回，扫描范围不变", async () => {
+      // scan 的会话目录也按 RepoDir 编码（scan.NewAgent 自动建会话）；保留 CWD 会让
+      // ocr_session（总按顶层查询）永远列不到子目录发起的 scan。范围改由 --path 保持。
       host.shell.gitTopLevel = MONO_TOP;
       host.shell.scripts.push({ output: REVIEW_JSON });
       await toolOf(host, "ocr_scan").execute({ repo: MONO_SUB, wait: true }, makeExec());
-      expect(host.shell.resolveCalls.at(-1)?.workdir).toBe(MONO_SUB);
+      const scanCall = host.shell.resolveCalls.at(-1);
+      expect(scanCall?.workdir).toBe(MONO_TOP);
+      const command = String(scanCall?.command);
+      expect(command).toContain("--path");
+      expect(command).toContain("pkg/foo");
+    });
+
+    it("ocr_scan 重基 path/exclude 与 rule：范围与规则仍按原始 repo", async () => {
+      const top = mkdtempSync(path.join(tmpdir(), "ocr-scan-top-"));
+      const realTop = realpathSync(top);
+      const sub = path.join(realTop, "pkg", "foo");
+      mkdirSync(sub, { recursive: true });
+      writeFileSync(path.join(sub, "rule.json"), "{}");
+      try {
+        host.shell.gitTopLevel = realTop;
+        host.shell.scripts.push({ output: REVIEW_JSON });
+        await toolOf(host, "ocr_scan").execute(
+          {
+            repo: sub,
+            path: ["src", "../bar"],
+            exclude: ["vendor/**", "/root.lock"],
+            rule: "rule.json",
+            wait: true,
+          },
+          makeExec(),
+        );
+        const call = host.shell.resolveCalls.at(-1);
+        const command = String(call?.command);
+        expect(call?.workdir).toBe(realTop);
+        // 相对 path 重基到顶层；../bar 仍落在顶层内，变成 pkg/bar。
+        expect(command).toContain("--path");
+        expect(command).toContain("pkg/foo/src,pkg/bar");
+        // exclude 与路径同时加同一前缀，doublestar 的匹配语义不变。
+        expect(command).toContain("pkg/foo/vendor/**,pkg/foo/root.lock");
+        // rule 仍按模型给的原始 repo 解析，不能落到顶层下的同名文件。
+        expect(command).toContain(path.join(sub, "rule.json"));
+      } finally {
+        rmSync(top, { recursive: true, force: true });
+      }
+    });
+
+    it("ocr_scan 原始目录不在 git 顶层内 ⇒ 不提升，避免改范围", async () => {
+      host.shell.gitTopLevel = MONO_TOP;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_scan").execute({ repo: OUTSIDE_REPO, wait: true }, makeExec());
+      const scanCall = host.shell.resolveCalls.at(-1);
+      expect(scanCall?.workdir).toBe(OUTSIDE_REPO);
+      expect(String(scanCall?.command)).not.toContain("--path");
     });
 
     it("每条 ocr 调用都显式带 danger-full-access：否则会话写不进 ~/.opencodereview", async () => {
@@ -2601,6 +2654,16 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(result.excludedFiles).toHaveLength(1);
     });
 
+    it("review preview + 无效参数：ignoredParams 点名，hint 说明它们只在实跑生效", async () => {
+      host.shell.scripts.push({ output: PREVIEW_JSON });
+      const result = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", preview: true, effort: "high", provider: "p", concurrency: 4 },
+        makeExec(),
+      )) as { ignoredParams: string[]; hint: string };
+      expect(result.ignoredParams).toStrictEqual(["effort", "provider", "concurrency"]);
+      expect(result.hint).toContain("effort, provider, concurrency");
+    });
+
     it("review preview + wait=false 直接拒绝；preview 错类型也拒绝；预览回执坏掉时回显说明", async () => {
       await expect(
         toolOf(host, "ocr_review").execute(
@@ -2617,6 +2680,15 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         makeExec(),
       )) as string;
       expect(result).toContain("preview 回执");
+    });
+
+    it("scan preview + 无效参数：ignoredParams 按 scan 的清单点名", async () => {
+      host.shell.scripts.push({ output: PREVIEW_JSON });
+      const result = (await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", preview: true, batch: "none", noPlan: true, maxTokens: 100 },
+        makeExec(),
+      )) as { ignoredParams: string[] };
+      expect(result.ignoredParams).toStrictEqual(["batch", "noPlan"]);
     });
 
     it("scan preview：同一份解析器；正常扫描的 no-* 开关进命令", async () => {
@@ -2885,13 +2957,17 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       });
       const result = (await preview.execute({ repo: "/repo", wait: true }, makeExec())) as {
         mergeBase: string | null;
+        totalFiles: number;
         reviewableCount: number;
+        excludedCount: number;
         insertions: number;
         deletions: number;
         excludedFiles: unknown[];
       };
       expect(result.mergeBase).toBe("abc");
+      expect(result.totalFiles).toBe(1);
       expect(result.reviewableCount).toBe(1);
+      expect(result.excludedCount).toBe(1);
       expect(result.insertions).toBe(3);
       expect(result.deletions).toBe(1);
       expect(result.excludedFiles).toHaveLength(1);
@@ -2994,7 +3070,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         { repo: "/repo", action: "export", id: "s1" },
         makeExec(),
       )) as { sessionOutput: string };
-      expect(exported.sessionOutput.endsWith(path.join("review.html"))).toBe(true);
+      expect(exported.sessionOutput.endsWith(path.join(EXPORT_HTML))).toBe(true);
       expect(String(host.shell.resolveCalls[0]?.command)).toContain("session export");
       rmSync(path.dirname(exported.sessionOutput), { recursive: true, force: true });
       host.shell.scripts.push({ stdoutText: "[]" });
@@ -3469,5 +3545,124 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       ]);
       expect(host.shell.resolveCalls).toStrictEqual([]);
     });
+  });
+});
+
+describe("session export 临时目录清理", () => {
+  it("只删超过 TTL 的本包目录；近期目录、别的前缀与同名文件都不动", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ocr-export-sweep-"));
+    try {
+      const old = path.join(base, "ocr-session-export-old");
+      const recent = path.join(base, "ocr-session-export-recent");
+      const foreign = path.join(base, "other-export-old");
+      const file = path.join(base, "ocr-session-export-file");
+      for (const dir of [old, recent, foreign]) {
+        mkdirSync(dir);
+      }
+      writeFileSync(path.join(old, EXPORT_HTML), "old");
+      writeFileSync(file, "x");
+      const now = Date.now();
+      const eightDaysAgo = new Date(now - 8 * 24 * 60 * 60 * 1000);
+      await Promise.all(
+        [old, foreign, file].map(async (target) => {
+          await utimes(target, eightDaysAgo, eightDaysAgo);
+        }),
+      );
+      await expect(sweepStaleSessionExports(base, now, 7 * 24 * 60 * 60 * 1000)).resolves.toBe(1);
+      expect(existsSync(old)).toBe(false);
+      expect(existsSync(recent)).toBe(true);
+      expect(existsSync(foreign)).toBe(true);
+      expect(existsSync(file)).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("目录不存在 ⇒ 清理静默跳过（绝不挡住导出）", async () => {
+    const missing = path.join(tmpdir(), `ocr-no-such-${process.pid}`);
+    await expect(sweepStaleSessionExports(missing)).resolves.toBe(0);
+  });
+
+  it("单条目录删不掉 ⇒ 静默跳过，不影响本次导出", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ocr-export-locked-"));
+    const locked = path.join(base, "ocr-session-export-locked");
+    mkdirSync(locked);
+    writeFileSync(path.join(locked, EXPORT_HTML), "x");
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    await utimes(locked, old, old);
+    try {
+      // 注入「删除必失败」而不是靠权限位：Windows 没有 POSIX 权限语义，用真实
+      // 删除失败制造这条分支会让同一段代码在两种平台上覆盖到不同的分支。
+      await expect(
+        sweepStaleSessionExports(base, Date.now(), 7 * 24 * 60 * 60 * 1000, async () => {
+          throw new Error("EBUSY");
+        }),
+      ).resolves.toBe(0);
+      expect(existsSync(locked)).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("rebaseScanScope：scan 的 path/exclude 重基", () => {
+  const top = path.resolve("/top");
+  const from = path.join(top, "pkg", "foo");
+
+  it("from 与 repo 相同 ⇒ 原样返回（无需重基）", () => {
+    const args = { repo: top };
+    expect(rebaseScanScope(args, top, top)).toBe(args);
+  });
+
+  it("未给/空 path ⇒ 补原目录；空 exclude 保留为空数组", () => {
+    const out = rebaseScanScope({ path: null, exclude: [] }, from, top);
+    expect(out["fileRoot"]).toBe(from);
+    expect(out["path"]).toStrictEqual(["pkg/foo"]);
+    expect(out["exclude"]).toStrictEqual([]);
+    // 空数组与只有空白/逗号的字符串同样补回原目录。
+    const emptyArrayPath = rebaseScanScope({ path: [] }, from, top)["path"];
+    expect(emptyArrayPath).toStrictEqual(["pkg/foo"]);
+    const blankStringPath = rebaseScanScope({ path: " , " }, from, top)["path"];
+    expect(blankStringPath).toStrictEqual(["pkg/foo"]);
+    // 没给 exclude 时不凭空造一个键。
+    expect("exclude" in rebaseScanScope({}, from, top)).toBe(false);
+  });
+
+  it("数组 path：普通项、根、逃逸项；空白项被滤掉", () => {
+    const out = rebaseScanScope(
+      {
+        path: ["src", "../..", "../../../etc", " ", path.join(from, "abs")],
+        exclude: ["vendor/**", "/root.lock", " "],
+      },
+      from,
+      top,
+    );
+    expect(out["path"]).toStrictEqual([
+      "pkg/foo/src",
+      ".",
+      path.resolve(from, "../../../etc"),
+      "pkg/foo/abs",
+    ]);
+    expect(out["exclude"]).toStrictEqual(["pkg/foo/vendor/**", "pkg/foo/root.lock"]);
+  });
+
+  it("逗号串 path 与各形态 exclude 原样/逐项处理", () => {
+    const stringPath = rebaseScanScope({ path: "src,../bar" }, from, top)["path"];
+    expect(stringPath).toStrictEqual(["pkg/foo/src", "pkg/bar"]);
+    expect(rebaseScanScope({ path: 42 }, from, top)["path"]).toBe(42);
+    expect(rebaseScanScope({ path: ["ok", 42] }, from, top)["path"]).toStrictEqual(["ok", 42]);
+    expect(rebaseScanScope({ exclude: "vendor/**" }, from, top)["exclude"]).toBe(
+      "pkg/foo/vendor/**",
+    );
+    expect(rebaseScanScope({ exclude: ["ok", 42] }, from, top)["exclude"]).toStrictEqual([
+      "ok",
+      42,
+    ]);
+    expect(rebaseScanScope({ exclude: 42 }, from, top)["exclude"]).toBe(42);
+  });
+
+  it("原始目录不在顶层内 ⇒ 原样返回（不做会改变范围的重基）", () => {
+    const args = { path: ["x"] };
+    expect(rebaseScanScope(args, path.resolve(OUTSIDE_REPO), top)).toBe(args);
   });
 });

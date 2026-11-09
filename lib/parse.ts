@@ -12,10 +12,11 @@
 //   - tool_calls = {total, failure, failure_by_tool, failure_details}，是模型侧
 //     「这一场里 LLM 的工具调用失败了多少」的唯一出口（`--audience agent` 下 CLI 的
 //     进度行走 io.Discard，任何 stdout 文本都到不了这里）。
-//   - status: success | complete | partial | completed_with_warnings
+//   - status: success | complete | partial | failed | completed_with_warnings
 //     | completed_with_errors | skipped。skipped 表示无变更可审（区别于“审了但零
-//     发现”），partial 表示部分文件未完成但整体有覆盖（评论仍有效）。白名单外
-//     （含缺失、`{"error":…}` 型错误对象）一律 ok=false：exit 0 不等于评审成功。
+//     发现”），partial 表示部分文件未完成但整体有覆盖（评论仍有效），failed 表示
+//     整体失败（解析层判 ok=false，不会进摘要）。白名单外（含缺失、`{"error":…}`
+//     型错误对象）一律 ok=false：exit 0 不等于评审成功。
 //   - 退出码 0 = 完成（可能有 warning）；1 = 致命错误。致命错误由调用方根据
 //     stderr 抛错，不走到本解析。
 //   - delegate preview: {schema_version,mode,repository,total_files,

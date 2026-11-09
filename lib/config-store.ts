@@ -39,6 +39,68 @@ function strOf(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * OCR 1.13.5 的内置 provider 名（`ocr llm providers` 的 NAME 列）。
+ *
+ * 为什么这枚表是必需的：OCR 的 provider 解析是**按名字**分桶的（resolver.go 的
+ * tryProviderConfig：`LookupProvider(name)` 命中就读 `providers.<name>`，否则读
+ * `custom_providers.<name>`）。把内置名（openai/deepseek/anthropic…）写进
+ * custom_providers 时，配置看着完整，OCR 却在解析端点时直接报
+ * "provider … is not configured in providers section"。
+ *
+ * 名字比较按 OCR 的 LookupProvider 同款：trim + 小写。升级 OCR 后新增的内置名要
+ * 在这里补一格；`EXPECTED_OCR_CLI_VERSION` 的版本告警会提示这次核对。
+ */
+const OCR_PRESET_PROVIDERS: ReadonlySet<string> = new Set([
+  "anthropic",
+  "baidu-qianfan",
+  "bedrock",
+  "chatgpt",
+  "dashscope",
+  "dashscope-tokenplan",
+  "deepseek",
+  "edenai",
+  "gemini",
+  "hy-tokenplan",
+  "iflytek",
+  "kimi",
+  "kimi-global",
+  "litellm",
+  "mimo",
+  "minimax",
+  "minimax-cn",
+  "mistral",
+  "novita",
+  "ollama-cloud",
+  "openai",
+  "openai-responses",
+  "openrouter",
+  "siliconflow",
+  "siliconflow-cn",
+  "tencent-tokenhub",
+  "volcengine",
+  "xai",
+  "z-ai",
+  "z-ai-coding",
+]);
+
+/** 该名字是否命中 OCR 内置 provider（大小写/首尾空白按 OCR LookupProvider 归一）。 */
+function isPresetProvider(name: string): boolean {
+  return OCR_PRESET_PROVIDERS.has(name.trim().toLowerCase());
+}
+
+/** 当前 provider 的生效条目：内置名读 providers，其它读 custom_providers。 */
+function providerEntryOf(doc: Record<string, unknown>, provider: string): unknown {
+  const custom = fieldOf(doc, "custom_providers");
+  const presets = fieldOf(doc, "providers");
+  const customEntry = isRecord(custom) ? fieldOf(custom, provider) : undefined;
+  const presetEntry = isRecord(presets) ? fieldOf(presets, provider) : undefined;
+  if (isPresetProvider(provider)) {
+    return isRecord(presetEntry) ? presetEntry : customEntry;
+  }
+  return isRecord(customEntry) ? customEntry : presetEntry;
+}
+
 export interface OcrConfigCurrent {
   provider: string;
   model: string;
@@ -63,13 +125,16 @@ export function loadOcrConfig(configJsonText: string): {
     doc = {};
   }
   const provider = strOf(fieldOf(doc, "provider"));
-  const custom = fieldOf(doc, "custom_providers");
-  const entry = isRecord(custom) ? fieldOf(custom, provider) : undefined;
+  const entry = providerEntryOf(doc, provider);
+  const keyCmd = isRecord(entry) ? strOf(fieldOf(entry, "api_key_cmd")).trim() : "";
+  const keyPlain = isRecord(entry) ? strOf(fieldOf(entry, "api_key")).trim() : "";
   const current: OcrConfigCurrent = {
     provider,
-    model: isRecord(custom) ? strOf(fieldOf(entry, "model")) : "",
-    keyIsDynamic: isRecord(custom) && strOf(fieldOf(entry, "api_key_cmd")).length > 0,
-    url: isRecord(custom) ? strOf(fieldOf(entry, "url")) : "",
+    model: isRecord(entry) ? strOf(fieldOf(entry, "model")) : "",
+    // 文档优先级：静态 api_key 永远优先；同时存在时 api_key_cmd 被忽略并告警。
+    // 卡片必须按**真正生效**的那条显示，否则用户会以为动态 key 已接管。
+    keyIsDynamic: keyCmd !== "" && keyPlain === "",
+    url: isRecord(entry) ? strOf(fieldOf(entry, "url")) : "",
   };
   return { current, raw: doc };
 }
@@ -441,11 +506,12 @@ const WRITABLE_PROTOCOLS: ReadonlySet<string> = new Set([
 
 /**
  * 生成「选择 provider+model」后的 config.json 全文。
- * - provider 顶层设为目标名；custom_providers.<name> 写 url/protocol/model/
- *   api_key_cmd；同条目残留明文 api_key 清除。
+ * - provider 顶层设为目标名；**内置名写 providers.<name>，其它名字写
+ *   custom_providers.<name>**（OCR 按名字分桶，写错桶会在解析端点时报 not configured）。
+ * - 目标条目写 url/protocol/model/api_key_cmd；同条目残留明文 api_key 清除。
  * - 目标条目上已有的其它键（extra_headers/temperature/timeout_seconds…）与
- *   其余顶层键（language/max_tokens/effort/mcp_servers…）、其它
- *   custom_providers 条目一律原样保留，绝不丢配置。
+ *   其余顶层键（language/max_tokens/effort/mcp_servers…）、其它 provider
+ *   条目一律原样保留，绝不丢配置。
  */
 export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMessages): string {
   const doc = parseExistingConfig(input.existingText, input.configLabel, messages);
@@ -473,12 +539,13 @@ export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMess
       }),
     );
   }
-  const customsRaw = fieldOf(doc, "custom_providers");
-  const customs = isRecord(customsRaw) ? customsRaw : {};
-  // 合并而非整体覆盖：此前 `customs[provider] = entry` 会把该条目上用户手配的
+  const section = isPresetProvider(input.provider) ? "providers" : "custom_providers";
+  const sectionRaw = fieldOf(doc, section);
+  const sectionMap = isRecord(sectionRaw) ? sectionRaw : {};
+  // 合并而非整体覆盖：此前 `sectionMap[provider] = entry` 会把该条目上用户手配的
   // extra_headers / temperature / timeout_seconds / 自定义 headers 全删掉
   // （卡片只认四个键，用户却是在 OCR 侧配的）。
-  const existingRaw = fieldOf(customs, input.provider);
+  const existingRaw = fieldOf(sectionMap, input.provider);
   const existingEntry = isRecord(existingRaw) ? existingRaw : {};
   const entry: Record<string, unknown> = {
     ...existingEntry,
@@ -487,12 +554,12 @@ export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMess
     model: input.model,
     api_key_cmd: input.apiKeyCmd,
   };
-  // 迁移：同 provider 旧明文 api_key 移除（api_key_cmd 优先于 api_key 解析，
-  // 留下会混乱且违背「不落明文」决策）。
+  // 迁移：同 provider 旧明文 api_key 移除（静态 api_key 优先于 api_key_cmd，留下会
+  // 让动态命令永远不生效，也违背「不落明文」决策）。
   delete entry["api_key"];
-  customs[input.provider] = entry;
+  sectionMap[input.provider] = entry;
   doc["provider"] = input.provider;
-  doc["custom_providers"] = customs;
+  doc[section] = sectionMap;
   // 空串/纯空白不覆写：语言框被清空再保存，不该把盘上已有的 language 抹成 ""。
   // 和 lib/ocr-config.ts 里 selection 的展开用同一条规则（两处各写一遍会漂成两套语义）。
   const language = input.language?.trim();
@@ -549,12 +616,12 @@ export function renderConfigDoc(doc: Record<string, unknown>): string {
 
 /** api_key_cmd 指针自愈的结果。 */
 export interface KeyScriptRepoint {
-  /** 被重指向的 custom_providers 条目名；空数组 = 本次没动过任何配置。 */
+  /** 被重指向的 provider 条目名（两个桶）；空数组 = 本次没动过任何配置。 */
   repointed: string[];
 }
 
 /**
- * 把 custom_providers 里「脚本已不在」的 api_key_cmd 重指向当前安装目录。
+ * 把 providers / custom_providers 里「脚本已不在」的 api_key_cmd 重指向当前安装目录。
  *
  * 为什么必须有这一步：api_key_cmd 里烤的是**写那一刻**的插件安装绝对路径。插件会被
  * 重装、换 profile（desktop / browser / 任意自定义名）、换发布形态，目录一变就悬空
@@ -578,34 +645,38 @@ export function repointDanglingKeyScripts(
   if (!existsSync(current.script)) {
     return { repointed: [] };
   }
-  const custom = fieldOf(doc, "custom_providers");
-  if (!isRecord(custom)) {
-    return { repointed: [] };
-  }
-  // flatMap 而非 for + continue：本仓 lint 禁用 continue，而四条跳过判据用 flatMap 的
-  // 「命中就产出名字、否则产出空数组」写起来比嵌套 if 短，也更容易一眼看全。
-  const repointed = Object.entries(custom).flatMap(([name, entry]) => {
-    if (!isRecord(entry)) {
+  // 两个 provider 桶都要看：内置名走 providers、自定义走 custom_providers；旧版本
+  // 还可能把内置名写进 custom_providers，故不能只修一边。
+  const repointed = ["custom_providers", "providers"].flatMap((section) => {
+    const map = fieldOf(doc, section);
+    if (!isRecord(map)) {
       return [];
     }
-    const raw = fieldOf(entry, "api_key_cmd");
-    if (typeof raw !== "string" || raw === "") {
-      return [];
-    }
-    const parsed = parseApiKeyCmd(raw);
-    if (parsed === null || parsed.script === current.script) {
-      return [];
-    }
-    if (existsSync(parsed.script)) {
-      return [];
-    }
-    const dshHome =
-      parsed.dshHome !== undefined && !existsSync(parsed.dshHome)
-        ? current.dshHome
-        : parsed.dshHome;
-    // envKey 已由 parseApiKeyCmd 按 buildApiKeyCmd 的同一白名单校验过，这里不会抛。
-    entry["api_key_cmd"] = buildApiKeyCmd(current.script, parsed.envKey, dshHome, messages);
-    return [name];
+    // flatMap 而非 for + continue：本仓 lint 禁用 continue，而四条跳过判据用 flatMap 的
+    // 「命中就产出名字、否则产出空数组」写起来比嵌套 if 短，也更容易一眼看全。
+    return Object.entries(map).flatMap(([name, entry]) => {
+      if (!isRecord(entry)) {
+        return [];
+      }
+      const raw = fieldOf(entry, "api_key_cmd");
+      if (typeof raw !== "string" || raw === "") {
+        return [];
+      }
+      const parsed = parseApiKeyCmd(raw);
+      if (parsed === null || parsed.script === current.script) {
+        return [];
+      }
+      if (existsSync(parsed.script)) {
+        return [];
+      }
+      const dshHome =
+        parsed.dshHome !== undefined && !existsSync(parsed.dshHome)
+          ? current.dshHome
+          : parsed.dshHome;
+      // envKey 已由 parseApiKeyCmd 按 buildApiKeyCmd 的同一白名单校验过，这里不会抛。
+      entry["api_key_cmd"] = buildApiKeyCmd(current.script, parsed.envKey, dshHome, messages);
+      return [name];
+    });
   });
-  return { repointed };
+  return { repointed: [...new Set(repointed)] };
 }

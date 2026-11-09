@@ -63,14 +63,16 @@ const REVIEW_SUMMARY_SCHEMA = {
     "hint",
   ],
   properties: {
-    // summarizeReview 只在 parseReviewOutput ok=true 时被调用 ⇒ status 落在白名单内。
-    // partial 是 manifest 终态之一（manifest.go:167，exit 0），部分文件失败但整体有覆盖。
+    // summarizeReview 只在 parseReviewOutput ok=true 时被调用 ⇒ 当前路径不会产出 failed
+    // （failed 被解析层判成 ok=false）。枚举仍把它列上：这是输出契约的完整状态集，
+    // 解析层将来若调整 ok 判定，这里不必再跟着改一次。
     status: {
       type: "string",
       enum: [
         "success",
         "complete",
         "partial",
+        "failed",
         "completed_with_warnings",
         "completed_with_errors",
         "skipped",
@@ -288,6 +290,7 @@ const FILE_PREVIEW_SCHEMA = {
     "reviewableFiles",
     "excludedFiles",
     "truncated",
+    "ignoredParams",
     "hint",
   ],
   properties: {
@@ -299,6 +302,8 @@ const FILE_PREVIEW_SCHEMA = {
     reviewableFiles: { type: "array", items: PREVIEW_FILE_SCHEMA },
     excludedFiles: { type: "array", items: PREVIEW_FILE_SCHEMA },
     truncated: { type: "boolean" },
+    // preview 不运行 LLM：显式给出但无下游的参数名（空数组 = 没有忽略项）。
+    ignoredParams: { type: "array", items: { type: "string" } },
     hint: { type: "string" },
   },
 } satisfies JsonSchemaNode;
@@ -324,7 +329,9 @@ export const PREVIEW_OUTPUT_SCHEMA = {
         "mode",
         "repository",
         "mergeBase",
+        "totalFiles",
         "reviewableCount",
+        "excludedCount",
         "insertions",
         "deletions",
         "reviewableFiles",
@@ -336,7 +343,10 @@ export const PREVIEW_OUTPUT_SCHEMA = {
         repository: { type: "string" },
         // OCR 端 merge_base 带 omitempty（delegate_cmd.go:263）：缺席落 null。
         mergeBase: NULLABLE_STRING,
+        // 清单不截断（委托方要全量），但给出规模计数，避免调用方自己数数组。
+        totalFiles: { type: "number" },
         reviewableCount: { type: "integer" },
+        excludedCount: { type: "integer" },
         // num() 经 nonNegativeInt统一处理后恒为整数；写 number 是与 summary 同一条放宽规则。
         insertions: { type: "number" },
         deletions: { type: "number" },

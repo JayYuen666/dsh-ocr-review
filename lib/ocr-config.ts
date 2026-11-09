@@ -366,9 +366,36 @@ function migrateEntry(
   return "migrated";
 }
 
+/** 迁移一个 provider 桶（providers 或 custom_providers）。 */
+function migrateSection(
+  doc: Record<string, unknown>,
+  section: "custom_providers" | "providers",
+  envByProvider: ReadonlyMap<string, string>,
+  context: MigrateContext,
+): { migrated: string[]; skippedUnknown: string[] } {
+  const map = fieldOf(doc, section);
+  if (!isRecord(map)) {
+    return { migrated: [], skippedUnknown: [] };
+  }
+  const migrated: string[] = [];
+  const skippedUnknown: string[] = [];
+  for (const [name, raw] of Object.entries(map)) {
+    if (isRecord(raw)) {
+      const result = migrateEntry(raw, envByProvider.get(name), context);
+      if (result === "migrated") {
+        migrated.push(name);
+      } else if (result === "unknown") {
+        skippedUnknown.push(name);
+      }
+    }
+  }
+  return { migrated, skippedUnknown };
+}
+
 /**
- * 迁移：把自定义 provider 条目里的明文 api_key 改为 api_key_cmd（动态读凭据）。
- * api_key_cmd 优先于 api_key，因此清除明文即可。
+ * 迁移：把 provider 条目（providers 与 custom_providers 两个桶）里的明文 api_key
+ * 改为 api_key_cmd（动态读凭据）。**静态 api_key 优先于 api_key_cmd**，所以写命令的
+ * 同时必须清除明文，否则命令永远不会被执行。
  * 只对「明文 api_key + 无 api_key_cmd」的条目动手，依据 settings 里该 provider 的
  * apiKeyEnv 补充命令；**已有非空 api_key_cmd 的条目不覆写**（那条命令可能正在生效，
  * 换掉它等于无声改配置），与 settings 里找不到的 provider 一起记进 skippedUnknown，
@@ -439,38 +466,24 @@ export async function migratePlaintextKeys(
   };
   const outcome = await updateConfigLocked(paths.ocrConfigJson, async () => {
     // 锁内不再判一次"空文件"：`parseExistingConfig`（lib/config-store.ts）对空白输入返回
-    // `{}`，于是下面的 `custom_providers` 形状检查自然走成同一条"无可迁移对象"的早返回，
+    // `{}`，两个 provider 桶都不存在时下面自然走成同一条"无可迁移对象"的早返回，
     // 多写一次判断只会留下一条永远测不到的分支。
     const doc = parseExistingConfig(
       readExistingText(paths.ocrConfigJson, messages),
       paths.ocrConfigJson,
       messages,
     );
-    const customsRaw = fieldOf(doc, "custom_providers");
-    if (!isRecord(customsRaw)) {
-      return { migrated: [], skippedUnknown: [] };
-    }
-    const customs = customsRaw;
-    const migrated: string[] = [];
-    const skippedUnknown: string[] = [];
-    for (const [name, raw] of Object.entries(customs)) {
-      if (isRecord(raw)) {
-        const entry = raw;
-        const result = migrateEntry(entry, envByProvider.get(name), migrateContext);
-        if (result === "migrated") {
-          migrated.push(name);
-        } else if (result === "unknown") {
-          skippedUnknown.push(name);
-        }
-      }
-    }
-    if (migrated.length === 0) {
-      return { migrated, skippedUnknown };
+    const custom = migrateSection(doc, "custom_providers", envByProvider, migrateContext);
+    const presets = migrateSection(doc, "providers", envByProvider, migrateContext);
+    const migratedNames = [...new Set([...custom.migrated, ...presets.migrated])];
+    const skippedNames = [...new Set([...custom.skippedUnknown, ...presets.skippedUnknown])];
+    if (migratedNames.length === 0) {
+      return { migrated: migratedNames, skippedUnknown: skippedNames };
     }
     // 渲染形态只有一处唯一来源（lib/config-store.ts 的 renderConfigDoc）：本文件其余
     // 写回点已经用它，这里再手写一份缩进/结尾换行就等于留一条会漂的第二实现。
     await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc));
-    return { migrated, skippedUnknown };
+    return { migrated: migratedNames, skippedUnknown: skippedNames };
   });
   // 等的是那把文件锁与锁内的一次写：回执必须落定后才报迁移了哪几条
   //（`return await` 被 typescript/return-await 判违规，故先落变量再回）。
@@ -479,7 +492,7 @@ export async function migratePlaintextKeys(
 
 /** api_key_cmd 指针自愈的回执。 */
 export interface KeyScriptPointerResult {
-  /** 被重指向的 custom_providers 条目名；空数组 = 没有一条需要改。 */
+  /** 被重指向的 provider 条目名（providers + custom_providers 两桶）；空数组 = 没有一条需要改。 */
   repointed: string[];
   /** 是否完成了这次检查（false = 脚本缺失 / 配置读不动，一律静默放过）。 */
   checked: boolean;

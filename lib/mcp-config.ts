@@ -20,18 +20,42 @@ import {
 /** 整体上限：MCP 配置是一份人工维护的小表，不承载大文件。 */
 const MCP_MAX_BYTES = 64 * 1024;
 
+/** 显式 authority：`http://` 之后必须至少有一个非 `/?#` 字符。 */
+const URL_AUTHORITY = /^https?:\/\/[^/?#]+/iu;
+/** 空白与控制字符：URL 里出现它们只可能来自拼错或注入尝试。 */
+const URL_WHITESPACE_OR_CONTROL = /[\s\p{Cc}]/u;
+
 /**
- * remote MCP server 的 url 只认 http(s)，且必须解析得出一台主机。
- * 前缀匹配（旧实现）会放行 "http://" 这种没有主机的串——写进配置时不报错，OCR 到连接时才炸，
- * 报错点离用户动作很远，所以在这里用 URL 解析判它。
+ * remote MCP server 的 url 只认 http(s)，且必须是**无歧义**的绝对 URL。
+ *
+ * 为什么不能只靠 `new URL()`：WHATWG 解析器会把 `http:///nohost` 规范成
+ * `http://nohost/`（host 非空），而 OCR 的 Go 侧 `url.Parse` 对同一串给出
+ * `Host == ""`——写进配置时判“合法”，OCR 到连接时才报 no Host。反斜杠同理
+ * （WHATWG 在特殊协议里把 `\` 当 `/`），Go 不这么看。这里先用显式 authority
+ * 闸挡住这些跨解析器歧义形态，再交给 `new URL()` 做协议/主机复核。
+ *
+ * 只判语法，不判地址段：localhost / 私网 / 云元数据地址是否可配属于部署策略，
+ * 由用户与 OCR 侧决定；本函数只保证“这段 URL 不会被两家解析器读成两种东西”。
+ *
+ * @param value - 已 trim 的 url 文本
+ * @returns 不合法时的英文原因；合法为 null
  */
-function isHttpServerUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname !== "";
-  } catch {
-    return false;
+function remoteUrlProblem(value: string): string | null {
+  if (URL_WHITESPACE_OR_CONTROL.test(value)) {
+    return "must not contain whitespace or control characters";
   }
+  if (value.includes("\\")) {
+    return "must not contain backslashes";
+  }
+  if (!URL_AUTHORITY.test(value)) {
+    return "must include an explicit host after http:// or https://";
+  }
+  if (!URL.canParse(value)) {
+    return "must be a valid URL";
+  }
+  // authority 闸已保证 `http(s)://` 后至少有一个字符；能解析成功时 hostname 必非空
+  // （`http://@`、`http://:80` 这类会让 URL 构造器直接失败）。
+  return null;
 }
 const MCP_MAX_SERVERS = 100;
 const MCP_MAX_ARRAY = 100;
@@ -52,7 +76,13 @@ export type McpReadResult =
   | { readonly ok: false; readonly error: string };
 
 export type McpSaveResult =
-  | { readonly ok: true; readonly count: number; readonly revision: string }
+  | {
+      readonly ok: true;
+      readonly count: number;
+      readonly revision: string;
+      /** 非阻断警告：保存成功，但某些 header 的环境变量在 OCR 连接时可能展开为空。 */
+      readonly warnings: readonly string[];
+    }
   | { readonly ok: false; readonly error: string };
 
 /**
@@ -214,8 +244,9 @@ function normalizeRemote(
   if (!url.ok) {
     return url;
   }
-  if (!isHttpServerUrl(url.value)) {
-    return failure(name, "url", "must be a valid http:// or https:// URL with a host", messages);
+  const problem = remoteUrlProblem(url.value);
+  if (problem !== null) {
+    return failure(name, "url", problem, messages);
   }
   const entry: Record<string, unknown> = { type: "remote", url: url.value };
   if (raw["headers"] !== undefined) {
@@ -330,6 +361,68 @@ function isNotFound(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
 }
 
+/** header 里的 `$VAR` / `${VAR}`；OCR 连接时按自己的环境展开，展开为空会硬失败。 */
+const HEADER_ENV_REF = /\$\{?\w+\}?/gu;
+const HEADER_ENV_PREFIX = /^\$\{?/u;
+const HEADER_ENV_SUFFIX = /\}$/u;
+
+/** 单条 header 的缺失变量警告。 */
+function headerEnvWarningList(
+  name: string,
+  header: string,
+  value: string,
+  seen: Set<string>,
+  messages: OcrReviewMessages,
+): string[] {
+  const warnings: string[] = [];
+  for (const match of value.matchAll(HEADER_ENV_REF)) {
+    // 只取整段匹配再去掉可选的花括号，避免依赖 capture group 的可空性。
+    const variable = match[0].replace(HEADER_ENV_PREFIX, "").replace(HEADER_ENV_SUFFIX, "");
+    const key = `${name}\u0000${header}\u0000${variable}`;
+    const missing = variable !== "" && (process.env[variable] ?? "") === "";
+    if (missing && !seen.has(key)) {
+      seen.add(key);
+      warnings.push(format(messages.mcpHeaderEnvWarning, { name, header, variable }));
+    }
+  }
+  return warnings;
+}
+
+/** 单个 server 的 header 警告（只对 remote + headers 对象生效）。 */
+function headerEnvWarningsOfServer(
+  name: string,
+  raw: unknown,
+  seen: Set<string>,
+  messages: OcrReviewMessages,
+): string[] {
+  if (!isRecord(raw) || raw["type"] !== "remote" || !isRecord(raw["headers"])) {
+    return [];
+  }
+  return Object.entries(raw["headers"]).flatMap(([header, value]) =>
+    typeof value === "string" ? headerEnvWarningList(name, header, value, seen, messages) : [],
+  );
+}
+
+/**
+ * 保存成功后的非阻断警告：remote header 引用的环境变量在当前进程里没有值。
+ *
+ * 为什么只警告不拒绝：OCR 子进程的环境与宿主进程不完全相同（HOME 重定向、凭据净化、
+ * shell rc 都可能补上变量），插件在保存期没有可靠办法判定“OCR 一定取不到”。但最常见的
+ * 事故（拼错变量名、忘了 export）在这里就能看出来，比等一次评审连接失败更早。
+ *
+ * 导出仅供单测：异常形状（非对象、stdio、headers 非对象、值非字符串）由 normalize 挡住，
+ * 生产路径走不到，但这一层仍要保持不抛。
+ */
+export function headerEnvWarnings(
+  servers: Record<string, unknown>,
+  messages: OcrReviewMessages,
+): string[] {
+  const seen = new Set<string>();
+  return Object.entries(servers).flatMap(([name, raw]) =>
+    headerEnvWarningsOfServer(name, raw, seen, messages),
+  );
+}
+
 /**
  * 读当前 `mcp_servers`，交给卡片编辑；文件不存在按空表处理，坏 JSON/读不动返回可读错误。
  *
@@ -441,6 +534,7 @@ export async function saveMcpServers(
         ok: true as const,
         count: Object.keys(normalized.value).length,
         revision: mcpServersRevision(normalized.value),
+        warnings: headerEnvWarnings(normalized.value, messages),
       };
     });
   } catch (error) {

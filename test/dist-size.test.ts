@@ -21,7 +21,9 @@ const pkgDir = path.resolve(import.meta.dirname, "..");
 /** 产物文件名与预算的对照。 */
 const BUDGETS: readonly (readonly [string, number])[] = [
   // 1.13.3 工具清单扩展（preview/compare/export/rules/llm/摘要字段与双语文案）后的正常演进。
-  ["host.js", 311_500],
+  // 本轮新增：scan 会话根规范化与 path/exclude 重基、export 临时目录 TTL 清理、
+  // preview 的 ignoredParams、delegate preview 计数与 MCP URL 严格语法校验。
+  ["host.js", 368_000],
   // MCP/ChatGPT 管理区（编辑框、状态与双语按钮）后的正常演进。
   // 设置卡迁到 @jayyuen66/dsh-plugin-shared/lib/card-ui 后，卡片样式与组件逻辑随包进
   // client.js（实测增加约 3 KB），预算按迁移后的实量重定。

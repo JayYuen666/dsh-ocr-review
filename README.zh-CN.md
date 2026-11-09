@@ -121,9 +121,9 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 | --- | --- |
 | `ocr_review` | repo（绝对路径，缺省=当前会话工作区）、scope workspace/commit/branch（branch 需同时给 from+to，且与 commit 互斥）、effort、background、exclude、provider/model/resume——resume 仅限 commit/branch，workspace 不支持恢复。preview（只做文件选择）、noFilter、maxGitProcs、rule/backgroundFile（仅 repo 根内文件）、wait |
 | 数值参数组（review 与 scan） | concurrency / timeoutMinutes / maxTools / maxTokens / maxTokensBudget，落 `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`。取值忠实透传；下限 concurrency 为 1、其余为 0，非整数或低于下限直接报错，不钳制 |
-| `ocr_scan` | repo、path、exclude、batch none/by-language/by-directory、provider/model（CLI 原生共享旗标）、同一组数值参数、preview、noPlan/noDedup/noSummary、resume、maxGitProcs、rule（repo 根内文件）、wait。整仓扫描，无需 git diff |
-| `ocr_delegate_preview` / `ocr_delegate_rule` | preview：repo、scope/commit/from/to、exclude、background、backgroundFile/rule/maxGitProcs。rule：repo 加 paths——必填、最多 200 条、经 `--` 分隔作位置参数、逐条转义——外加 rule。OCR 端零 LLM 消耗：只回文件清单与规则分组 |
-| `ocr_session` | repo、action list/show/comments/compare/export、id、before/after（compare）、severity/category（comments 过滤）、limit——缺省 10；显式给出必须是 1–100 的整数，越界报错而不是钳制。compare 返回四桶，export 返回 HTML 路径 |
+| `ocr_scan` | repo、path、exclude、batch none/by-language/by-directory、provider/model（CLI 原生共享旗标）、同一组数值参数、preview、noPlan/noDedup/noSummary、resume、maxGitProcs、rule（repo 根内文件）、wait。repo 规范到 git 顶层（path/exclude 从原目录重基，扫描范围不变），这样子目录发起的扫描会话也能被 `ocr_session` 查到。整仓扫描，无需 git diff |
+| `ocr_delegate_preview` / `ocr_delegate_rule` | preview：repo、scope/commit/from/to、exclude、background、backgroundFile/rule/maxGitProcs；返回完整文件清单与 totalFiles/reviewableCount/excludedCount（不截断）。rule：repo 加 paths——必填、最多 200 条、经 `--` 分隔作位置参数、逐条转义——外加 rule。OCR 端零 LLM 消耗：只回文件清单与规则分组 |
+| `ocr_session` | repo、action list/show/comments/compare/export、id、before/after（compare）、severity/category（comments 过滤）、limit——缺省 10；显式给出必须是 1–100 的整数，越界报错而不是钳制。compare 返回四桶，export 返回 HTML 路径（旧导出目录按 TTL 由后续导出自动清理） |
 | `ocr_rules_check` | repo、path（必填）、rule（repo 根内文件）：打印命中的规则层、glob 与正文；不调 LLM |
 | `ocr_llm` | action providers/models：只读查询 LLM 清单；不评审、不测连通性 |
 | 清单上限 | exclude 和 path 各收 2000 条；超过上限直接拒绝整次调用。条目绝不静默丢掉——「比清单少审了几份」不许报成成功 |
@@ -166,7 +166,7 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 | `test()` | — | `{ok, output}`——`ok` 是**测试结论**，不是这次调用成没成；output 先脱敏再截前 8000 个 UTF-16 码元 |
 | `probe()` | — | `{ok, version, expectedVersion, consistent, output, reason, changeText}`——15 秒墙钟内跑一次 `ocr version`，恒定带 `OCR_NO_UPDATE=1`。`consistent` 是三态（`null` = 没量到，此时宣称「不一致」就是把没证据的事说成结论）；`reason` 点名失败那一档；`changeText` 只在真有一条该给的命令时非空 |
 | `mcp()` | — | `{ok, json, revision}`——只回 `mcp_servers` 对象（pretty JSON），不含 providers/keys；`revision` 是这一支的摘要 |
-| `saveMcp(request)` | `{json, revision?}`——原始 JSON 文本，上限 64 KiB；stdio/remote 条目逐字段校验；`revision` 取 `mcp()` 交回的那一枚 | `{ok, count, revision}`——只写 `mcp_servers`，其他配置原样保留。基线过期时整笔拒绝（盘上不动）并回可读的「读取之后已被改动」；不带基线则沿用原来的后写覆盖 |
+| `saveMcp(request)` | `{json, revision?}`——原始 JSON 文本，上限 64 KiB；stdio/remote 条目逐字段校验；`revision` 取 `mcp()` 交回的那一枚 | `{ok, count, revision, warnings}`——只写 `mcp_servers`，其他配置原样保留。基线过期时整笔拒绝（盘上不动）并回可读的「读取之后已被改动」；不带基线则沿用原来的后写覆盖。`warnings` 是非阻断提示：保存已成功，但某个 remote header 引用的环境变量在当前进程里为空，OCR 连接时会展开成空串并拒绝连接 |
 | `auth()` | — | `{ok, output, loginCommand}`——只读 `ocr auth status --provider chatgpt`；登录本身要浏览器与本地回调，仍留在终端执行 |
 | `chatGpt(request)` | `{model}` | `{ok, model}`——写 `provider: "chatgpt"` 与 `providers.chatgpt.model`，不写 key |
 
@@ -177,10 +177,11 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 | 面 | 事实 |
 | --- | --- |
 | 写进 config 的是什么 | 命令不是明文：`api_key_cmd` = `node '<本包 scripts/get-cred.mjs 的路径>' '<REF>' '<dsh 数据目录>'`——POSIX 单引号转义，Windows 双引号转义（CLI 在那边经 `cmd.exe` 跑凭据命令）。数据目录是宿主此刻解析出的 home，HOME 被重定向时 get-cred 的兜底层不会跑偏；REF 名必须满足官方 ref 名规则，否则拒绝构造 |
+| provider 落在哪个桶 | 选择写盘时，名字命中 CLI 内置 provider 清单（trim + 小写比较）就写 `providers.<name>`，否则写 `custom_providers.<name>`——CLI 按名字分桶，把内置名写进 `custom_providers` 会在解析端点时报 "not configured in providers section"。读当前配置、`migrate()` 与悬空脚本重指向都覆盖两个桶，旧版本写下的配置照常可用 |
 | 取值层序 | get-cred 三层的先后照抄官方 credentials-local：托管凭据文件里的 `refs.<REF>` 优先，其次继承来的进程环境，再次 `$DSH_HOME/.env`。宿主认「托管文件里那一份才是有效的」，排错一位不会报错——OCR 打的是另一个 key，而卡片与 OCR 两边都显示成功 |
 | 可达性检查 | select 和 migrate 拒绝「CLI 运行时取不到」的 key：dsh 起 shell 会剥掉名字含 `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 或 `DSH_` 前缀的变量，被审查仓库的 `.env` 也刻意不读。只存在于 dsh 进程环境或工作区 `.env` 的 key 在宿主侧解析得到、CLI 运行时却取不到——旧行为是「select 成功、OCR 401」这种漏报。拒绝发生在写到磁盘之前，错误文本写明补救方式 |
 | 写入方式 | 走官方原子替换：同目录随机后缀临时文件 → rename，新 inode 携带 0600；`.bak` 备份由本包在 rename 之前复制。整段「读→判→写」由官方文件锁串行化——`config.json.lock` 短暂出现、`finally` 里删除。现有 config 是坏 JSON 或顶层非对象时中止写入，绝不「按空配置覆盖」 |
-| `migrate()` | 把 custom provider 条目里的明文 `api_key` 换成 `api_key_cmd` 并删除明文；key 所在层在 CLI 运行时不可达（与 select 同一道闸）或 settings 里查不到 `apiKeyEnv` 的条目原样不动、列进 `skippedUnknown`；一条都没迁移成功时不写盘 |
+| `migrate()` | 把 provider 条目（`providers` 与 `custom_providers` 两个桶）里的明文 `api_key` 换成 `api_key_cmd` 并删除明文；key 所在层在 CLI 运行时不可达（与 select 同一道闸）或 settings 里查不到 `apiKeyEnv` 的条目原样不动、列进 `skippedUnknown`；一条都没迁移成功时不写盘 |
 | `scripts/get-cred.mjs` | 由 CLI 自己起进程调用，是本包唯一还在读宿主凭据文件的地方。三层全落空时非零退出，并把查过的位置一并报出 |
 
 ## <img src="https://api.iconify.design/lucide/hourglass.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 后台运行与官方作业
@@ -201,7 +202,7 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 | --- | --- |
 | 进程边界 | 被审查仓库的路径与 diff 内容进 `ocr` 子进程，CLI 再把它们发给自己在 config.json 里配置的 LLM 端点——这条外发是审查功能本身，不经 dsh 宿主。明文 key 不进工具返回、也不进 Remote 应答；宿主侧解析到的值只用于确认「现在解析得到」，当场丢弃 |
 | 原始输出脱敏 | 本包出去的 CLI 原始 stdout/stderr（失败详情、llm test、解析失败回显、session 透传）统一过 `redactKeyMaterial()`：Bearer 与赋值形态从严抹除，独立 key 形态额外要求随机串特征，免得把要交给模型的文件路径一起抹掉 |
-| 写盘范围 | CLI 的 `config.json`（含临时文件、`.bak` 备份与短暂的锁）、系统临时目录下的 `ocr-review-*` / `ocr-scan-*`（读完即删），以及 `ocr-session-export-*` 目录——那是 `ocr_session` 的 `export` 返回的 HTML，留给调用方，不自动删除。迁移前的明文可能留在那次写入产生的 `.bak` 里（权限 0600）——要彻底清掉需自行删除该备份。这些之外，`ocrNoAutoUpdate` 没置真时唯一的写者就是 CLI 自己那层 npm 包装 |
+| 写盘范围 | CLI 的 `config.json`（含临时文件、`.bak` 备份与短暂的锁）、系统临时目录下的 `ocr-review-*` / `ocr-scan-*`（读完即删），以及 `ocr-session-export-*` 目录——那是 `ocr_session` 的 `export` 返回的 HTML。导出目录保留 7 天，之后的每次导出会顺手清掉过期的旧目录；清理失败不挡本次导出。迁移前的明文可能留在那次写入产生的 `.bak` 里（权限 0600）——要彻底清掉需自行删除该备份。这些之外，`ocrNoAutoUpdate` 没置真时唯一的写者就是 CLI 自己那层 npm 包装 |
 
 ## <img src="https://api.iconify.design/lucide/triangle-alert.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 已知边界
 
