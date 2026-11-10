@@ -55,7 +55,7 @@
 // ctx.credentials——需要注入的服务并没有因此多出几个。
 
 import Schema from "@deepseek-ai/schemastery";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Context, Fiber, Volatile } from "@deepseek-ai/cordis";
@@ -103,7 +103,7 @@ import type {
 // 沙箱策略按调用携带（官方 `SandboxExecutionPolicy` 定义在 dsh-sandbox，dsh-shell 自己
 // 只内部 import、并不再导出，所以取类型必须直引）。同样是 type-only，产物里不得出现这条
 // 说明符（锁见 test/build-host.test.ts）；包本身已在 devDependencies 声明，不需要进运行时。
-import type { SandboxExecutionPolicy } from "@deepseek-ai/dsh-sandbox";
+
 // 后台评审的子进程登记为官方作业（ctx.jobs）。做法和上面几处一致——type-only +
 // `Pick<官方类, 方法>` 投影，注册表实例由宿主注入（dsh-base 默认装载 dsh-jobs-local），
 // 产物里不得出现这两个说明符（锁见 test/build-host.test.ts）。
@@ -131,6 +131,8 @@ import {
 // 进会话日志的自制切点一律走这里，裸 slice 会在切点留下孤立高/低代理。
 import { truncateEnd, truncateStart } from "@jayyuen66/dsh-plugin-shared/lib/text";
 import { MESSAGES, format } from "./lib/messages.ts";
+import { echoRaw, readOutFile, withCoverageDetail } from "./lib/output-file.ts";
+import { containedProbe } from "./lib/probe-guard.ts";
 import type { OcrReviewMessages } from "./lib/messages.ts";
 import { assertToolOutput, redactKeyMaterial, stripAnsi } from "./lib/output.ts";
 import {
@@ -180,8 +182,11 @@ import {
   migratePlaintextKeys,
   resolveOcrConfigPath,
   ocrHomeOverride,
+  readOcrConfigPath,
+  ocrHome,
+  sandboxDeployment,
 } from "./lib/ocr-config.ts";
-import type { EndpointVerify } from "./lib/ocr-config.ts";
+import type { OcrSandboxMode } from "./lib/ocr-config.ts";
 import { OCR_REFUSE_STATUS, OCR_REMOTE_NAMESPACE } from "./lib/remote-shape.ts";
 import type {
   OcrAuthReply,
@@ -197,6 +202,13 @@ import type {
   OcrTestReply,
 } from "./lib/remote-shape.ts";
 import { applyChatGptModel, readMcpServers, saveMcpServers } from "./lib/mcp-config.ts";
+import { hostSandboxPolicy } from "./lib/sandbox-policy.ts";
+import {
+  bindLifetime,
+  combineSignals,
+  MAX_TIMEOUT_REQUEST_MS,
+  runExpiry,
+} from "./lib/run-scope.ts";
 import { SESSION_EXPORT_PREFIX, sweepStaleSessionExports } from "./lib/tmp-cleanup.ts";
 import { isPathInside, rebaseScanScope } from "./lib/scan-scope.ts";
 import {
@@ -236,8 +248,6 @@ const PLUGIN_DIR = import.meta.dirname;
 // maxTimeoutMs）；后台通道（wait=false）不给进程挂宿主 deadline（resolve 里显式带
 // onExpiry:"none"，官方缺省是 'kill'），但本包给它加了 OCR_BACKGROUND_MAX_MS 那一档
 // 兜底回收——所以"真不限时"这句在文案里也不许再写（卡片和工具参数说明都已经这么写了）。
-// 2^31-1 = 宿主 timer 上限。
-const MAX_TIMEOUT_REQUEST_MS = 2_147_483_647;
 const LLM_TEST_TIMEOUT_MS = 90_000;
 /** 状态探测（`ocr version`）的墙钟（毫秒）。CLI 自己那层 npm 包装给同一件事是 3 秒
  *  （`scripts/update.js` 里 `spawnSync(bin, ["version"], {timeout: 3000})`），但那是
@@ -245,10 +255,6 @@ const LLM_TEST_TIMEOUT_MS = 90_000;
  *  人按下「检测」时跑，不进任何热路径，因此不做成设置项。 */
 const VERSION_PROBE_TIMEOUT_MS = 15_000;
 const STDOUT_MAX_BYTES = 400_000;
-/** `--output` 写到磁盘结果的读取上限（字节）。**刻意不取 STDOUT_MAX_BYTES**：`--output` 存在的
- *  理由正是「结果比 stdout 缓冲大」，用 400 KB 卡它等于把正常的大仓评审判死。这一枚只是
- *  护栏，把「整份读进内存」的失败形态从 OOM 换成一条点名文件的错误。 */
-const OUT_FILE_MAX_BYTES = 64 * 1024 * 1024;
 /** 解析失败时回显给模型的原始内容长度上限（UTF-16 码元；已脱敏）。
  *  单位写码元而不是"字符"：本常量喂给 `echoRaw`→`truncateEnd`，那一刀按码元数计
  *  （一张 emoji = 2 枚），写"字符"会把给模型的说明夸大约一倍。 */
@@ -287,7 +293,7 @@ const MAX_COMMENTS_DEFAULT = 12;
  *  设施故障才 reject），后台直接留句柄不等运行结束；组合 teardown 时仍在运行的进程由宿主
  *  接管清理。`onExpiry` 缺省 'kill'，后台任务显式传 'none' 才取到无界。
  *  句柄的 done 在进程关闭时落定且从不 reject；kill() 幂等，已退出时返回 false。 */
-export type ShellService = Pick<ShellExecutor, "resolve" | "execute">;
+export type ShellService = Pick<ShellExecutor, "resolve" | "execute" | "sandboxMode">;
 
 /**
  * 官方 JobRegistry（@deepseek-ai/dsh-jobs，abstract Service + protected ctx → 名义比较）
@@ -393,6 +399,7 @@ function startUnderOcrController(jobs: JobsService, spec: JobSpec): JobId {
  * 也不推进输出游标（模型侧 job_output 的读数不受影响）——所以落定时这里看一眼状态就返回。
  * @param jobs 官方注册表
  * @param id 这次后台评审的作业 id
+ * @param owner 作业 owner（= `wait`/`kill` 的 caller；`undefined` 即 agentless 作业）
  * @param reason 到点回收时写进模型可见 detail 的理由
  * @param backgroundMaxMs 窗口毫秒数；`<= 0`（部署级设置项 `ocrBackgroundMaxMs` 的默认值）
  *   表示这一条不设兜底窗口，直接返回、不去调用 `wait`
@@ -401,6 +408,7 @@ function startUnderOcrController(jobs: JobsService, spec: JobSpec): JobId {
 async function enforceOcrDeadline(
   jobs: JobsService,
   id: JobId,
+  owner: SessionIdFace | undefined,
   reason: string,
   backgroundMaxMs: number,
 ): Promise<void> {
@@ -408,9 +416,13 @@ async function enforceOcrDeadline(
     if (backgroundMaxMs <= 0) {
       return;
     }
-    const view = await jobs.wait(id, backgroundMaxMs);
+    // owner 就是 caller：官方注册表的 owner 闸（`assertAccess`，原话 "a caller-less
+    // view can never match an owned one"）对 `wait`/`kill` 同样生效。工具调用永远带
+    // 会话 id，所以后台评审几乎都是有主作业——不带 caller 那两处会抛 "belongs to
+    // another session"，被下面那个 catch 接住，窗口就成了一条永远不触发的设置。
+    const view = await jobs.wait(id, backgroundMaxMs, owner);
     if (view.status === "running") {
-      jobs.kill(id, undefined, reason);
+      jobs.kill(id, owner, reason);
     }
   } catch {
     // 这一条已经不在了（记录被窗口裁剪收走、或者服务被重载）⇒ 兜底处理本来就无事可做。
@@ -704,37 +716,6 @@ function textBlock(value: unknown): RenderedContent {
 
 // ── shell 执行与错误映射 ────────────────────────────────────────────────────
 
-/**
- * ocr 子进程一律按 `danger-full-access` 请求（官方按调用携带的 `SandboxExecutionPolicy`）。
- *
- * 为什么必须显式要：ocr CLI 的状态目录是 `$HOME/.opencodereview`（Go 侧 `os.UserHomeDir()`，
- * 无 `--config` 可改），落在 workspace 之外，而宿主沙箱的 `workspace-write` 只放行
- * workspaceRoot 与后端临时区——于是每次会话写入被 EPERM 拒绝。后果不是"少个功能"而是
- * **跑完的评审被丢掉**：同步调用在最后一步 `finalize session` 失败、对外整体报错；
- * 后台调用则落不了盘，作业列表、`--resume` 与进度可观测性同时失效。
- *
- * 为什么不给 `workspace-write` + 重定向 HOME 兜着：那样得把 `config.json` 搬进 workspace，
- * 密钥与状态管理跟着进仓，且换发布形态就要再搬一次——为绕开一条策略把用户目录写进用户仓。
- * 归属的约定是「状态归 ocr 自己，围栏由本包显式放开」，所以直接要 `danger-full-access`。
- *
- * **「能不能只放开需要写的那一条路径」：不能。** 两样东西一起锁死了这条路：
- * 按调用携带的 `SandboxPolicyRequest` 只有 `session` 与 `mode` 两个字段，**没有**附加可写
- * 路径、没有自定义 HOME、没有目录级豁免；而 `SandboxMode` 的取值只有
- * `read-only | workspace-write | danger-full-access` 三档，中间那一档的可写根就是
- * `workspaceRoot` 一枚。两处声明都取自本包实际解析到的 dsh-sandbox-policy 与
- * dsh-sandbox 的 `lib/types/index.d.ts`。
- * 可选的收紧路径只有「改 ocr 自己的状态存放位置」或「等上游加字段」，两者都不是本包能在
- * 一次补丁里做完的事。故此处维持放开，但把边界写明：放开的是 ocr 这一个子进程的整棵
- * 文件系统写权限，不是宿主其它能力；且 ocr 读什么、写什么仍由上面那条 argv 闸与
- * 凭据链约束。
- *
- * `workspaceRoot` 在这个模式下不被消费，但官方要求「即使不消费也照样携带」（让调用方
- * 先解析一次策略、再选执行路径），故传 workdir 而不是编一个占位根。
- */
-function ocrSandboxPolicy(workspaceRoot: string): SandboxExecutionPolicy {
-  return { mode: "danger-full-access", workspaceRoot };
-}
-
 /** 失败详情：stderr 优先、空则退 stdout；先脱敏再截断（明文 key 绝不进工具错误
  *  ——错误文本会被持久化进会话日志）。省略标记是文案，故脱敏与截断的位置不变，
  *  只把中间的连接标记换成当前语言的那一份。两半各用一个函数，因为它们是两种缺陷：
@@ -754,6 +735,10 @@ function failureDetail(result: ShellRunResult, messages: OcrReviewMessages): str
  *  readTimeoutMinutes(config)，llm test 取 entry config 的 llmTestTimeoutMs。 */
 interface RunTuning {
   timeoutMs: number;
+  /** 部署级 `ocrSandbox` 的落地值（见 lib/sandbox-policy.ts）。 */
+  sandbox: OcrSandboxMode;
+  /** OCR 子进程的 HOME：状态目录放行根按它算（`ocrStateHome`）。 */
+  stateHome: string;
   /** entry config `stdoutMaxBytes`：截断说明里报的必须是同一个数。 */
   stdoutMaxBytes: number;
   /** 随本次执行下发的普通环境变量（官方 `ShellExecRequest.env`，在凭据净化之后合并）。
@@ -793,7 +778,8 @@ function stdoutTruncationNote(
 }
 
 /** 前台执行：失败抛错（含给模型的行动提示），成功返回 stdout 的一手结果。
- * timeoutMs 总是有值（tuningOf(config)），宿主按 min(请求, shell.maxTimeoutMs) 收敛。
+ * timeoutMs 总是有值（tuningOf(config)）；显式分钟数走本包自己的截止，见
+ * EXPLICIT_TIMEOUT_REASON，其余交宿主按 min(请求, shell.maxTimeoutMs) 收敛。
  * signal 必传：harness ToolExecution.signal 是必填的调用方取消权。 */
 async function runForeground(
   host: HostCtx,
@@ -803,19 +789,28 @@ async function runForeground(
   signal: AbortSignal,
 ): Promise<ForegroundRun> {
   const messages = localeMessages(host);
+  const sandboxPolicy = await hostSandboxPolicy(host, run, workdir, messages);
+  const expiry = runExpiry(host, run.timeoutMs, signal);
   const spec = host.shell.resolve({
     command,
     workdir,
-    timeoutMs: run.timeoutMs,
+    ...expiry.spec,
     stdoutMaxBytes: run.stdoutMaxBytes,
-    signal,
+    signal: expiry.signal,
     env: run.env,
-    sandboxPolicy: ocrSandboxPolicy(workdir),
+    sandboxPolicy,
   });
   const exec = await host.shell.execute(spec);
   const result = await exec.result();
+  expiry.deadline?.cancel();
   const failed = result.exitCode !== 0 || result.timedOut || result.aborted;
   if (failed) {
+    if (expiry.deadline?.fired() === true) {
+      // 这条截止是**本包**设的（显式 timeoutMinutes），不是宿主按 maxTimeoutMs 收敛出来的，
+      // 所以文案不能说「= min(请求, 宿主上限)」，否则用户会去调宿主那格设置而白忙。
+      const minutes = Math.round(spec.timeoutMs / 60_000);
+      throw new Error(format(messages.execTimedOutExplicit, { minutes: String(minutes) }));
+    }
     if (result.timedOut) {
       // 报 spec.timeoutMs 而不是 run.timeoutMs：resolve 已按
       // min(请求, shell.maxTimeoutMs) 收敛，spec 里那个才是**实际生效**的值。
@@ -853,6 +848,9 @@ interface BackgroundJob {
   backgroundMaxMs: number;
   /** 与前台同一份 `ocrNoAutoUpdate` 落地值（`| undefined` 同 RunTuning 的理由）。 */
   env?: Record<string, string> | undefined;
+  /** 与前台同一份沙箱判据的两枚值（见 RunTuning 的同名字段）。 */
+  sandbox: OcrSandboxMode;
+  stateHome: string;
 }
 
 /**
@@ -948,13 +946,14 @@ async function startBackground(
       "background review unavailable: the host provides no ctx.jobs (load @deepseek-ai/dsh-jobs-local); run it with wait:true instead",
     );
   }
+  const sandboxPolicy = await hostSandboxPolicy(host, job, job.workdir, localeMessages(host));
   const spec = host.shell.resolve({
     command: job.command,
     workdir: job.workdir,
     onExpiry: "none",
     stdoutMaxBytes: job.stdoutMaxBytes,
     env: job.env,
-    sandboxPolicy: ocrSandboxPolicy(job.workdir),
+    sandboxPolicy,
   });
   const proc = await host.shell.execute(spec);
   // 进程已经起来 ⇒ 下面任何一步抛错都必须先把进程收掉，否则留下的是一条谁也停不掉、
@@ -1004,6 +1003,7 @@ async function startBackground(
   void enforceOcrDeadline(
     registry,
     jobId,
+    job.owner,
     format(messages.jobReasonTimeout, { minutes: String(backstopMinutes) }),
     job.backgroundMaxMs,
   );
@@ -1032,13 +1032,16 @@ async function runCollect(
   workdir: string,
   run: RunTuning,
 ): Promise<{ exitCode: number | null; timedOut: boolean; output: string }> {
+  const sandboxPolicy = await hostSandboxPolicy(host, run, workdir, localeMessages(host));
+  const signal = combineSignals([], host);
   const spec = host.shell.resolve({
     command,
     workdir,
     timeoutMs: run.timeoutMs,
     stdoutMaxBytes: run.stdoutMaxBytes,
+    ...(signal === undefined ? {} : { signal }),
     env: run.env,
-    sandboxPolicy: ocrSandboxPolicy(workdir),
+    sandboxPolicy,
   });
   const exec = await host.shell.execute(spec);
   const result = await exec.result();
@@ -1116,6 +1119,7 @@ function tuningOf(config: Config): RunTuning {
     timeoutMs: readTimeoutMinutes(config),
     stdoutMaxBytes: config.stdoutMaxBytes,
     env: ocrEnv(config),
+    ...sandboxDeployment(config),
   };
 }
 
@@ -1206,76 +1210,15 @@ function define(host: HostCtx, spec: ToolSpec): void {
 // ── 输出收尾 ────────────────────────────────────────────────────────────────
 
 /** 原始输出回显给模型或卡片之前的两道处理：截断 + 明文 key 脱敏。 */
-function echoRaw(text: string, limit: number): string {
-  return redactKeyMaterial(truncateEnd(text, limit));
-}
-
-/** 读 --output 写到磁盘结果。OCR exit 0 却没写出文件（版本漂移/被中途 kill）时给
- *  可行动的错误，而不是把一条没有路径信息的 ENOENT 栈丢给模型。
- *  超过 OUT_FILE_MAX_BYTES 的先拒掉：`readFileSync` + `JSON.parse` 是两倍内存的整份读，
- *  病理级的大回执只该换回一条点名文件的错误。大小探测失败（文件不在）不在这里报——
- *  交给下面那条 `outputFileMissing` 统一说话。 */
-function readOutFile(outPath: string, messages: OcrReviewMessages): string {
-  let size = 0;
-  try {
-    ({ size } = statSync(outPath));
-  } catch {
-    // 读不到大小：读文件那一步会给出同一条可行动错误，这里不重复造文案。
-  }
-  if (size > OUT_FILE_MAX_BYTES) {
-    throw new Error(
-      format(messages.outputFileTooLarge, {
-        path: outPath,
-        size: String(size),
-        limit: String(OUT_FILE_MAX_BYTES),
-      }),
-    );
-  }
-  try {
-    return readFileSync(outPath, "utf8");
-  } catch (error) {
-    throw new Error(
-      format(messages.outputFileMissing, { path: outPath, cause: errorText(error) }),
-      { cause: error },
-    );
-  }
-}
-
-/**
- * 非零退出时把 `--output` 里已经发布的 coverage.failed 明细附到失败详情上。
- *
- * 上游的退出契约只对 run-level 失败、或「每个被选中的文件都失败」给非零，而那份 manifest
- * 照发（`review_cmd.go` 的 reviewResultError：“Partial results are published regardless”）
- * ——只回 stderr 的话模型读到「N of M selected item(s) failed」，却不知道是哪些文件、
- * 哪一类失败。读不出或没有失败明细时原样交回那个错误，不改变既有失败形态。
- *
- * 这里刻意不复用 `readOutFile`：那条路会给「文件缺失/过大」抛错，而失败详情里再加一层
- * 「读不到写到磁盘结果」的错误只会盖住 OCR 自己的报错。
- */
-function withCoverageDetail(error: unknown, outPath: string, messages: OcrReviewMessages): unknown {
-  let text: string;
-  try {
-    text = readFileSync(outPath, "utf8");
-  } catch {
-    return error;
-  }
-  const items = parseReviewOutput(text, messages).coverage?.failedItems ?? [];
-  if (items.length === 0) {
-    return error;
-  }
-  const note = format(messages.failureCoverage, {
-    items: redactKeyMaterial(items.join("; ")),
-  });
-  return new Error(`${errorText(error)}${note}`, { cause: error });
-}
-
 // ── 插件体 ─────────────────────────────────────────────────────────────────
 
 /**
  * OCR 原生数值参数的 tool schema 片段（忠实透传语义，桥接层不设钳制）。
  * unit 区分 review（每组）/ scan（每文件）的措辞；maxToolsTemplate 也按命令分开，因为
- * 两侧的 --max-tools 语义本就不同：review 把 1-49 抬到 50，scan 只在大于模板默认时生效。
- * 语言随设置页偏好走；OCR 侧语义见 shared_flags.go 的 registerReviewFlags/registerScanFlags。
+ * 两侧的 --max-tools 语义本就不同：1.13.5 起 review 把 1-49 抬到 50、≥50 精确生效（模板默认
+ * 100，传 50-99 会把上限压到该值）；scan 仍只在大于模板默认时生效、1-49 也不抬。
+ * 语言随设置页偏好走；OCR 侧语义见 shared_flags.go 的 registerReviewFlags/registerScanFlags
+ * 与 review_cmd.go 的 resolveReviewMaxTools。
  */
 function tuningParams(
   messages: OcrReviewMessages,
@@ -1327,8 +1270,10 @@ export interface Config {
   ocrConfigPath: Volatile<string | undefined>;
   /** `ocr llm test` 的墙钟（毫秒）。评审机慢就抬，不占设置卡。 */
   llmTestTimeoutMs: number;
-  /** 装载期是否跑一次端点自检（`ocr llm test`）：部署值，改值要重启。默认开——端点配错
-   *  时让卡片早点看到，而不是等逐文件 400；不想让装载期起进程的部署可以关掉。 */
+  /** 装载期是否量一次外部 CLI 版本（`ocr version`，本地执行、不联网）：部署值，改值要重启。
+   *  默认开——卡片一打开就有实测版本可比对；不想让装载期起进程的部署可以关掉。
+   *  上游端点不在装载期验：那是一次真实的 provider 请求，归卡片的「测试连接」或「应用」
+   *  时的 autoVerify，由用户按下才发生。 */
   startupVerify: boolean;
   /** 后台评审的兜底回收窗口（毫秒）：0 = 无窗口（默认，评审可以一直跑到宿主退出或会话停止）。 */
   ocrBackgroundMaxMs: number;
@@ -1348,6 +1293,14 @@ export interface Config {
    * 所以选 `npm` 的部署拿到的是「装完就和插件契约同版本」的命令。
    */
   ocrInstallHint: OcrInstallPreference;
+  /**
+   * ocr 子进程的文件围栏：`full`（默认）= 一律按 `danger-full-access` 请求，维持既有行为；
+   * `inherit` = 按宿主执行器自报的 `sandboxMode` 收窄（`workspace-write` 时补放行 OCR 的
+   * 状态目录与系统临时区；`read-only` 与认不出的模式直接拒绝，见 lib/sandbox-policy.ts）。
+   * 部署级值：写在 profile 注册行的 `config:` 上，改值随重启生效。**不继承**部署自己在
+   * sandboxPolicy 里配的 `additionalWritableRoots`——要放行更多路径的部署请用 `full`。
+   */
+  ocrSandbox: OcrSandboxMode;
   /** shell 执行器的 stdout 缓冲上限（字节）：前台与后台共用同一字段。 */
   stdoutMaxBytes: number;
 }
@@ -1370,7 +1323,7 @@ const configSchema = Schema.object({
   // 0 会让 resolve 收到「零毫秒 deadline」或零字节输出上限。ocrBackgroundMaxMs
   // 相反：0 是合法语义「不设兜底窗口」，所以只保留 natural。
   llmTestTimeoutMs: Schema.natural().min(1).default(LLM_TEST_TIMEOUT_MS),
-  // 装载期端点自检：默认开（端点配错时卡片早点看到），部署可关。
+  // 装载期只量本地 CLI 版本（不起网络请求）；上游端点由「测试连接」/autoVerify 触发。
   startupVerify: Schema.boolean().default(true),
   // 默认 0：后台评审不设时限。允许 0 是刻意的——`enforceOcrDeadline` 对 0 直接返回，
   // 不再走 `jobs.wait`。
@@ -1380,14 +1333,11 @@ const configSchema = Schema.object({
   ocrNoAutoUpdate: Schema.boolean().default(false),
   // 缺省 both：把两条装法都给用户，替他选装法是部署的决定而不是本包的偏好。
   ocrInstallHint: Schema.union(["both", "brew", "npm"]).default("both"),
+  // 缺省 full = 保持 0.1.14 起的既有行为；inherit 才按宿主执行器自报的沙箱模式收窄。
+  // 两档都由 lib/sandbox-policy.ts 落地，非法的 loader config 由 readOcrSandbox 回落 full。
+  ocrSandbox: Schema.union(["full", "inherit"]).default("full"),
 });
 export { configSchema as Config };
-
-/** 设置项里的 ocrConfigPath：非字符串或空白一律视为「未覆盖」。 */
-function readOcrConfigPath(config: Config): string | undefined {
-  const raw: unknown = config.ocrConfigPath.get();
-  return typeof raw === "string" && raw.trim() !== "" ? raw.trim() : undefined;
-}
 
 /** 本包剩下的文件路径：只剩外部 ocr CLI 的 config.json（可被设置项覆盖）+ 脚本位置。
  *  messages 只用于「设置项里的路径不合形态」那条可读错误。 */
@@ -1399,16 +1349,6 @@ function pluginPaths(config: Config, messages: OcrReviewMessages): OcrPaths {
     pluginDir: PLUGIN_DIR,
     getCredScript: defaultCredScriptPath(PLUGIN_DIR),
   };
-}
-
-/**
- * ocr 子进程的 HOME 重定向值（工具执行侧专用，**不抛错**）：设置项命中
- * `<X>/.opencodereview/config.json` 布局 → X；未设置/坏设置 → undefined。工具不
- * 走 pluginPaths（那会在坏设置下把七个工具一并拖死），坏设置的错误由端点侧的
- * resolveOcrConfigPath 报给卡片——「工具与设置照常可用」这个行为不变。
- */
-function ocrHome(config: Config): string | undefined {
-  return ocrHomeOverride(readOcrConfigPath(config));
 }
 
 /**
@@ -1493,6 +1433,7 @@ async function runVersionProbe(
       stdoutMaxBytes: config.stdoutMaxBytes,
       // 恒定注入，不吃 ocrNoAutoUpdate 那个开关：状态读侧不该有写侧副作用。
       env: { ...NO_UPDATE_ENV },
+      ...sandboxDeployment(config),
     },
   );
   const { exitCode, timedOut } = raw;
@@ -1619,6 +1560,7 @@ async function runLlmTest(host: HostCtx, config: Config): Promise<{ ok: boolean;
       timeoutMs: config.llmTestTimeoutMs,
       stdoutMaxBytes: config.stdoutMaxBytes,
       env: ocrEnv(config),
+      ...sandboxDeployment(config),
     },
   );
   return { ok: exitCode === 0, output };
@@ -1794,11 +1736,13 @@ function realpathOrSelf(root: string): string {
  * 刻意不缓存：一次本地 git 命令相对一次评审（分钟级）可忽略，换来的是没有陈旧值，
  * 也不会让「仓库被 git init / 顶层变动」后读到旧结果。
  */
-async function canonicalReviewRoot(host: HostCtx, root: string): Promise<string> {
+async function canonicalReviewRoot(host: HostCtx, root: string, config: Config): Promise<string> {
   try {
     const { exitCode, output } = await runCollect(host, "git rev-parse --show-toplevel", root, {
       timeoutMs: GIT_TOPLEVEL_TIMEOUT_MS,
       stdoutMaxBytes: 4096,
+      // git 那条也是本包起的子进程，同样跟着部署的围栏走（inherit 档下不给它开口子）。
+      ...sandboxDeployment(config),
     });
     const top = exitCode === 0 ? output.trim() : "";
     // 只用平台自己判断绝对路径的办法：Windows 上 git 交回的是 C:/…，POSIX 专用的
@@ -1903,8 +1847,6 @@ async function probeReply(deps: ProbeEndpointDeps): Promise<OcrProbeReply> {
 /** 读取那侧另外三处现场读取：装载期的自检结论、外部 CLI 可用性、最近一次实测的版本。收成对象是因为
  *  逐项平铺会撞 max-params；这几口本来就是同一类东西。 */
 interface EndpointExtras {
-  /** 装载期端点自检结果的现场读取（apply 的闭包变量，见 probeEndpointAtApply）。 */
-  readonly verifyOf: () => EndpointVerify | null;
   /** 外部 CLI 可用性的现场读取（与七个工具用的是同一个），设置页据此显示装没装。 */
   readonly availability: OcrAvailabilityProbe;
   /** 实测版本的落态口（本包只有跑过 `ocr version` 才有值：装载期自检或人按下「检测」）。
@@ -1930,12 +1872,7 @@ interface ProvidersEndpointDeps {
 async function providersReply(deps: ProvidersEndpointDeps): Promise<Record<string, unknown>> {
   try {
     const msgs = deps.messages();
-    const payload = await providersForCard(
-      deps.gateway,
-      pluginPaths(deps.config, msgs),
-      msgs,
-      deps.extras.verifyOf(),
-    );
+    const payload = await providersForCard(deps.gateway, pluginPaths(deps.config, msgs), msgs);
     return {
       ...payload,
       ocrBinary: cliStatusPayload(
@@ -2041,6 +1978,7 @@ async function authReply(deps: SelectEndpointDeps): Promise<OcrAuthReply> {
         timeoutMs: deps.config.llmTestTimeoutMs,
         stdoutMaxBytes: deps.config.stdoutMaxBytes,
         env: ocrEnv(deps.config),
+        ...sandboxDeployment(deps.config),
       },
     );
     return { ok: exitCode === 0, output, loginCommand: CHATGPT_LOGIN_COMMAND };
@@ -2403,7 +2341,7 @@ function registerReviewTool(
       assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       // 归一化到 git 顶层：OCR 内部本就如此锚定（审查范围不变），但会话目录由
       // RepoDir 编码而来——不归一化，ocr_session 就查不到（见 canonicalReviewRoot）。
-      const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
+      const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs), config);
       const preview = previewOf(args["preview"], runMsgs);
       if (preview) {
         return runReviewPreview({
@@ -2449,6 +2387,7 @@ function registerReviewTool(
               stdoutMaxBytes: config.stdoutMaxBytes,
               backgroundMaxMs: config.ocrBackgroundMaxMs,
               env: ocrEnv(config),
+              ...sandboxDeployment(config),
             },
             ledger,
           );
@@ -2544,7 +2483,7 @@ function registerScanTool(
       // git 顶层查询；workdir 因此也用顶层。扫描范围由 rebaseScanScope 把 path/exclude
       // 从原始目录重基过去来保持，不再依赖 CWD。
       const rawReal = realpathOrSelf(rawRepo);
-      const canonical = await canonicalReviewRoot(host, rawRepo);
+      const canonical = await canonicalReviewRoot(host, rawRepo, config);
       // 原始目录不在 git 顶层内（极少数：符号链接指向仓库外/顶层解析异常）时不提升，
       // 否则 workdir 换了而 path 无法重基，扫描范围会被静默改变。
       const repo = isPathInside(canonical, rawReal) ? canonical : rawReal;
@@ -2585,6 +2524,7 @@ function registerScanTool(
               stdoutMaxBytes: config.stdoutMaxBytes,
               backgroundMaxMs: config.ocrBackgroundMaxMs,
               env: ocrEnv(config),
+              ...sandboxDeployment(config),
             },
             ledger,
           );
@@ -2808,7 +2748,7 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
       assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       // 与 ocr_review 同一个归一化：两侧必须落在同一个会话目录，否则 review 写进去、
       // 这里查的是另一个目录（缺陷 1）。
-      const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs));
+      const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs), config);
       const action = actionOf(args["action"]);
       const before = typeof args["before"] === "string" ? args["before"].trim() : "";
       const after = typeof args["after"] === "string" ? args["after"].trim() : "";
@@ -2978,83 +2918,31 @@ function registerLlmTool(host: HostCtx, config: Config, probe: OcrAvailabilityPr
   });
 }
 
-/** 装载期自检结论里保留的输出上限（字符）：卡片只用来提示，留全量没有意义。 */
-const ENDPOINT_VERIFY_CHARS = 400;
-
-/** 装载期端点自检（fire-and-forget）：跑一次 `ocr llm test`，把结论写进本次 apply 的闭包，
- *  经 GET providers 随载荷交给卡片。
- *
- *  为什么需要：卡片写盘只写 url/model/key 通道，**不验端点能力**。实测踩到过——网关强制
- *  要求一枚能力头，缺了它每个文件都 400，而模型侧看到的是「N 个文件审查失败」，与真因
- *  （端点配置）隔着一层。自检失败不抛、不阻塞装载：它只负责让这件事早点可见。
- * @param host 宿主的服务
+/** 装载期自检（fire-and-forget）：只量一次外部 CLI 版本，把结论落进本次 apply 的闭包，
+ *  经 GET providers 随载荷交给卡片。上游端点不在这里验——那是一次真实的 provider 请求，
+ *  归卡片的「测试连接」与「应用」时的 autoVerify，由用户按下才发生。
+ * @param ctx 宿主上下文
  * @param config 本次 apply 的配置
- * @param sink 本次 apply 的闭包槽（不是常驻状态）
+ * @param probe 外部 CLI 可用性探针
  */
-/** 装载期自检结果 → 卡片读的那一格（成功不占文案，失败截到预算内）。 */
-export function endpointVerifyOf(result: { ok: boolean; output: string }): EndpointVerify {
-  return result.ok
-    ? { ok: true, message: "" }
-    : { ok: false, message: result.output.trim().slice(0, ENDPOINT_VERIFY_CHARS) };
-}
-
-async function probeEndpointAtApply(
-  host: HostCtx,
-  config: Config,
-  sink: { value: EndpointVerify | null },
-): Promise<void> {
-  try {
-    // runCollect 只把「命令跑不动」折进 exitCode/output，**它自己仍会抛**：
-    // host.shell.resolve/execute/result 任一步的基础设施故障都是 reject。这一分支是
-    // fire-and-forget（apply 里不 await），漏出去就是未处理 rejection——Node ≥22 默认
-    // 终止宿主进程，而一次自检失败根本不值得杀掉整个 dsh。
-    const result = await runLlmTest(host, config);
-    sink.value = endpointVerifyOf(result);
-  } catch {
-    // 结论留空 = 卡片显示「未检测」：人按「检测」会走同一条路径现取，这里没有可报的
-    // 第二个出口（插件侧不打日志），静默失败也不会把失败写成成功。
-  }
-}
-
-/**
- * 装载期版本自检（fire-and-forget）：跑一次 `ocr version`，把实测版本落在本次 apply 的闭包里。
- *
- * 为什么要有这一次：工具回执里那句「实测与核对版本不一致」只能来自一次真实测量，而按下
- * 「检测」是人在页面上的动作——把它留给用户，模型侧的版本提示就永远晚一步。与端点自检同批、
- * 同样受 `startupVerify` 管：那条设置的条件就是「装载阶段允不允许起进程」，这里起的同样是进程。
- * 关掉它的部署退化成「页面上点过检测之后，工具才开始报」，那也是一句实话。
- * @param host 宿主的服务
- * @param config 本次 apply 的配置
- * @param sink 本次 apply 的闭包槽（与 POST probe 写的是同一个）
- */
-async function probeVersionAtApply(
-  host: HostCtx,
-  config: Config,
-  sink: { value: string | null },
-): Promise<void> {
-  try {
-    const probe = await runVersionProbe(host, config, localeMessages(host));
-    sink.value = probe.version;
-  } catch {
-    // 同端点自检：localeMessages 与 shell 基础设施都可能抛，fire-and-forget 不许把
-    // 未处理 rejection 留给 Node。版本留空 = 卡片显示「未实测」，检测按钮可现取。
-  }
-}
-
 export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe): void {
   const host = resolveHost(ctx);
-  // 装载期自检：startupVerify 开着时顺手验一次端点、测一次外部 CLI 版本（结论都落在本次
-  // apply 的闭包里，无常驻状态）。
-  const endpointVerify: { value: EndpointVerify | null } = { value: null };
+  // 装载期自检：startupVerify 开着时量一次外部 CLI 版本（结论落在本次 apply 的闭包里，
+  // 无常驻状态）。上游端点不在这里测——那是一次真实 provider 请求，归用户动作。
   // 外部 CLI 的实测版本同样落在这次 apply 的闭包里：装载期填一次，之后每次「检测」覆盖它。
   const versionSink: { value: string | null } = { value: null };
   // 本插件起过的作业台账（id → 发起它的会话）。有 owner 的作业在注册表里对**别的会话**
   // 不可见（`list(caller)` 只返回无主作业与该 caller 自己的），卸载时无法靠 `list()`
   // 枚举它们，故留这一份最小台账；条目随已落定记录的裁剪与会话回收一起删。
   const jobLedger: JobLedger = new Map();
+  // 生命周期取消：卸载时把前台/收集式调用一起断掉（工具摘条目不中止在跑的调用）。
+  const lifetime = bindLifetime(host);
+  ctx.effect(() => lifetime.release, "ocr-review: in-flight runs");
   if (config.startupVerify) {
-    void probeEndpointAtApply(host, config, endpointVerify);
-    void probeVersionAtApply(host, config, versionSink);
+    void containedProbe(async () => {
+      const measured = await runVersionProbe(host, config, localeMessages(host));
+      versionSink.value = measured.version;
+    });
   }
   // 本包的后台作业登记为**未拥有**的官方作业，controller 只在 start 那一瞬挂
   // （见 `startUnderOcrController`），所以这里没有需要在卸载时摘的 token；但**在跑的
@@ -3126,7 +3014,7 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
     config,
     gateway: createGateway(host),
     messages: () => localeMessages(host),
-    extras: { verifyOf: () => endpointVerify.value, availability: probe, versionSink },
+    extras: { availability: probe, versionSink },
   });
 }
 

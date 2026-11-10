@@ -6,6 +6,103 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.15
+
+跟随 open-code-review 上游 `1.13.6`（npm latest）：版本核对契约抬到 1.13.6，`--max-tools`
+的帮助文案按 1.13.5 起的精确语义纠正，`ocr_review` 的工具描述补出 workspace 模式不再套
+`.gitignore` 这条行为；上游其余变化随 CLI 生效，本包只透传并在此记清。对外工具与 Remote
+方法名单不变。
+
+### Added
+
+- **部署级开关 `ocrSandbox`**（默认 `full`）：`full` 保持 0.1.14 起的行为——每个 ocr
+  子进程都按 `danger-full-access` 请求；`inherit` 改为跟随宿主执行器自报的
+  `ShellService.sandboxMode`，`workspace-write` 时只放行工作区根，另把 OCR 状态目录
+  （`$HOME/.opencodereview`，随 `ocrConfigPath` 重定向）与系统临时区作为
+  `additionalWritableRoots` 交下去，`read-only` 与认不出的模式直接拒绝并报出它写不了的那个
+  路径。判定与放行根的 mkdir+realpath 收在 `lib/sandbox-policy.ts`；三条新报错文案（中英）
+  进 `lib/messages.ts`；`README.md`/`README.zh-CN.md` 的部署键表与两份详情文档的清单各加
+  `ocrSandbox` 一行。测试：`test/sandbox-policy.test.ts`（9 条判定表）+ `test/host.test.ts`
+  四条接线用例（前台/后台带放行根、`read-only` 拒绝且不起进程、认不出的值回落 `full`）。
+  默认取 `full` 是刻意的：收窄会改变既有部署的权限面，想要围栏的部署显式写那一行。
+
+### Changed
+
+- **OCR 契约抬到 `1.13.6`**：`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的
+  `EXPECTED_OCR_CLI_VERSION` 与代码里那处注释样例、`test/remote.test.ts` 的 stub 回执与断言、
+  两份 README、`docs/DETAIL.md` 与 `docs/DETAIL.zh.md` 的期望版本和钉版本的装法行、
+  `THIRD_PARTY_NOTICES.md` 的验证版本行，统一到 1.13.6；`lib/config-store.ts` 的内置 provider
+  名注释随同一版更新。此前停在 1.13.5，而 `ocr version` 自述不带 `v` 前缀，用户装完 1.13.6
+  会在每次评审时收到「实测与核对版本不一致」的提示（只是提示，不中断评审）。
+- **`maxTools` 文案按精确语义纠正**（`lib/messages.ts`、`host.ts`）：1.13.5 起 review 的
+  `--max-tools` 正值是**精确设置**——`1-49` 仍由 OCR 抬到 50，`≥50` 直接生效（review 模板默认
+  100，所以 `50-99` 会把上限从 100 压到该值，超过 100 才往上抬）；scan 侧不变，只在大于模板
+  默认（60）时生效、`1-49` 也不抬。旧文案「1-49 会被抬到 50，帮助文本 min 50」会让 `50-99`
+  看起来无效，而它从 1.13.5 起就是能生效的（上游 #1118）。
+- **`ocr_review` 描述补出 workspace 的忽略规则**（`lib/messages.ts`）：1.13.5 起 workspace
+  模式不再套 `.gitignore`（上游 #1837），被 ignore 的**跟踪**文件同样计入审查范围；描述里
+  写明这句，模型不会再按旧印象认为它们被排除。
+
+- **`timeoutMinutes` 的正值改由本包自管**（`lib/run-scope.ts` + `host.ts` 的 `runForeground`）：
+  宿主 `bash-local` 把 `shell.maxTimeoutMs` 默认钉在 60 万毫秒，且 `ShellService` 不暴露这个
+  上限，所以插件原先「0 = 请求宿主上限」的写法让所有请求都在 10 分钟被截短。现在：0/未设置
+  仍是「请求宿主上限」（语义不变，确实由宿主收敛）；**大于 0 的分钟数由本包自己计时**
+  （请求宿主时 `onExpiry: "none"`，到点由插件 abort 并按配置的分钟数报错）。超时文案也分开：
+  原 `execTimedOut` 说明「= min(请求, 宿主上限)」，新增 `execTimedOutExplicit` 只说
+  timeoutMinutes 与「宿主的 maxTimeoutMs 不参与」，不让用户去调错那一格。
+- **`startupVerify` 只做本地版本测量**：装载期不再真跑 `ocr llm test`——那是一次真实的
+  provider 请求，付费 provider 每次宿主装载都会计费一次调用。端点检查改由卡片既有的
+  「测试连接」与「应用」时的 `autoVerify` 触发；`GET providers` 载荷里也不再带
+  `endpointVerify` 那一格（卡片没有可显示的装载期结论）。探针本身仍经 `lib/probe-guard.ts`
+  的 `containedProbe` 兜住异常，并随插件卸载一起 abort。
+
+### Docs
+
+- `README.md` 的验收清单里一处包名笔误（`@jayyuen666/dsh-ocr-review`，三个 6）改回
+  `@jayyuen66/dsh-ocr-review`，与 `package.json` 的 `name` 一致。
+
+### Fixed
+
+- **`ocrBackgroundMaxMs` 兜底窗口对有主作业真的生效了**（`host.ts` 的
+  `enforceOcrDeadline`）：走查宿主 `dsh-jobs-local` 的 `assertAccess` 发现，作业一旦带
+  owner，`wait`/`kill` 就必须带同一个 caller，否则抛 `job … belongs to another session`；
+  原实现两处都不传 caller，异常又被就地接住，于是这个部署级开关在有主作业上**配了也不触发**
+  （工具调用永远带会话 id，真实后台评审几乎全是有主作业）。现在把作业 owner 当 caller 传下去，
+  并新增一条用例钉住这条路径；README 里「到点经注册表 kill」的描述这才与实现一致。
+
+- **卸载/热重载会取消在跑的前台评审**（`lib/run-scope.ts`）：此前前台只接调用方的
+  `exec.signal`，插件卸载时 `ctx.effect` 只回收后台作业，一条跑到一半的 `ocr review` 会继续
+  占着进程直到宿主上限。现在插件在 `apply` 里绑定一个生命周期 `AbortController`，前台请求的
+  signal 是 `AbortSignal.any([调用方取消, 插件卸载])`；`shell.maxTimeoutMs` 之外的那条自管截止
+  也接在同一张取消域里。用例：卸载后断言 rejects `execAborted` 且执行器收到的 signal 已 aborted。
+- **跨进程写 `config.json` 不再静默丢更新**（`lib/config-store.ts`）：上游 `ocr config` 是
+  非原子截断写、没有 flock，插件的 `withFileLock` 只串行化自己。现在 `writeConfigAtomic`
+  写完立即回读，不一致即抛 `ConfigWriteConflict`；`updateConfigLocked` 对这类冲突把
+  「锁内重读→改→写」整段重试三次，仍不一致才报 `configWriteConflict`（点名路径、明说这次
+  改动没有落盘）。回读可注入（`ConfigWriteIo`）以便测试这一档；非冲突错误立刻上抛不重试。
+- **显式超时到点的报错不再归因于宿主**：见 Changed 第一条——那条 `= min(请求, 宿主上限)`
+  的文案在自管路径上会误导用户去调 `shell.maxTimeoutMs`，现由独立的 `execTimedOutExplicit` 说清楚。
+
+### Upstream
+
+以下随上游 `1.13.5`/`1.13.6` 生效，本包未改码、只透传——用户看到的评审范围与回执会变：
+
+- 新增文件类型覆盖：`.jsonc`、`.ejs`/`.liquid`/`.njk`、`.haml`/`.slim`、`.erb`、`.scala`
+  （1.13.5）；`.cs`（1.13.6）；`.bzl`/`.bazel`/`.star` 与无扩展名的 `BUILD`/`WORKSPACE`（1.13.6）。
+- diff 解析两处修复：裸 `diff --git` 头在分隔符处切开；hunk 在 new-side 去空行后再匹配一轮。
+- LLM 客户端对 `extra_body.stream` 的显式 `false` 改为一律放行（给默认为 SSE 的网关可回
+  JSON），`true` 与非布尔值丢弃。
+- manifest 的 `execution` 段新增 `max_tool_request_times`；本包只读 `coverage`/`status`，
+  解析不受影响。
+
+### Verification
+
+- `pnpm run check`：typecheck、lint、双构建、**709 用例**、四项 100% 覆盖率与 oxfmt 全绿。
+- Windows 门禁根因修复：`fs/promises` 的 `realpath` 走 libuv 原生实现，会把 runner 临时区的
+  8.3 短名（`RUNNER~1`）折成长名（`runneradmin`）；`realpathSync` 的 JS 实现不解短名，
+  两条放行根断言的期望值改用 `realpathSync.native` 与实现同口径（macOS 的
+  `/var → /private/var` 折叠两口径一致，本机全量复核通过）。
+
 ## 0.1.14
 
 一轮审计收口：provider 写入按 OCR 的内置名分桶、key 状态改按「静态 `api_key` 优先」判定，

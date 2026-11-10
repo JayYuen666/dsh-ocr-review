@@ -173,11 +173,6 @@ const SOURCE_SCHEMA = z.object({
   message: STRING_OR_EMPTY,
 });
 
-const ENDPOINT_VERIFY_SCHEMA = z.object({
-  ok: TRUE_ONLY,
-  message: STRING_OR_EMPTY,
-});
-
 /** 可得性来源的合法域（与 host 侧 `OcrBinarySource` 同一份取值）。形状不合即「没报」。 */
 const BINARY_SOURCE_SCHEMA = z.enum(["bundled", "path", "none"]);
 
@@ -236,7 +231,6 @@ const EMPTY_PAYLOAD: ProvidersPayload = {
   current: { provider: "", model: "", keyIsDynamic: false, url: "" },
   getCredReady: false,
   source: { status: "", message: "" },
-  endpointVerify: null,
   ocrBinary: null,
 };
 
@@ -249,10 +243,6 @@ const PROVIDERS_PAYLOAD_SCHEMA = z.object({
   current: z.preprocess((value) => (isRecord(value) ? value : {}), CURRENT_SCHEMA),
   getCredReady: TRUE_ONLY,
   source: z.preprocess((value) => (isRecord(value) ? value : {}), SOURCE_SCHEMA),
-  endpointVerify: z.preprocess((value) => {
-    const parsed = ENDPOINT_VERIFY_SCHEMA.safeParse(value);
-    return parsed.success ? parsed.data : null;
-  }, ENDPOINT_VERIFY_SCHEMA.nullable()),
   ocrBinary: z.unknown().transform((value) => binaryOf(value)),
 });
 
@@ -319,9 +309,6 @@ export interface ProvidersPayload {
   current: { provider: string; model: string; keyIsDynamic: boolean; url: string };
   getCredReady: boolean;
   source: ProviderSource;
-  /** 装载期端点自检结果（host 在 apply 时跑一次 `ocr llm test`）；null/缺省 = 没跑。
-   *  可选：上游 host 版本可能不带这个字段，卡片按「没跑」处理即可。 */
-  endpointVerify?: { ok: boolean; message: string } | null;
   /** 外部 ocr 的可得性（只靠 fs 判断）；null 或没给出 = 宿主那侧没有报，卡片显示「未取到状态」。 */
   ocrBinary?: OcrBinaryView | null;
 }
@@ -800,23 +787,14 @@ function buildActionField(deps: OcrCardDeps): ReactNode {
   );
 }
 
-/** 当前配置 / key / 装载期自检三行提示（自检失败只作提示，不挡表单）。 */
+/** 当前配置与 key 两行提示。 */
 function buildProviderInfo(deps: OcrCardDeps, data: ProvidersPayload): ReactNode[] {
   const { t } = deps;
   const cur = data.current;
   const currentHint = cur.provider === "" ? t("noProvider") : currentConfigText(t, cur);
   const currentInfo = createElement("p", { className: "dsu-hint" }, currentHint);
   const keyInfo = createElement("p", { className: "dsu-hint" }, deps.keyHint);
-  const verify = data.endpointVerify ?? null;
-  const verifyWarning =
-    verify !== null && !verify.ok
-      ? createElement(
-          "p",
-          { className: "dsu-error", "data-field": "endpoint-verify" },
-          t("endpointVerifyFailed", { reason: verify.message }),
-        )
-      : null;
-  return [verifyWarning, currentInfo, keyInfo];
+  return [currentInfo, keyInfo];
 }
 
 /** 数据齐（source.status === "ready"）那一支：模型四个字段 + 动作行 + 三行提示。 */

@@ -416,10 +416,6 @@ const READY_DATA = {
   source: { status: "ready", message: "" },
 };
 
-/** 装载期自检提示的取文辅助（模块级：放 it / describe 里会被 sonarjs 判「每次调用重建」）。 */
-const withVerify = (verify: { ok: boolean; message: string } | null): string =>
-  textOf(buildProviderSection(depsWith(tZh, { data: { ...READY_DATA, endpointVerify: verify } })));
-
 const CURRENT = {
   provider: "sensenova",
   model: SENSENOVA_MODEL,
@@ -683,15 +679,6 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(zh).toContain("应用到 OCR 配置");
     expect(zh).toContain("（未配置 key）");
     expect(zh).toContain("⚠ get-cred 脚本缺失");
-  });
-
-  it("装载期自检未通过 ⇒ ready 分支上方多一行提示；通过/未跑都不出这行", () => {
-    const failed = withVerify({ ok: false, message: "MissingSessionID" });
-    expect(failed).toContain("装载期端点自检未通过");
-    expect(failed).toContain("这条是端点给的回执，不是本插件的故障");
-    expect(failed).toContain("MissingSessionID");
-    expect(withVerify({ ok: true, message: "" })).not.toContain("装载期端点自检");
-    expect(withVerify(null)).not.toContain("装载期端点自检");
   });
 
   it("provider 区三条降级路径按语言（含宿主没给原因时顶上的那句）", () => {

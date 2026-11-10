@@ -31,6 +31,8 @@ export interface OcrReviewMessages {
   readonly middleEllipsis: string;
   /** 前台超时（含实际生效分钟数）。 */
   readonly execTimedOut: string;
+  /** 显式 timeoutMinutes 到点：这条截止由本包自管，宿主的 maxTimeoutMs 不参与。 */
+  readonly execTimedOutExplicit: string;
   /** 调用被取消。 */
   readonly execAborted: string;
   /** exit 127：命令词交下去没被系统找到（候选文件在 fs 的判断通过之后消失了）。 */
@@ -55,6 +57,13 @@ export interface OcrReviewMessages {
   readonly stdoutTruncated: string;
   /** 截断后完整输出的写到磁盘位置。 */
   readonly outputSpill: string;
+  // ── 沙箱子进程围栏（部署级 ocrSandbox=inherit）─────────────────────────────
+  /** inherit + 执行器自报 read-only：拒绝起 ocr。{path} = 它必须写的状态目录。 */
+  readonly ocrSandboxReadOnly: string;
+  /** inherit + 认不出的模式：不猜。{mode} = 执行器自报的那个值。 */
+  readonly ocrSandboxUnknownMode: string;
+  /** inherit + 放行根建不出来/折不成真实绝对路径。{path}/{reason}。 */
+  readonly ocrSandboxRootUnavailable: string;
   /** 后台模式的轮询指引（ocr_session 三步）。 */
   readonly backgroundPolling: string;
   // ── 官方作业服务（ctx.jobs）：写进模型可见 detail / 环里的说明 ──────────────
@@ -231,6 +240,8 @@ export interface OcrReviewMessages {
   readonly configNotObject: string;
   /** 配置文件读不动（权限/IO 等）：写侧必须中止，不能当成空文档整份覆盖。 */
   readonly configUnreadable: string;
+  /** 写后回读发现 config.json 被别人整份改掉（锁只串行化本包的写者）。 */
+  readonly configWriteConflict: string;
   readonly providerNotInList: string;
   readonly modelNotInList: string;
   /** provider 的 api 协议无法映射到 OCR 的 protocol（投影透传的未知值）。 */
@@ -320,7 +331,7 @@ export interface OcrReviewMessages {
   readonly tuningConcurrency: string;
   readonly tuningTimeout: string;
   readonly tuningMaxTools: string;
-  /** scan 的 maxTools：scan 侧不抬到 50，只在大于模板默认时生效（review 侧才是 min 50）。 */
+  /** scan 的 maxTools：scan 侧 1-49 也不抬、只在大于模板默认时生效（review 侧 1-49 抬到 50、≥50 精确生效）。 */
   readonly tuningMaxToolsScan: string;
   readonly tuningMaxTokens: string;
   readonly tuningMaxTokensBudget: string;
@@ -347,6 +358,10 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "请缩小审查范围（exclude/--commit/更小改动）、调低 OCR 每组 --timeout，" +
       "抬高 shell 执行器（bash-local/pwsh-local）设置项里的 maxTimeoutMs，" +
       "或改用 wait=false 后台模式（默认不设时限）",
+    execTimedOutExplicit:
+      "ocr 执行超时（配置的 timeoutMinutes = {minutes} 分钟，由本插件自管，宿主的 " +
+      "maxTimeoutMs 不参与）：请调高本插件的 timeoutMinutes，或缩小审查范围" +
+      "（exclude/--commit/更小改动）、调低 OCR 每组 --timeout，也可改用 wait=false 后台模式",
     execAborted: "ocr 执行被中止",
     execNotFound:
       "ocr 命令不存在：命令词交下去没被系统找到（PATH 上那份可能刚被移走或改名）。" +
@@ -372,6 +387,19 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     detailSeparator: "：",
     stdoutTruncated: "[ocr-review] 注意：输出超过 {limit} 字节上限已截断{spill}",
     outputSpill: "（完整输出已落盘：{path}）",
+    ocrSandboxReadOnly:
+      "ocrSandbox=inherit 时宿主执行器自报的沙箱模式是 read-only：ocr 必须写自己的状态目录 " +
+      "{path}（config.json 与会话记录都在它下面），这一档连它都写不了，所以没有起进程。" +
+      "把宿主的沙箱换成 workspace-write（或 danger-full-access），或把本插件的 ocrSandbox 设成 full。",
+    ocrSandboxUnknownMode:
+      "ocrSandbox=inherit 会按宿主执行器自报的沙箱模式收窄，但自报的值是「{mode}」——" +
+      "不在已知的 read-only / workspace-write / danger-full-access 三档里。这里不猜：" +
+      "未知档可能比已知档更宽，把它当成 full 等于让一个以为自己更严的部署悄悄拿到全盘写权限。" +
+      "把宿主执行器换回已知档，或把 ocrSandbox 设成 full。",
+    ocrSandboxRootUnavailable:
+      "ocrSandbox=inherit 要放行 {path}，但它既建不出来、也折不成真实绝对路径（{reason}）。" +
+      "宿主会拒收不存在/不是目录/是软链的放行根（整条 ocr 调用当场 spawn 失败），所以这里先停。" +
+      "检查该路径的权限与软链，或把 ocrSandbox 设成 full。",
     backgroundPolling:
       "先 job_output(job_id=<本回执的 jobId>) 读这条后台评审的实时输出与最终结局——按 id 走，" +
       "启动即可读，一定有结果；要停它就 job_kill(job_id=<同一 id>)。会话落盘后再走 ocr_session：" +
@@ -511,6 +539,10 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "{where} 不是合法 JSON，已中止写入以保护既有配置（请先修复或删掉该文件）：{cause}",
     configNotObject: "{where} 顶层不是 JSON 对象，已中止写入以保护既有配置",
     configUnreadable: "{where} 读不动，已中止写入以保护既有配置（既有文件不会被覆盖）：{cause}",
+    configWriteConflict:
+      "写 {path} 之后回读到的不是刚写的那份——另一个进程（多半是终端里的 ocr）" +
+      "刚改过这份配置，本包已重试三次仍未拿到一致的快照，这次改动没有落盘。" +
+      "请重试保存，或先用 ocr config 确认当前配置",
     providerNotInList: "provider 不在 dsh 配置的 {ns}.providers 列表：{provider}",
     modelNotInList: "model 不在 {provider} 的 models 列表中：{model}",
     protocolUnsupported:
@@ -553,7 +585,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     providerModelRequired: "provider 与 model 必填",
     bodyParseFailed: "body 解析失败：{message}",
     reviewToolDescription:
-      "用 open-code-review（ocr）对 Git 变更做深度学习代码审查：OCR 调用其自身配置的 LLM（provider/model 在 ocr-review 设置卡选择）独立审查，返回按严重度/类别聚合的评论摘要。scope=workspace 审工作区 staged+unstaged+untracked 变更（默认）；scope=commit 审单个提交；scope=branch 用从/到分支对比（merge-base）。常用先 ocr_delegate_preview 看范围。effort 控制深度（low=1 轮/medium=2/high=3，越深越贵）。background 提供需求/业务上下文能显著提升质量。preview=true 只做文件选择（零 LLM、不建会话）；noFilter 保留全部评论；rule/backgroundFile 只收 repo 根内文件。首次审查前确保 ocr 已配置且 'ocr llm test' 通过。",
+      "用 open-code-review（ocr）对 Git 变更做深度学习代码审查：OCR 调用其自身配置的 LLM（provider/model 在 ocr-review 设置卡选择）独立审查，返回按严重度/类别聚合的评论摘要。scope=workspace 审工作区变更（默认；staged+unstaged+untracked 都算，且不套 .gitignore——被忽略的跟踪文件同样计入）；scope=commit 审单个提交；scope=branch 用从/到分支对比（merge-base）。常用先 ocr_delegate_preview 看范围。effort 控制深度（low=1 轮/medium=2/high=3，越深越贵）。background 提供需求/业务上下文能显著提升质量。preview=true 只做文件选择（零 LLM、不建会话）；noFilter 保留全部评论；rule/backgroundFile 只收 repo 根内文件。首次审查前确保 ocr 已配置且 'ocr llm test' 通过。",
     scanToolDescription:
       "用 open-code-review（ocr）做全文件扫描审查（无需 Git 变更/无 diff，适合审计陌生代码库或指定目录）。--path 逗号分隔的仓库相对目录/文件（缺省整个仓库，路径不存在会报错）。与 ocr_review 一样由 OCR 自身 LLM 独立审查，返回聚合评论摘要。preview=true 只列扫描范围；noPlan/noDedup/noSummary 降本；resume 续扫；rule 只收 repo 根内文件。",
     previewToolDescription:
@@ -620,7 +652,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     tuningTimeout:
       "每{unit}任务超时分钟（OCR --timeout；review 会按 effort 轮数线性放大，scan 不放大；0=不限时；缺省不传=OCR 原生 15）",
     tuningMaxTools:
-      "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；1-49 会被 OCR 抬到 50，帮助文本 min 50；缺省不传=模板默认）",
+      "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；1-49 会被 OCR 抬到 50；≥50 起精确生效——review 模板默认 100，传 50-99 会把上限从 100 压到该值；缺省不传=模板默认）",
     tuningMaxToolsScan:
       "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；只在大于模板默认值时生效，不抬到 50；缺省不传=模板默认）",
     tuningMaxTokens:
@@ -679,6 +711,11 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "narrow the review scope (exclude / --commit / a smaller diff), lower OCR's per-group --timeout, " +
       "raise maxTimeoutMs in the shell executor's own settings (bash-local/pwsh-local), " +
       "or switch to background mode with wait=false (no time limit by default)",
+    execTimedOutExplicit:
+      "ocr timed out (timeoutMinutes = {minutes} min, enforced by this plugin; the host's " +
+      "maxTimeoutMs does not apply): raise this plugin's timeoutMinutes, narrow the review scope " +
+      "(exclude / --commit / a smaller diff), or lower OCR's per-group --timeout; " +
+      "background mode with wait=false is also available",
     execAborted: "ocr execution aborted",
     execNotFound:
       "ocr command not found: the command word was handed to the shell and nothing answered it " +
@@ -711,6 +748,22 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     stdoutTruncated:
       "[ocr-review] note: output exceeded the {limit}-byte cap and was truncated{spill}",
     outputSpill: " (full output spilled to {path})",
+    ocrSandboxReadOnly:
+      "ocrSandbox=inherit, but the host executor reports the sandbox mode read-only: ocr must write " +
+      "its own state directory {path} (config.json and the session records live there), and this " +
+      "mode cannot permit even that, so no process was started. Switch the host sandbox to " +
+      "workspace-write (or danger-full-access), or set this plugin's ocrSandbox to full.",
+    ocrSandboxUnknownMode:
+      "ocrSandbox=inherit narrows to the sandbox mode the host executor reports, but it reports " +
+      '"{mode}" - not one of the known read-only / workspace-write / danger-full-access modes. ' +
+      "Nothing is guessed here: an unknown mode may be wider than the known ones, and treating it " +
+      "as full would quietly hand full-disk writes to a deployment that believes it is stricter. " +
+      "Point the host executor back at a known mode, or set ocrSandbox to full.",
+    ocrSandboxRootUnavailable:
+      "ocrSandbox=inherit must allow {path}, but it can be neither created nor resolved to a real " +
+      "absolute directory ({reason}). The host rejects missing, non-directory, and symlinked " +
+      "writable roots, which fails the whole ocr spawn, so this call stops first. Check the " +
+      "permissions and symlinks on that path, or set ocrSandbox to full.",
     backgroundPolling:
       "First read this background review's live output and final outcome with " +
       "job_output(job_id=<the jobId in this receipt>) — that path goes by id, so it is readable " +
@@ -875,6 +928,11 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "the top level of {where} is not a JSON object; the write was aborted to protect the existing configuration",
     configUnreadable:
       "{where} could not be read; the write was aborted so the existing configuration is left untouched: {cause}",
+    configWriteConflict:
+      "the read-back of {path} after writing differs from what we just wrote — another process " +
+      "(most likely ocr in a terminal) changed that file; this change was retried three times " +
+      "without getting a consistent snapshot and was not written. Retry the save, or check the " +
+      "current configuration with ocr config first",
     providerNotInList: "provider is not in the {ns}.providers list configured by dsh: {provider}",
     modelNotInList: "model is not in the models list of {provider}: {model}",
     protocolUnsupported:
@@ -927,8 +985,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     reviewToolDescription:
       "Deep code review of Git changes with open-code-review (ocr): OCR runs its own configured LLM " +
       "(provider/model picked in the ocr-review settings card) as an independent reviewer and returns " +
-      "comments aggregated by severity/category. scope=workspace reviews staged+unstaged+untracked " +
-      "changes (default); scope=commit reviews one commit; scope=branch compares from/to branches " +
+      "comments aggregated by severity/category. scope=workspace reviews working-tree changes " +
+      "(default; staged+unstaged+untracked all count, and .gitignore is not applied — ignored " +
+      "tracked files count too); scope=commit reviews one commit; scope=branch compares from/to branches " +
       "(merge-base). Commonly start with ocr_delegate_preview to see the scope. effort controls depth " +
       "(low=1 pass / medium=2 / high=3, deeper costs more). Passing requirements/business context via " +
       "background markedly improves quality. preview=true selects files only (no LLM, no session); " +
@@ -1027,7 +1086,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     tuningTimeout:
       "Per-{unit} task timeout in minutes (OCR --timeout; review scales it by the effort round count, scan does not; 0 = unlimited; unset = OCR native 15)",
     tuningMaxTools:
-      "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; 1-49 is raised to 50 by OCR, help text says min 50; unset = template default)",
+      "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; 1-49 is raised to 50 by OCR; values >= 50 apply exactly — the review template defaults to 100, so 50-99 lowers that cap to the given value; unset = template default)",
     tuningMaxToolsScan:
       "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; only takes effect above the template default, never raised to 50; unset = template default)",
     tuningMaxTokens:

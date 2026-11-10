@@ -22,6 +22,7 @@ import {
   rmSync,
   truncateSync,
 } from "node:fs";
+import { once } from "node:events";
 import { symlink, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -42,6 +43,15 @@ import { shq } from "../lib/argv-guard.ts";
 
 const OCR_DIR_NAME = ".opencodereview";
 const OCR_CONFIG_NAME = "config.json";
+/** 部署级 `ocrSandbox` 的两档与一个刻意的错字（loader 行手写 config 时可能出现的形态）。 */
+const OCR_SANDBOX_INHERIT = "inherit";
+const OCR_SANDBOX_INVALID = "inherit-and-more";
+/** 宿主执行器自报的沙箱模式（`ShellService.sandboxMode` 的三种取值）。 */
+const SANDBOX_FULL_ACCESS = "danger-full-access";
+const SANDBOX_WORKSPACE_WRITE = "workspace-write";
+const SANDBOX_READ_ONLY = "read-only";
+/** inherit 用例临时 HOME 的目录名前缀（三条用例各建一次）。 */
+const SANDBOX_HOME_PREFIX = "ocr-sandbox-home-";
 /** 只在“原始目录不在 git 顶层内”的用例里用的仓库路径。 */
 const OUTSIDE_REPO = "/elsewhere";
 /** session export 产物文件名（多处以它为路径尾段）。 */
@@ -136,8 +146,13 @@ interface ResolveCall {
   onExpiry?: string;
   stdoutMaxBytes?: number;
   signal?: AbortSignal;
-  /** 按调用携带的沙箱策略（官方 `SandboxExecutionPolicy`，照抄的形状以免测试引运行期包）。 */
-  sandboxPolicy?: { mode: string; workspaceRoot: string };
+  /** 按调用携带的沙箱策略（官方 `SandboxExecutionPolicy`，照抄的形状以免测试引运行期包）。
+   *  `additionalWritableRoots` 只有 `inherit` 档会带（放行 OCR 状态目录与系统临时区）。 */
+  sandboxPolicy?: {
+    mode: string;
+    workspaceRoot: string;
+    additionalWritableRoots?: readonly string[];
+  };
   /** 按调用携带的普通环境变量（官方 `ShellExecRequest.env`，在凭据净化之后合并）。
    *  状态探测靠它带 `OCR_NO_UPDATE=1`，这条断言钉的就是不许产生那条副作用。 */
   env?: Record<string, string>;
@@ -182,6 +197,9 @@ interface FakeShell {
   /** `git rev-parse --show-toplevel` 的应答：字符串 = 顶层在别处；null = 非 git
    *  仓库（exit 128）；缺省 = 原样回显 workdir（该目录本身就是顶层）。 */
   gitTopLevel?: string | null;
+  /** 执行器自报的沙箱模式（官方 `ShellService.sandboxMode`）；缺省 undefined = 该执行器不沙箱
+   *  （bash-local 就是这一档）。`inherit` 档的用例把它置成 'workspace-write' / 'read-only'。 */
+  sandboxMode: string | undefined;
   resolve: (spec: ResolveCall) => unknown;
   /** 0.1.7 唯一的执行入口（旧 run/start 合并）：前台取 handle.result()，后台留句柄。 */
   execute: (spec: unknown) => Promise<FakeProc>;
@@ -293,11 +311,16 @@ interface AgentRegistryStub {
   get: (session: string) => { ctx: Context } | undefined;
 }
 
-/** 带 agent 注册表的注册表实例：有 owner 的作业要在 start 时查到这条活 Agent。 */
-function makeOwnedJobRegistry(agents: AgentRegistryStub): LocalJobRegistry {
+/** 带 agent 注册表的注册表实例：有 owner 的作业要在 start 时查到这条活 Agent。
+ *  @param agents 会话 id → 活 Agent 的 ctx（官方 `resolveOwner` 读的那一面）
+ *  @param pumpPollMs 泵拍；兜底窗口的用例推进的是分钟级假时钟，用默认拍会白刷几十万拍 */
+function makeOwnedJobRegistry(
+  agents: AgentRegistryStub,
+  pumpPollMs: number = PUMP_MS,
+): LocalJobRegistry {
   const ctx = new Context();
   ctx.reflect.provide("agents", agents);
-  return new LocalJobRegistry(ctx, registryDefaults({ pumpPollMs: PUMP_MS }));
+  return new LocalJobRegistry(ctx, registryDefaults({ pumpPollMs }));
 }
 
 /**
@@ -469,6 +492,7 @@ function makeShell(): FakeShell {
     resolveCalls: [],
     scripts: [],
     procs: [],
+    sandboxMode: undefined,
     resolve: (spec) => {
       // resolveCalls 的语义是「本包下发给 OCR CLI 的请求形态」，每个既有断言都按这个
       // 读它（索引 0 = 第一个 ocr 调用）。会话根归一化那条 `git rev-parse` 是宿主环境
@@ -744,8 +768,9 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
       autoVerify: true,
       maxComments: 12,
       timeoutMinutes: 0,
-      // 装载期自检默认关：它会在 apply 里起一次 `ocr llm test` 子进程，而本文件大量用例
-      // 断言「apply 不产生子进程」。要测自检的用例自己把它置 true（见「装载期端点自检」组）。
+      // 装载期自检默认关：它会起一次 `ocr version` 子进程，而本文件大量用例断言
+      // 「apply 不产生子进程」。要测自检的用例自己把它置 true（见「装载期自检」组）。
+      // 上游端点不在装载期验，所以这里没有第二个开关。
       startupVerify: false,
     },
     shell: makeShell(),
@@ -898,6 +923,7 @@ const EDITABLE = [
 /** 字段化的部署值：在 Config 里但**不标** volatile ⇒ 只在行 config 上改。 */
 const DEPLOYMENT = [
   "llmTestTimeoutMs",
+  "ocrSandbox",
   "ocrBackgroundMaxMs",
   "ocrInstallHint",
   "ocrNoAutoUpdate",
@@ -1002,22 +1028,39 @@ function applyPlugin(host: FakeHost, probe: OcrAvailabilityProbe = presentProbe)
   )(host, liveConfig(host), probe);
 }
 
-/** `ocr llm test` 跑通那句（装载期自检的多个用例共用，写四遍就成了各漂各的期望值）。 */
+/** 自建一个「部署级字段已落定」的宿主：`ocrSandbox`/`ocrConfigPath` 是装载期定值，
+ *  必须先写进 `settingsValue` 再 apply，否则 liveConfig 快照到的还是 schema 默认值。
+ *  刻意不复用外层 beforeEach 那份宿主（它的部署值已经由 schema 默认值定死了）。 */
+function makeSandboxHost(
+  ocrSandbox: string,
+  sandboxMode: string | undefined,
+  ocrConfigPath?: string,
+): FakeHost {
+  const sandboxHost = makeHost();
+  sandboxHost.settingsValue["ocrSandbox"] = ocrSandbox;
+  if (ocrConfigPath !== undefined) {
+    sandboxHost.settingsValue["ocrConfigPath"] = ocrConfigPath;
+  }
+  sandboxHost.shell.sandboxMode = sandboxMode;
+  applyPlugin(sandboxHost);
+  return sandboxHost;
+}
+
 /** brew 那条装法命令的原文（多处断言共用）。 */
 const BREW_INSTALL = "brew install open-code-review";
-const LLM_TEST_OK = { exitCode: 0, stdoutText: "Connection test successful" };
 /** `ocr version` 跑通且与核对版本同版那份回执。 */
 const VERSION_OK_OUT = `open-code-review ${EXPECTED_OCR_CLI_VERSION} darwin/arm64\n`;
 
 /**
- * 装载期自检开着、且版本探测交出 `versionOut` 的宿主：apply 里两行调用的先后即 resolve
- * 的先后（先端点自检、后版本探测），所以脚本队列要按这个次序喂两条。
+ * 装载期自检开着、且版本探测交出 `versionOut` 的宿主：apply 里只有这一次 `ocr version`
+ * 调用（上游端点不在装载期验），所以脚本队列只喂一条。
  * 版本核对相关的用例共用它，队列里剩下的余量留给工具调用本身。
  */
 async function hostWithMeasuredVersion(versionOut: string): Promise<FakeHost> {
   const host = makeHost();
   host.settingsValue["startupVerify"] = true;
-  host.shell.scripts.push(LLM_TEST_OK, { exitCode: 0, stdoutText: versionOut });
+  // 装载期只跑版本测量：这里只留它消费的那条脚本。
+  host.shell.scripts.push({ exitCode: 0, stdoutText: versionOut });
   applyPlugin(host);
   await settledTick();
   return host;
@@ -1350,12 +1393,16 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         llmTestTimeoutMs: 90_000,
         ocrBackgroundMaxMs: 0,
         stdoutMaxBytes: 400_000,
-        // 装载期端点自检默认开（部署可关）。
+        // 装载期版本测量默认开（只读本地 CLI，不联网）。
         startupVerify: true,
+        // 装载期自检只量本地 CLI 版本，不碰 provider 接口（端点检查归「测试连接」/autoVerify）。
         // 自动更新默认不抑制：维持被封装 CLI 的既有行为，要关是部署的决定。
         ocrNoAutoUpdate: false,
         // 装法默认两条都给：替他选装法是部署的决定，不是本包的偏好。
         ocrInstallHint: "both",
+        // 围栏默认 full：0.1.14 起每个 ocr 子进程都请求 danger-full-access，换默认
+        // 会静默改变既有部署的权限面（要收窄是部署显式写 inherit 的决定）。
+        ocrSandbox: "full",
       });
     });
 
@@ -1602,10 +1649,95 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(host.shell.resolveCalls.length).toBeGreaterThanOrEqual(2);
       for (const call of host.shell.resolveCalls) {
         expect(call.sandboxPolicy).toStrictEqual({
-          mode: "danger-full-access",
+          mode: SANDBOX_FULL_ACCESS,
           workspaceRoot: call.workdir,
         });
       }
+    });
+
+    it("ocrSandbox=inherit + 执行器 workspace-write：放行 OCR 状态目录与系统临时区", async () => {
+      const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
+      try {
+        const sandboxHost = makeSandboxHost(
+          OCR_SANDBOX_INHERIT,
+          SANDBOX_WORKSPACE_WRITE,
+          path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
+        );
+        sandboxHost.shell.scripts.push({ output: REVIEW_JSON });
+        await toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo" }, makeExec());
+
+        const call = sandboxHost.shell.resolveCalls.at(-1);
+        expect(call?.sandboxPolicy).toStrictEqual({
+          mode: SANDBOX_WORKSPACE_WRITE,
+          workspaceRoot: call?.workdir,
+          // 两根都由插件自己 mkdir+realpath：macOS 的 /var → /private/var 折法在这里生效，
+          // 所以期望值不能用 mkdtemp 的原样串。fs/promises 的 realpath 走 libuv 原生实现，
+          // Windows 上会把 8.3 短名（RUNNER~1）折成长名，而 realpathSync 的 JS 实现不解短名，
+          // 期望值必须用 .native 才与实现同口径。
+          additionalWritableRoots: [
+            realpathSync.native(path.join(home, OCR_DIR_NAME)),
+            realpathSync.native(tmpdir()),
+          ],
+        });
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("ocrSandbox=inherit 的后台作业同样带放行根（策略在 startBackground 期解析）", async () => {
+      const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
+      try {
+        const sandboxHost = makeSandboxHost(
+          OCR_SANDBOX_INHERIT,
+          SANDBOX_WORKSPACE_WRITE,
+          path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
+        );
+        await toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+
+        const call = sandboxHost.shell.resolveCalls.at(-1);
+        expect(call?.sandboxPolicy).toStrictEqual({
+          mode: SANDBOX_WORKSPACE_WRITE,
+          workspaceRoot: call?.workdir,
+          additionalWritableRoots: [
+            realpathSync.native(path.join(home, OCR_DIR_NAME)),
+            realpathSync.native(tmpdir()),
+          ],
+        });
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("ocrSandbox=inherit + 执行器 read-only：拒绝执行、点名它写不了的状态目录", async () => {
+      const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
+      try {
+        const sandboxHost = makeSandboxHost(
+          OCR_SANDBOX_INHERIT,
+          SANDBOX_READ_ONLY,
+          path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
+        );
+        await expect(
+          toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo" }, makeExec()),
+        ).rejects.toThrow(
+          format(MESSAGES.zh.ocrSandboxReadOnly, {
+            path: path.join(home, OCR_DIR_NAME),
+          }),
+        );
+        // 拒绝发生在 resolve 之前：一个进程都不该起来。
+        expect(sandboxHost.shell.procs).toHaveLength(0);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("ocrSandbox 认不出的值回落 full（loader 行手写错字不该改变围栏）", async () => {
+      const sandboxHost = makeSandboxHost(OCR_SANDBOX_INVALID, SANDBOX_WORKSPACE_WRITE);
+      sandboxHost.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      expect(sandboxHost.shell.resolveCalls.at(-1)?.sandboxPolicy).toStrictEqual({
+        mode: SANDBOX_FULL_ACCESS,
+        workspaceRoot: sandboxHost.shell.resolveCalls.at(-1)?.workdir,
+      });
     });
 
     it("非 git 目录 + 符号链接前缀 ⇒ 回退 realpath（缺陷 1 的触发条件②）", async () => {
@@ -2521,10 +2653,10 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       // 前提钉子：这一档替身交不出注册表，用例走的才确实是「安静跳过」那一分支。
       expect(host.get("jobs")).toBeUndefined();
       applyPlugin(host);
-      // 释放器确实登记了：主 fiber 上是作业回收两位（插件卸载、会话 dispose），
-      // 五条端点的释放器挂在注入子 fiber 的 injectEffectDisposers 上；否则下面的循环
-      // 没有实际校验、覆盖率是假象。
-      expect(host.effectDisposers).toHaveLength(2);
+      // 释放器确实登记了：主 fiber 上是生命周期取消 + 作业回收两位（插件卸载、会话
+      // dispose），五条端点的释放器挂在注入子 fiber 的 injectEffectDisposers 上；否则
+      // 下面的循环没有实际校验、覆盖率是假象。
+      expect(host.effectDisposers).toHaveLength(3);
       for (const dispose of host.effectDisposers) {
         dispose();
       }
@@ -2576,6 +2708,53 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(host.jobs.get(onlyJob(job)).detail).toBe(
         `killed before exit; ${format(MESSAGES.zh.jobReasonTimeout, { minutes: "120" })}`,
       );
+    });
+
+    it("有主作业：兜底到点也必须经注册表收（wait/kill 不传 caller 会被 owner 闸拒）", async () => {
+      // 官方 `assertAccess` 的原话：`job ${id} belongs to another session`，且注释写明
+      // "a caller-less view can never match an owned one"。`enforceOcrDeadline` 原先调
+      // `jobs.wait(id, ms)` / `jobs.kill(id, undefined, reason)`（都不带 caller），而有主作业
+      // 在 start 时就写了 owner ⇒ 这两步都抛，又被该函数的 `catch {}` 就地接住 ⇒
+      // 部署里把 ocrBackgroundMaxMs 配成非零也永远不 kill。工具调用永远带会话 id，
+      // 所以真实后台评审几乎全是有主作业，这条路径不测就没人咬得住。
+      const host = makeHost();
+      host.settingsValue["ocrBackgroundMaxMs"] = 120 * 60_000;
+      // 换同一枚真注册表，但带 agent 名册与长泵拍：泵拍不拉长，推进两小时会白刷
+      // 120*60000/PUMP_MS 拍（默认 25 毫秒，约 29 万拍）。
+      const { agents } = host;
+      host.jobs = makeOwnedJobRegistry(
+        {
+          get: (session) => {
+            const ctx = agents.get(session);
+            return ctx === undefined ? undefined : { id: session, ctx };
+          },
+        },
+        60 * 60_000,
+      );
+      applyPlugin(host);
+      vi.useFakeTimers();
+      const session = brandSessionId("s-1");
+      let proc: FakeProc | undefined;
+      let job: { id: JobId } | undefined;
+      try {
+        await toolOf(host, "ocr_review").execute(
+          { repo: "/repo", wait: false },
+          ownExec(host, "s-1"),
+        );
+        [proc] = host.shell.procs;
+        // 有主作业对无 caller 的视图不可见（同一道 owner 闸）⇒ 枚举也要带会话。
+        [job] = host.jobs.list(session);
+        await vi.advanceTimersByTimeAsync(120 * 60_000 + 10);
+        expect(
+          host.jobs.get(onlyJob(job), session).status,
+          "有主作业到点必须经注册表收，窗口不能形同虚设",
+        ).toBe("stopping");
+        expect(proc?.killCount).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+      proc?.settle();
+      await settledTick();
     });
 
     it("周期泵真的在搬增量：两次 emit 不重不漏（readFrom 的游标算错就会红）", async () => {
@@ -3262,11 +3441,8 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
     it("装载期自检的 shell 基础设施故障不产生未处理 rejection（自检失败不许杀宿主）", async () => {
       const host = makeHost();
       host.settingsValue["startupVerify"] = true;
-      // 端点自检先、版本探测后：两条探测各消费一条脚本，都在 result() 上抛。
-      host.shell.scripts.push(
-        { throws: new Error("shell down") },
-        { throws: new Error("shell down") },
-      );
+      // 版本探测消费一条脚本，在 result() 上抛。
+      host.shell.scripts.push({ throws: new Error("shell down") });
       const rejections = await collectUnhandledRejections(async () => {
         applyPlugin(host);
         await settledTick();
@@ -3275,14 +3451,8 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         rejections,
         "fire-and-forget 自检漏 catch 会把未处理 rejection 交给 Node",
       ).toStrictEqual([]);
-      // 两次探测都真发起了：否则上面的空数组只是「没跑」而不是「跑过且没漏」。
-      expect(host.shell.resolveCalls).toHaveLength(2);
-      const service = host.provided.get(OCR_REMOTE_NAMESPACE) as
-        | { providers: () => Promise<Record<string, unknown>> }
-        | undefined;
-      const body = await service?.providers();
-      // 结论留空 = 卡片显示「未检测」：失败不许被写成成功，也不许把装载拖挂。
-      expect(body?.["endpointVerify"]).toBeNull();
+      // 探测真发起了：否则上面的空数组只是「没跑」而不是「跑过且没漏」。
+      expect(host.shell.resolveCalls).toHaveLength(1);
     });
 
     it("ocr_scan 走同一句：两个自驱 LLM 的工具都吃同一份实测值", async () => {
@@ -3664,5 +3834,108 @@ describe("rebaseScanScope：scan 的 path/exclude 重基", () => {
   it("原始目录不在顶层内 ⇒ 原样返回（不做会改变范围的重基）", () => {
     const args = { path: ["x"] };
     expect(rebaseScanScope(args, path.resolve(OUTSIDE_REPO), top)).toBe(args);
+  });
+});
+
+// ── 本轮三条宿主状态修复的接线钉（自检拆分 / 前台超时 / 卸载取消）────────────
+//
+// 这三条都不在「工具回执」面上：一条只在装载期跑、一条只在显式超时那一刻触发、一条只在
+// 宿主卸载时触发。没有这些用例，三个分支就只是编译器里的存在，v8 的块覆盖看不见。
+
+/** 让这次 execute 的 result 一直等到 spec.signal 断开才回执（`git rev-parse` 除外：
+ *  那是宿主环境查询，被 gated 住会让整条用例挂死，而不是测到想测的那件事）。 */
+function abortGatedShell(host: FakeHost): ResolveCall[] {
+  const calls: ResolveCall[] = [];
+  host.shell.execute = async (spec) => {
+    const call = spec as ResolveCall;
+    if (GIT_TOPLEVEL_RE.test(call.command)) {
+      return deferredProc(async () => ({
+        exitCode: 0,
+        timedOut: false,
+        aborted: false,
+        stdout: { text: call.workdir ?? "", truncated: false },
+        stderr: { text: "", truncated: false },
+      }));
+    }
+    calls.push(call);
+    const { signal } = call;
+    const proc = deferredProc(async () => {
+      if (signal !== undefined && !signal.aborted) {
+        await once(signal, "abort");
+      }
+      return {
+        exitCode: null,
+        timedOut: false,
+        aborted: true,
+        stdout: { text: "", truncated: false },
+        stderr: { text: "", truncated: false },
+      };
+    });
+    return proc;
+  };
+  return calls;
+}
+
+describe("装载期自检：只量本地 CLI 版本，上游端点不在装载期验", () => {
+  it("startupVerify 只跑版本测量，端点探测不在装载期发生", async () => {
+    const host = makeHost();
+    host.settingsValue["startupVerify"] = true;
+    host.shell.scripts.push({ exitCode: 0, stdoutText: VERSION_OK_OUT });
+    applyPlugin(host);
+    await settledTick();
+    expect(host.shell.resolveCalls).toHaveLength(1);
+    expect(String(host.shell.resolveCalls[0]?.command)).toContain("version");
+    const service = host.provided.get(OCR_REMOTE_NAMESPACE) as
+      | { providers: () => Promise<Record<string, unknown>> }
+      | undefined;
+    // 载荷里不再有端点自检那一格：端点结论只由「测试连接」/autoVerify 产生。
+    const providers = await service?.providers();
+    expect(providers).not.toHaveProperty("endpointVerify");
+  });
+});
+
+describe("前台超时：显式分钟数由本包自管", () => {
+  it("timeoutMinutes=30 ⇒ 请求值直给、onExpiry 关掉（不被宿主 10 分钟上限截短）", async () => {
+    const host = makeHost();
+    host.settingsValue["timeoutMinutes"] = 30;
+    host.shell.scripts.push({ output: REVIEW_JSON });
+    applyPlugin(host);
+    await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
+    expect(host.shell.resolveCalls[0]?.timeoutMs).toBe(30 * 60_000);
+    expect(host.shell.resolveCalls[0]?.onExpiry).toBe("none");
+  });
+
+  it("到点自行 abort：按配置的那几分钟报错，不等宿主的 deadline", async () => {
+    vi.useFakeTimers();
+    const host = makeHost();
+    host.settingsValue["timeoutMinutes"] = 30;
+    const calls = abortGatedShell(host);
+    applyPlugin(host);
+    const run = toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
+    // 先把拒绝的处理器挂上再推时钟：定时器一响这条 promise 就 reject，晚一步挂
+    // 断言会让它先成为未处理 rejection（Vitest 会把它记成整份文件的红）。
+    await Promise.all([
+      expect(run).rejects.toThrow(format(zh.execTimedOutExplicit, { minutes: "30" })),
+      vi.advanceTimersByTimeAsync(30 * 60_000),
+    ]);
+    expect(calls[0]?.onExpiry).toBe("none");
+    vi.useRealTimers();
+  });
+});
+
+describe("插件卸载：在跑的前台调用一起断", () => {
+  it("卸载释放器断掉 signal ⇒ 在跑的前台评审按 aborted 收尾", async () => {
+    const host = makeHost();
+    const calls = abortGatedShell(host);
+    applyPlugin(host);
+    const run = toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
+    await vi.waitFor(() => {
+      expect(calls).toHaveLength(1);
+    });
+    for (const dispose of host.effectDisposers) {
+      dispose();
+    }
+    await expect(run).rejects.toThrow(zh.execAborted);
+    expect(calls[0]?.signal?.aborted).toBe(true);
   });
 });

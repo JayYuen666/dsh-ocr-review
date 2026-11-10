@@ -70,8 +70,6 @@ export interface UiMessages {
   readonly noReason: string;
   /** 数据源不可用整行（含宿主给的原因）。 */
   readonly readProvidersFailed: string;
-  /** 装载期端点自检未通过的一行（含宿主给的原始输出）。 */
-  readonly endpointVerifyFailed: string;
   /** 回执：应用成功。 */
   readonly applied: string;
   /** 回执：未自动验证。 */
@@ -268,8 +266,6 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noProvider: "当前未配置 provider",
     noReason: "宿主未给出原因（重启 dsh 或重试可恢复）",
     readProvidersFailed: "未能从 dsh 配置服务读取 provider 列表：{reason}",
-    endpointVerifyFailed:
-      "装载期端点自检未通过：{reason}（这条是端点给的回执，不是本插件的故障；配置照样能改，也可点「测试连接」重跑）",
     applied: "已应用：{provider} / {model}\n{test}",
     notVerified: "（未自动验证，可点「测试连接」手动验证）",
     llmTestPassed: "✓ ocr llm test 通过",
@@ -378,8 +374,6 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noProvider: "No provider configured yet",
     noReason: "the host gave no reason (restart dsh or retry to recover)",
     readProvidersFailed: "Could not read the provider list from the dsh settings service: {reason}",
-    endpointVerifyFailed:
-      "Startup endpoint check did not pass: {reason} (this is the endpoint's reply, not a fault of this plugin; the config stays editable, and “Test connection” reruns it)",
     applied: "Applied: {provider} / {model}\n{test}",
     notVerified: "(not verified automatically — use “Test connection” to check manually)",
     llmTestPassed: "✓ ocr llm test passed",

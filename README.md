@@ -78,11 +78,11 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> The external CLI
 
-This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.5** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
+This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.6** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
 
 ```sh
 brew install open-code-review                        # the formula tracks the newest release
-npm i -g @alibaba-group/open-code-review@1.13.5      # pinned to the version this plugin verifies against
+npm i -g @alibaba-group/open-code-review@1.13.6      # pinned to the version this plugin verifies against
 ```
 
 - **brew cannot pin.** `homebrew/core` carries one stable formula and no versioned variant, so `brew install` / `brew upgrade` always yields whatever is newest upstream. The npm command is the only one that can carry the verified version.
@@ -94,7 +94,7 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # pinned to the version thi
 
 ## <img src="https://api.iconify.design/lucide/circle-check.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Verify it is live
 
-1. **Mounted**: `dsh --profile web --dump-config` ends with this package's layer (`# == @jayyuen666/dsh-ocr-review`).
+1. **Mounted**: `dsh --profile web --dump-config` ends with this package's layer (`# == @jayyuen66/dsh-ocr-review`).
    - That command is the only accepted "it is in the layer stack" signal, and it is **not read-only** — it rewrites the profile's root assembly file. Read layer lines from stdout **and** check stderr separately: an unmatched patch target appears only on stderr, so the exit code alone proves nothing. Accept both `# == <layer>` and `# == <layer>, patched by <path>`.
 2. **The card renders**: the settings page shows the card, and its External CLI row names which copy is in use, how it was installed, and which version this plugin verifies against.
 3. **Detect version works**: pressing it runs one `ocr version` and fills the measured version into the row — or names the failure arm (command missing, non-zero exit, timeout, nothing parseable).
@@ -140,7 +140,7 @@ The namespace is the entry id `ocr-review`; the card fields are the `.volatile()
 | `language` | 中文/English, default 中文; written as the top-level `language` key of the CLI config when a selection is applied |
 | `autoVerify` | default true; a successful select also runs `ocr llm test` (capped by `llmTestTimeoutMs`) |
 | `maxComments` | default 12, the number of comments kept in the summary; 0 = no truncation, non-integers and negatives fall back to 12 |
-| `timeoutMinutes` | default 0 = request the host cap (the host clamps to min(request, shell.maxTimeoutMs)); above 0 is a number of minutes |
+| `timeoutMinutes` | default 0 = request the host cap (the host clamps to min(request, shell.maxTimeoutMs), 10 min by default in `bash-local`); above 0 is a number of minutes and is enforced **by this plugin** (`onExpiry` is turned off so the host cap does not shorten it) |
 | `ocrConfigPath` | Where the CLI config lives; empty derives `<home>/.opencodereview/config.json`, `~` and `~/` prefixes accepted, relative paths error. A custom value must follow the `<X>/.opencodereview/config.json` layout — the CLI has no file-level path override, so the plugin injects `HOME=<X>` into the subprocess (config and sessions redirect together); anything else is rejected at the setting layer. POSIX-only: Windows has no such channel |
 
 The deployment keys below are deliberately **not** on the card — they are plain (non-volatile) fields of the exported `Config`, settable only on the profile's `config:` line and taking effect on restart:
@@ -148,11 +148,12 @@ The deployment keys below are deliberately **not** on the card — they are plai
 | Key | Default | Use |
 | --- | --- | --- |
 | `llmTestTimeoutMs` | `90000` | Wall clock for `ocr llm test`, shared by autoVerify and the card's test connection; raise it on slow machines |
-| `startupVerify` | `true` | Run the endpoint self-check (and one version measurement) at apply. The same switch governs both, because the criterion is "may a load spawn processes"; turn it off if loads must stay process-free |
+| `startupVerify` | `true` | Run one CLI version measurement at apply (local, no network). Turn it off if loads must stay process-free. The provider endpoint is never called at apply — that is a real, billed request, and it happens only when you press “Test connection” or when `autoVerify` runs on apply |
 | `ocrBackgroundMaxMs` | `0` | Backstop window for background reviews (registry wait to the deadline, then kill); 0 = no window — an owned run also ends when its session stops, while an agentless one ends only when the host exits, the plugin unloads or the job is killed |
 | `stdoutMaxBytes` | `400000` | Shell executor stdout cap, shared by foreground and background runs (review results go through the `--output` temp file precisely to step outside it) |
 | `ocrNoAutoUpdate` | `false` | true puts `OCR_NO_UPDATE=1` on every command this package spawns, stopping upstream's mid-review `npm i -g` of a newer release; false keeps upstream behaviour. The version probe sets the variable regardless |
 | `ocrInstallHint` | `both` | Which install command to lead with when nothing is installed: `both` / `brew` / `npm`. A fallback, not an override — an existing copy is always described by its own source, because telling a formula user to run `npm i -g` leaves a second copy behind while PATH still resolves the old one. The npm command always carries the verified version; the brew one never can |
+| `ocrSandbox` | `full` | File fence for the `ocr` subprocesses. `full` requests `danger-full-access` (the behaviour since 0.1.14: ocr keeps its state in `$HOME/.opencodereview`, outside the workspace, and a confined run loses finished reviews at `finalize session`). `inherit` follows the sandbox mode the host executor reports instead: `workspace-write` narrows to the workspace root plus `additionalWritableRoots` for the OCR state directory and the system temp area, while `read-only` and unrecognised modes are refused. The inherited policy never carries the deployment's own `additionalWritableRoots` — deployments that need more paths should use `full` |
 
 ## <img src="https://api.iconify.design/lucide/network.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Public interface
 
@@ -160,7 +161,7 @@ One official Typert Remote namespace, `ocrReview` (`OCR_REMOTE_NAMESPACE` in `li
 
 | Method | Input | Success payload |
 | --- | --- | --- |
-| `providers()` | — | `{providers (each with a hasKey boolean), current, getCredReady, source, endpointVerify, ocrBinary}` — never a key. `ocrBinary` carries the filesystem-only availability verdict plus the version context (`source`, `channel`, `expectedVersion`, `measuredVersion: string \| null`, `installHint`); reading this method never spawns |
+| `providers()` | — | `{providers (each with a hasKey boolean), current, getCredReady, source, ocrBinary}` — never a key. `ocrBinary` carries the filesystem-only availability verdict plus the version context (`source`, `channel`, `expectedVersion`, `measuredVersion: string \| null`, `installHint`); reading this method never spawns |
 | `select(request)` | `{provider, model}`, both must hit the list `describe()` returns | `{ok, applied, llmTest}` (`llmTest` is null when `autoVerify` is off) |
 | `migrate()` | — | `{ok, migrated, skippedUnknown}` |
 | `test()` | — | `{ok, output}` — `ok` is the **test verdict**, not whether the call ran; output is redacted first, then cut to 8000 characters |

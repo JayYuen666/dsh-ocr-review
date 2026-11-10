@@ -37,6 +37,7 @@ import {
 import { providersFromSettingsValue } from "../lib/provider-projection.ts";
 import { markKeyFlags, PI_AI_NAMESPACE, readProviders } from "../lib/provider-source.ts";
 import {
+  ConfigWriteConflictError,
   buildApiKeyCmd,
   credentialScriptPath,
   defaultCredScriptPath,
@@ -45,13 +46,14 @@ import {
   parseApiKeyCmd,
   renderSelectedConfig,
   repointDanglingKeyScripts,
+  updateConfigLocked,
   writeConfigAtomic,
 } from "../lib/config-store.ts";
 import type { AppliedConfig, CardPayload } from "../lib/ocr-config.ts";
 import type { DshProvider } from "../lib/provider-projection.ts";
 import type { ProviderDescriptor, ProviderSource } from "../lib/provider-source.ts";
 import type { OcrPaths, SelectInput } from "../lib/config-store.ts";
-import { MESSAGES } from "../lib/messages.ts";
+import { MESSAGES, format } from "../lib/messages.ts";
 // 那条环境净化的守卫用例：判据的唯一来源在宿主（dsh-subprocess），本包只能本地复刻（这个包不
 // 依赖任何 @deepseek-ai/*），所以把官方导出的内容当作**独立写死的期望值**逐格比对，上游改了判据这里就会失败。
 import { DSH_ENV_PREFIX, SENSITIVE_ENV_PATTERN } from "@deepseek-ai/dsh-subprocess";
@@ -121,7 +123,7 @@ const configPathOf = (configured: string | undefined): string =>
   resolveOcrConfigPath(configured, zh);
 const homeOf = (configured: string | undefined): string | undefined => ocrHomeOverride(configured);
 const cardOf = (gateway: GatewayFixture, paths: OcrPaths): Promise<CardPayload> =>
-  providersForCard(gateway, paths, zh, null);
+  providersForCard(gateway, paths, zh);
 const selectOf = (
   gateway: GatewayFixture,
   paths: OcrPaths,
@@ -1724,8 +1726,8 @@ describe("配置通道文案双语（en 注入）", () => {
   it("卡片载荷里的 source 与 host 侧同源：注入哪份就是哪份（同一 gateway）", async () => {
     const paths = makePaths();
     const gateway = makeGateway({ health: { settings: false } });
-    const zhPayload = await providersForCard(gateway, paths, MESSAGES.zh, null);
-    const enPayload = await providersForCard(gateway, paths, MESSAGES.en, null);
+    const zhPayload = await providersForCard(gateway, paths, MESSAGES.zh);
+    const enPayload = await providersForCard(gateway, paths, MESSAGES.en);
     expect(zhPayload.source.message).not.toBe(enPayload.source.message);
     expect(enPayload.source.status).toBe(zhPayload.source.status);
   });
@@ -2294,7 +2296,7 @@ describe("writeConfigAtomic：备份权限与符号链接位置", () => {
     try {
       const target = path.join(box.dir, OCR_CONFIG_FILE);
       writeFileSync(target, "old", { mode: 0o644 });
-      await writeConfigAtomic(target, "new");
+      await writeConfigAtomic(target, "new", MESSAGES.zh);
       const backup = `${target}.bak`;
       expect(readFileSync(backup, "utf8")).toBe("old");
       // 看的是创建那一刻的权限位：copyFileSync 加 chmod 会先落下一份 0644 的备份。
@@ -2317,7 +2319,7 @@ describe("writeConfigAtomic：备份权限与符号链接位置", () => {
       writeFileSync(real, "old");
       const link = path.join(box.dir, OCR_CONFIG_FILE);
       await symlink(real, link);
-      await writeConfigAtomic(link, "new");
+      await writeConfigAtomic(link, "new", MESSAGES.zh);
       // 官方 writeFileAtomic 以 rename 提交；不解链接就会把链接换成普通文件。
       const linkStats = await lstat(link);
       expect(linkStats.isSymbolicLink()).toBe(true);
@@ -2338,19 +2340,114 @@ describe("writeConfigAtomic：备份权限与符号链接位置", () => {
       const real = path.join(realDir, OCR_CONFIG_FILE);
       const link = path.join(box.dir, OCR_CONFIG_FILE);
       await symlink(real, link);
-      await writeConfigAtomic(link, "new");
+      await writeConfigAtomic(link, "new", MESSAGES.zh);
       const linkStats = await lstat(link);
       expect(linkStats.isSymbolicLink()).toBe(true);
       expect(readFileSync(real, "utf8")).toBe("new");
       expect(existsSync(`${link}.bak`)).toBe(false);
       // 文件从未存在：没有可备份的旧内容，直接创建。
       const fresh = path.join(box.dir, "fresh.json");
-      await writeConfigAtomic(fresh, "first");
+      await writeConfigAtomic(fresh, "first", MESSAGES.zh);
       expect(readFileSync(fresh, "utf8")).toBe("first");
       expect(existsSync(`${fresh}.bak`)).toBe(false);
     } finally {
       box.cleanup();
       rmSync(realDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 跨进程写同一份 config.json：写后回读与冲突重试 ─────────────────────────
+//
+// 上游 `ocr config` 是 `os.WriteFile` 截断写、没有 flock，插件的 withFileLock 只串行化
+// 自己（锁只认同一个进程里的写者）。这组钉的是「回读发现别人刚整份换掉了内容」时
+// 本包怎么收敛：重试整段「锁内重读→改→写」，三次还不一致就把冲突原样交给用户。
+
+describe("updateConfigLocked：写后回读冲突的收敛", () => {
+  it("操作抛冲突两次后成功 ⇒ 重试到第三次，结果照常返回", async () => {
+    const box = atomicSandbox();
+    try {
+      const target = path.join(box.dir, OCR_CONFIG_FILE);
+      let attempts = 0;
+      const outcome = await updateConfigLocked(
+        target,
+        async () => {
+          attempts += 1;
+          if (attempts < 3) {
+            throw new ConfigWriteConflictError("someone else wrote it");
+          }
+          return "saved";
+        },
+        MESSAGES.zh,
+      );
+      expect(attempts).toBe(3);
+      expect(outcome).toBe("saved");
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it("一直冲突 ⇒ 三次后抛点名路径的冲突文案（不是最后一次的裸 error）", async () => {
+    const box = atomicSandbox();
+    try {
+      const target = path.join(box.dir, OCR_CONFIG_FILE);
+      let attempts = 0;
+      let error: unknown;
+      try {
+        await updateConfigLocked(
+          target,
+          async () => {
+            attempts += 1;
+            throw new ConfigWriteConflictError("always");
+          },
+          MESSAGES.zh,
+        );
+      } catch (error_) {
+        error = error_;
+      }
+      expect(attempts).toBe(3);
+      expect(error).toBeInstanceOf(ConfigWriteConflictError);
+      expect(String(error)).toContain(format(MESSAGES.zh.configWriteConflict, { path: target }));
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it("非冲突错误立刻上抛，不重试（死锁/权限这类问题重试只会把它拖慢）", async () => {
+    const box = atomicSandbox();
+    try {
+      const target = path.join(box.dir, OCR_CONFIG_FILE);
+      let attempts = 0;
+      await expect(
+        updateConfigLocked(
+          target,
+          async () => {
+            attempts += 1;
+            throw new Error("lock is held by pid 1");
+          },
+          MESSAGES.zh,
+        ),
+      ).rejects.toThrow("lock is held by pid 1");
+      expect(attempts).toBe(1);
+    } finally {
+      box.cleanup();
+    }
+  });
+
+  it("writeConfigAtomic 写后回读不一致 ⇒ 抛冲突（注入回读以造这一档）", async () => {
+    const box = atomicSandbox();
+    try {
+      const target = path.join(box.dir, OCR_CONFIG_FILE);
+      // 真回读返回的是我们刚写的那份；注入一个返回别人版本的 reader 才能稳定复现
+      // 「另一进程在写与回读之间整份换掉内容」——生产里它要靠两进程真并发才撞得上。
+      await expect(
+        writeConfigAtomic(target, "ours\n", MESSAGES.zh, { read: () => "theirs\n" }),
+      ).rejects.toThrow(format(MESSAGES.zh.configWriteConflict, { path: target }));
+      // 冲突时我们那份**已经落盘了**（rename 先提交、回读后判），所以文件里是 ours：
+      // 这条钉的是「冲突文案不假称改动没落盘」这件事在实现上的真实顺序。
+      expect(readFileSync(target, "utf8")).toBe("ours\n");
+    } finally {
+      box.cleanup();
     }
   });
 });

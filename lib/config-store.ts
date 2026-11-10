@@ -40,7 +40,7 @@ function strOf(value: unknown): string {
 }
 
 /**
- * OCR 1.13.5 的内置 provider 名（`ocr llm providers` 的 NAME 列）。
+ * OCR 1.13.6 的内置 provider 名（`ocr llm providers` 的 NAME 列）。
  *
  * 为什么这枚表是必需的：OCR 的 provider 解析是**按名字**分桶的（resolver.go 的
  * tryProviderConfig：`LookupProvider(name)` 命中就读 `providers.<name>`，否则读
@@ -426,6 +426,52 @@ export function parseExistingConfig(
   return parsed;
 }
 
+/** 写后回读不一致 = 锁只串行化了本包的写者，另一条进程（用户的 `ocr` 终端）在我们
+ *  写完到回读之间又改了一遍。值是整份文档，所以只能重做一遍「锁内重读 → 改 → 写」。 */
+export class ConfigWriteConflictError extends Error {
+  public override readonly name = "ConfigWriteConflictError";
+}
+
+/** 回读从哪儿读。生产是真文件；测试注入「读回来不是我们写的那份」以钉住冲突分支——
+ *  那条分支在生产里要靠两进程真并发才撞得上，不能指望它一次必现。 */
+export interface ConfigWriteIo {
+  readonly read: (path: string) => string;
+}
+
+const REAL_WRITE_IO: ConfigWriteIo = {
+  read: (target) => readFileSync(target, "utf8"),
+};
+
+/** 冲突重试上限：三次已经覆盖「另一个人在界面里连点两次」的常见节奏；再多就把
+ *  一次保存拖成十秒级的等待，不如把冲突原样交给用户。 */
+const CONFIG_WRITE_ATTEMPTS = 3;
+
+async function withConflictRetry<TResult>(
+  task: () => Promise<TResult>,
+  targetPath: string,
+  messages: OcrReviewMessages,
+): Promise<TResult> {
+  // 写成递归而不是 for 循环：一次重试就是一次「锁内重读→改→写」，递归形态让每次
+  // 尝试都是独立的一帧，也避免 `await` 落在循环体里（本仓 lint 禁那一档）。
+  const attempt = async (remaining: number): Promise<TResult> => {
+    try {
+      return await task();
+    } catch (error) {
+      if (!(error instanceof ConfigWriteConflictError)) {
+        throw error;
+      }
+      if (remaining <= 1) {
+        throw new ConfigWriteConflictError(
+          format(messages.configWriteConflict, { path: targetPath }),
+          { cause: error },
+        );
+      }
+      return attempt(remaining - 1);
+    }
+  };
+  return attempt(CONFIG_WRITE_ATTEMPTS);
+}
+
 /**
  * 把「读 config.json → 改 → 原子写回」整段串行化。
  *
@@ -440,9 +486,10 @@ export function parseExistingConfig(
 export async function updateConfigLocked<TResult>(
   targetPath: string,
   operation: () => Promise<TResult>,
+  messages: OcrReviewMessages,
 ): Promise<TResult> {
   await mkdir(path.dirname(targetPath), { recursive: true, mode: 0o700 });
-  return withFileLock(targetPath, operation);
+  return withConflictRetry(() => withFileLock(targetPath, operation), targetPath, messages);
 }
 
 /**
@@ -482,7 +529,12 @@ async function writableTargetOf(targetPath: string): Promise<string> {
  * 崩溃/被杀还会把宽权限永久留下。因此先删旧备份、再按 0600 直接创建；删与写之间
  * 崩溃只会少一份备份，目标文件尚未动过。
  */
-export async function writeConfigAtomic(targetPath: string, text: string): Promise<void> {
+export async function writeConfigAtomic(
+  targetPath: string,
+  text: string,
+  messages: OcrReviewMessages,
+  io: ConfigWriteIo = REAL_WRITE_IO,
+): Promise<void> {
   const target = await writableTargetOf(targetPath);
   const bakPath = `${targetPath}.bak`;
   if (existsSync(target)) {
@@ -491,6 +543,14 @@ export async function writeConfigAtomic(targetPath: string, text: string): Promi
     writeFileSync(bakPath, previous, { mode: 0o600, flag: "wx" });
   }
   await writeFileAtomic(target, text, { mode: 0o600, dirMode: 0o700 });
+  // 写后回读：rename 是原子的，但「我们对这份配置的独占」不是——上游 `ocr config`
+  // 是 `os.WriteFile` 截断写、没有 flock，它可能在我们落盘与回读之间整份换掉内容
+  // （两条的胜负由最后那次 write 决定，中间还夹着一段读到半截 JSON 的窗口）。
+  // 回读一致只证明「此刻术面是我们的版本」，比 CAS 弱，但足以把「静默丢一次用户
+  // 改动」变成一次可重试的冲突；彻底闭合要上游加 flock + rename。
+  if (io.read(target) !== text) {
+    throw new ConfigWriteConflictError(format(messages.configWriteConflict, { path: targetPath }));
+  }
 }
 
 /** 本包允许写进 custom_providers.<name>.protocol 的白名单（OCR config_cmd.go:796

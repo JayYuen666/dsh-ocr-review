@@ -513,30 +513,34 @@ export async function saveMcpServers(
     return shaped;
   }
   try {
-    return await updateConfigLocked(configPath, async () => {
-      const text = readExistingText(configPath, messages);
-      const doc = parseExistingConfig(text, configPath, messages);
-      const existing = isRecord(doc["mcp_servers"]) ? doc["mcp_servers"] : {};
-      // 基线比较必须在锁内：锁外读到的摘要可能已经是别人刚写完的那一版，比了也不代表
-      // 「读-改-写」这三步之间没人插进来。
-      if (revision !== undefined && mcpServersRevision(existing) !== revision) {
-        return { ok: false as const, error: messages.mcpSaveConflict };
-      }
-      // 未知字段能不能留下取决于盘上同一条目有没有它，而基线只能拿到锁之后读（锁外读到的
-      // 可能是别人刚写完的版本）。
-      const normalized = normalizeServers(raw, messages, existing);
-      if (!normalized.ok) {
-        return normalized;
-      }
-      doc["mcp_servers"] = normalized.value;
-      await writeConfigAtomic(configPath, `${JSON.stringify(doc, null, 2)}\n`);
-      return {
-        ok: true as const,
-        count: Object.keys(normalized.value).length,
-        revision: mcpServersRevision(normalized.value),
-        warnings: headerEnvWarnings(normalized.value, messages),
-      };
-    });
+    return await updateConfigLocked(
+      configPath,
+      async () => {
+        const text = readExistingText(configPath, messages);
+        const doc = parseExistingConfig(text, configPath, messages);
+        const existing = isRecord(doc["mcp_servers"]) ? doc["mcp_servers"] : {};
+        // 基线比较必须在锁内：锁外读到的摘要可能已经是别人刚写完的那一版，比了也不代表
+        // 「读-改-写」这三步之间没人插进来。
+        if (revision !== undefined && mcpServersRevision(existing) !== revision) {
+          return { ok: false as const, error: messages.mcpSaveConflict };
+        }
+        // 未知字段能不能留下取决于盘上同一条目有没有它，而基线只能拿到锁之后读（锁外读到的
+        // 可能是别人刚写完的版本）。
+        const normalized = normalizeServers(raw, messages, existing);
+        if (!normalized.ok) {
+          return normalized;
+        }
+        doc["mcp_servers"] = normalized.value;
+        await writeConfigAtomic(configPath, `${JSON.stringify(doc, null, 2)}\n`, messages);
+        return {
+          ok: true as const,
+          count: Object.keys(normalized.value).length,
+          revision: mcpServersRevision(normalized.value),
+          warnings: headerEnvWarnings(normalized.value, messages),
+        };
+      },
+      messages,
+    );
   } catch (error) {
     // 写失败（加锁/读回/写到磁盘）不能用读侧文案：用户会被提示去查一个没坏的读取路径。
     return {
@@ -557,30 +561,34 @@ export async function applyChatGptModel(
     return { ok: false, error: messages.chatGptModelRequired };
   }
   try {
-    return await updateConfigLocked(configPath, async () => {
-      const text = readExistingText(configPath, messages);
-      const doc = parseExistingConfig(text, configPath, messages);
-      const providersRaw = doc["providers"];
-      const entryRaw = isRecord(providersRaw) ? providersRaw["chatgpt"] : undefined;
-      // 静默重置成 {} 会把既有的 url / extra_headers / models 等键一起抹掉。providers 在这里
-      // 是坏形态时宁可让用户先手工修正，也不替他把半张表丢掉（配置是手可编辑的）。
-      if (
-        (providersRaw !== undefined && providersRaw !== null && !isRecord(providersRaw)) ||
-        (entryRaw !== undefined && entryRaw !== null && !isRecord(entryRaw))
-      ) {
-        return { ok: false as const, error: messages.chatGptProvidersInvalid };
-      }
-      const providers = isRecord(providersRaw) ? providersRaw : {};
-      const entry = isRecord(entryRaw) ? entryRaw : {};
-      delete entry["api_key"];
-      delete entry["api_key_cmd"];
-      entry["model"] = trimmed;
-      providers["chatgpt"] = entry;
-      doc["providers"] = providers;
-      doc["provider"] = "chatgpt";
-      await writeConfigAtomic(configPath, `${JSON.stringify(doc, null, 2)}\n`);
-      return { ok: true as const };
-    });
+    return await updateConfigLocked(
+      configPath,
+      async () => {
+        const text = readExistingText(configPath, messages);
+        const doc = parseExistingConfig(text, configPath, messages);
+        const providersRaw = doc["providers"];
+        const entryRaw = isRecord(providersRaw) ? providersRaw["chatgpt"] : undefined;
+        // 静默重置成 {} 会把既有的 url / extra_headers / models 等键一起抹掉。providers 在这里
+        // 是坏形态时宁可让用户先手工修正，也不替他把半张表丢掉（配置是手可编辑的）。
+        if (
+          (providersRaw !== undefined && providersRaw !== null && !isRecord(providersRaw)) ||
+          (entryRaw !== undefined && entryRaw !== null && !isRecord(entryRaw))
+        ) {
+          return { ok: false as const, error: messages.chatGptProvidersInvalid };
+        }
+        const providers = isRecord(providersRaw) ? providersRaw : {};
+        const entry = isRecord(entryRaw) ? entryRaw : {};
+        delete entry["api_key"];
+        delete entry["api_key_cmd"];
+        entry["model"] = trimmed;
+        providers["chatgpt"] = entry;
+        doc["providers"] = providers;
+        doc["provider"] = "chatgpt";
+        await writeConfigAtomic(configPath, `${JSON.stringify(doc, null, 2)}\n`, messages);
+        return { ok: true as const };
+      },
+      messages,
+    );
   } catch (error) {
     return { ok: false, error: format(messages.chatGptSaveFailed, { cause: String(error) }) };
   }

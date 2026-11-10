@@ -9,7 +9,6 @@ import { Context } from "@deepseek-ai/cordis";
 import { remoteMethods } from "@deepseek-ai/dsh-typert-protocol";
 
 import plugin, {
-  endpointVerifyOf,
   installOcrRemote,
   joinedOutput,
   ocrEnv,
@@ -98,6 +97,10 @@ interface Script {
 function hostOf(scripts: Script[]): { host: HostCtx; commands: string[] } {
   const commands: string[] = [];
   const host = {
+    // 沙箱策略的拒绝文案按 locale 现取（`localeMessages` 读 describe() 的行），
+    // 而 `HostCtx` 本来就要求 settings——替身补齐这一面，免得让「探针路径」在测试里
+    // 比真实宿主更残缺。
+    settings: { describe: (): unknown[] => [] },
     shell: {
       resolve: (spec: { command: string }) => {
         commands.push(spec.command);
@@ -149,7 +152,6 @@ function depsOf(options: DepsOptions = {}): {
       gateway: options.gateway ?? gatewayOf(),
       messages: () => MESSAGES.zh,
       extras: {
-        verifyOf: () => null,
         availability: options.availability ?? AVAILABILITY,
         versionSink,
       },
@@ -292,11 +294,6 @@ describe("设置卡的 Remote（宿主的读取接口与客户端的消费侧）
       assert.deepEqual(ocrEnv(noUpdate), { OCR_NO_UPDATE: "1" });
       assert.equal(joinedOutput("", ""), "");
       assert.equal(joinedOutput("a", "b"), "a\nb");
-      assert.deepEqual(endpointVerifyOf({ ok: true, output: "x" }), { ok: true, message: "" });
-      assert.deepEqual(endpointVerifyOf({ ok: false, output: "  hello  " }), {
-        ok: false,
-        message: "hello",
-      });
     });
 
     it("select：配置了 language 时把它一并写进外部 CLI 配置", async () => {
@@ -312,7 +309,7 @@ describe("设置卡的 Remote（宿主的读取接口与客户端的消费侧）
       delete process.env["HOME"];
       try {
         const { deps } = depsOf({
-          scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.5 darwin/arm64" }],
+          scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.6 darwin/arm64" }],
         });
         const service = serviceOf(deps);
         const probed = await service.probe();
@@ -428,16 +425,16 @@ describe("设置卡的 Remote（宿主的读取接口与客户端的消费侧）
 
     it("probe：一致 ⇒ consistent 真且不给换版命令；版本落进 versionSink", async () => {
       const { deps, versionSink } = depsOf({
-        scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.5 darwin/arm64" }],
+        scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.6 darwin/arm64" }],
       });
       const reply = await serviceOf(deps).probe();
       assert.equal(reply.ok, true);
       assert.equal("status" in reply, false, PROBE_NOT_REFUSED);
       if (!("status" in reply)) {
-        assert.equal(reply.version, "1.13.5");
+        assert.equal(reply.version, "1.13.6");
         assert.equal(reply.consistent, true);
         assert.equal(reply.changeText, "");
-        assert.equal(versionSink.value, "1.13.5");
+        assert.equal(versionSink.value, "1.13.6");
       }
     });
 

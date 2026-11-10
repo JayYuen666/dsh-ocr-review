@@ -78,11 +78,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 外部 CLI
 
-本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.5** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
+本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.6** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
 
 ```sh
 brew install open-code-review                        # formula 只跟上游最新版
-npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那一版
+npm i -g @alibaba-group/open-code-review@1.13.6      # 钉在本包核对的那一版
 ```
 
 - **brew 钉不住版本。** `homebrew/core` 里只有一份 stable formula、没有版本化变体，`brew install` / `brew upgrade` 拿到的永远是上游最新。带得上核对版本的只有 npm 那条。
@@ -140,7 +140,7 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 | `language` | 中文/English，默认 中文；应用选择时作为顶层 `language` 键写进 CLI config |
 | `autoVerify` | 默认 true；select 成功后自动跑一次 `ocr llm test`（上限由 `llmTestTimeoutMs` 管） |
 | `maxComments` | 默认 12，即摘要保留条数；0 = 不截断，非整数或负数回退 12 |
-| `timeoutMinutes` | 默认 0 = 向宿主要上限（宿主按 min(请求, shell.maxTimeoutMs) 收敛）；大于 0 表示分钟数 |
+| `timeoutMinutes` | 默认 0 = 向宿主要上限（宿主按 min(请求, shell.maxTimeoutMs) 收敛，`bash-local` 默认 10 分钟）；大于 0 表示分钟数，由**本插件**计时兜底（关掉 `onExpiry`，宿主的钳制不会把它截短） |
 | `ocrConfigPath` | CLI 配置的位置；留空按 `<home>/.opencodereview/config.json` 派生，接受 `~` 与 `~/` 前缀，相对路径直接报错。自定义值必须是 `<X>/.opencodereview/config.json` 布局——CLI 没有配置文件级的路径覆盖，插件靠给子进程注入 `HOME=<X>` 让它生效（config 与 sessions 一并重定向）；布局外的路径在设置层就拒绝。仅 POSIX：Windows 无此通道 |
 
 下面这些**部署键**刻意不进设置卡——它们是导出 `Config` 上的普通（非 volatile）字段，只能写在 profile 注册行的 `config:` 上，改值随重启生效：
@@ -148,11 +148,12 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 | 键 | 默认 | 用途 |
 | --- | --- | --- |
 | `llmTestTimeoutMs` | `90000` | `ocr llm test` 的墙钟，autoVerify 与卡片「测试连接」共用；评审机慢就调大 |
-| `startupVerify` | `true` | 装载期跑一次端点自检（顺带量一次版本）。两条归同一个开关，因为条件都是「装载阶段允不允许起进程」；要求装载过程零进程的部署把它关掉 |
+| `startupVerify` | `true` | 装载期只量一次 CLI 版本（本地执行，不联网）。要求装载过程零进程的部署把它关掉；上游端点在装载期永远不打——那是一次真实且计费的请求，只在你点「测试连接」或 `autoVerify` 应用时发生 |
 | `ocrBackgroundMaxMs` | `0` | 后台评审的兜底回收窗口（注册表等到 deadline 就 kill）；0 = 不设窗口——有主作业还会在所属会话停止时结束，无主作业则只在宿主退出、插件卸载或作业被杀时结束 |
 | `stdoutMaxBytes` | `400000` | shell 执行器的 stdout 缓冲上限，前台与后台共用（评审结果走 `--output` 临时文件，正是为了绕开它） |
 | `ocrNoAutoUpdate` | `false` | 置真时本包起的每条命令都带 `OCR_NO_UPDATE=1`，拦住上游在评审中途把新版 `npm i -g` 装上；置假保持上游行为。版本探测不受本开关影响，恒定带上该变量 |
 | `ocrInstallHint` | `both` | 还没装时先推哪条装法：`both` / `brew` / `npm`。只是兜底而不是强制——机器上已经有一份时按那份自己的来源说，因为对着 brew 用户端出 `npm i -g` 会多出第二份、PATH 上还是旧的。npm 那条恒带核对版本，brew 那条恒带不了 |
+| `ocrSandbox` | `full` | ocr 子进程的文件围栏。`full` 一律请求 `danger-full-access`（0.1.14 起的既有行为：ocr 的状态在 `$HOME/.opencodereview`、落在工作区之外，收窄后跑完的评审会在 `finalize session` 处丢掉）。`inherit` 改为跟随宿主执行器自报的沙箱模式：`workspace-write` 收窄到工作区根，另加 OCR 状态目录与系统临时区的 `additionalWritableRoots`；`read-only` 与认不出的模式直接拒绝。继承档不带上部署自己配的 `additionalWritableRoots`——要放行更多路径的部署请用 `full` |
 
 ## <img src="https://api.iconify.design/lucide/network.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 对外接口
 
@@ -160,7 +161,7 @@ npm i -g @alibaba-group/open-code-review@1.13.5      # 钉在本包核对的那�
 
 | 方法 | 入参 | 成功回执 |
 | --- | --- | --- |
-| `providers()` | — | `{providers（每条附 hasKey 布尔）, current, getCredReady, source, endpointVerify, ocrBinary}`，不含任何明文 key。`ocrBinary` 是那份纯文件系统的可得性判定再补上版本上下文（`source`、`channel`、`expectedVersion`、`measuredVersion: string \| null`、`installHint`）；读这个方法不起进程 |
+| `providers()` | — | `{providers（每条附 hasKey 布尔）, current, getCredReady, source, ocrBinary}`，不含任何明文 key。`ocrBinary` 是那份纯文件系统的可得性判定再补上版本上下文（`source`、`channel`、`expectedVersion`、`measuredVersion: string \| null`、`installHint`）；读这个方法不起进程 |
 | `select(request)` | `{provider, model}`，两者必须命中 `describe()` 给的清单 | `{ok, applied, llmTest}`（`autoVerify` 关闭时 `llmTest` 为 null） |
 | `migrate()` | — | `{ok, migrated, skippedUnknown}` |
 | `test()` | — | `{ok, output}`——`ok` 是**测试结论**，不是这次调用成没成；output 先脱敏再截前 8000 个 UTF-16 码元 |

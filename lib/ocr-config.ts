@@ -69,7 +69,12 @@ import {
 import type { OcrConfigCurrent, OcrPaths } from "./config-store.ts";
 
 /** 外部 ocr CLI 的默认配置目录/文件名（宿主服务管不到，只能由本包直读直写）。 */
-const OCR_CONFIG_DIR = ".opencodereview";
+/**
+ * OCR 自己的状态目录名（在 `HOME` 之下）：`config.json` 与 `sessions/` 都住在它里面。
+ * 导出是为了让沙箱收窄那一层（lib/sandbox-policy.ts）用同一个常量算可写根——
+ * 两处各写一份字面量，迟早会有一处漏改。
+ */
+export const OCR_CONFIG_DIR = ".opencodereview";
 const OCR_CONFIG_FILE = "config.json";
 
 /**
@@ -162,13 +167,51 @@ export function ocrHomeOverride(configured: string | undefined): string | undefi
   return home ?? undefined;
 }
 
-/** 装载期端点自检的结果（apply 时跑一次 `ocr llm test`）。`null` = 没跑（autoVerify 关着）。
- *  它回答的是「这条端点现在真的能通吗」——配置由卡片写盘时不校验端点能力，
- *  等第一个文件 400 才发现（实测：网关缺能力头 ⇒ 逐文件 400）代价太高。 */
-export interface EndpointVerify {
-  ok: boolean;
-  /** 失败时的原始输出（已脱敏、已截断）；成功时为空串。 */
-  message: string;
+/** 部署级沙箱档位：`full` = 每个 ocr 子进程都请求 `danger-full-access`（0.1.14 起的既有行为）；
+ *  `inherit` = 按宿主执行器自报的 `ShellService.sandboxMode` 收窄（判据在 lib/sandbox-policy.ts）。 */
+export type OcrSandboxMode = "full" | "inherit";
+
+/** host 侧 Config 上本模块要读的那几位。结构型声明（不是 import host.ts 的 Config）是为了让
+ *  这一层不反向依赖 host.ts——那头已经 import 本模块，反向一引就是环。 */
+export interface OcrDeploymentInput {
+  readonly ocrConfigPath: { get: () => unknown };
+  readonly ocrSandbox: unknown;
+}
+
+/** 设置项里的 ocrConfigPath：非字符串或空白一律视为「未覆盖」。 */
+export function readOcrConfigPath(config: OcrDeploymentInput): string | undefined {
+  const raw: unknown = config.ocrConfigPath.get();
+  return typeof raw === "string" && raw.trim() !== "" ? raw.trim() : undefined;
+}
+
+/** 部署级 `ocrSandbox` 的落地值：schema 只收两档，但 loader 行的 config 是手写的，写错一个字母
+ *  不该让整条 spawn 乱走——认不出的值回落 `full`（与既有行为一致），不把「没看懂的值」当作会收窄的档。 */
+export function readOcrSandbox(config: OcrDeploymentInput): OcrSandboxMode {
+  const raw: unknown = config.ocrSandbox;
+  return raw === "inherit" ? "inherit" : "full";
+}
+
+/** ocr 子进程的 HOME 重定向值（工具执行侧专用，**不抛错**）：见 ocrHomeOverride。 */
+export function ocrHome(config: OcrDeploymentInput): string | undefined {
+  return ocrHomeOverride(readOcrConfigPath(config));
+}
+
+/** OCR 子进程实际使用的 HOME：沙箱放行根必须按**同一个值**算——按 homedir() 猜，重定向部署下
+ *  放行的是一个 ocr 不会写的目录，而它真写的那个照样被拒。 */
+export function ocrStateHome(config: OcrDeploymentInput): string {
+  return ocrHome(config) ?? homedir();
+}
+
+/** `RunTuning` / `BackgroundJob` 上那两枚部署值的合成体：每个子进程都要带同一份，
+ *  合并成一次读取（也省得 host.ts 里七处各写两行、撞 max-lines 预算）。 */
+export interface SandboxDeployment {
+  readonly sandbox: OcrSandboxMode;
+  readonly stateHome: string;
+}
+
+/** 读一次部署值：沙箱档位与 OCR 的 HOME（两枚都只随部署变，不随调用变）。 */
+export function sandboxDeployment(config: OcrDeploymentInput): SandboxDeployment {
+  return { sandbox: readOcrSandbox(config), stateHome: ocrStateHome(config) };
 }
 
 /** 设置页数据：providers（含 hasKey）、当前 OCR 配置、get-cred 脚本存在性、降级原因。 */
@@ -177,8 +220,6 @@ export interface CardPayload {
   current: OcrConfigCurrent;
   getCredReady: boolean;
   source: ProviderSource;
-  /** 装载期端点自检结果（见 EndpointVerify）；没跑就是 null。 */
-  endpointVerify: EndpointVerify | null;
 }
 
 /**
@@ -189,7 +230,6 @@ export async function providersForCard(
   gateway: DshConfigGateway,
   paths: OcrPaths,
   messages: OcrReviewMessages,
-  endpointVerify: EndpointVerify | null,
 ): Promise<CardPayload> {
   const { providers, source } = readProviders(gateway, messages);
   const keyed =
@@ -200,7 +240,6 @@ export async function providersForCard(
     current,
     getCredReady: existsSync(credentialScriptPath(paths)),
     source,
-    endpointVerify,
   };
 }
 
@@ -290,28 +329,32 @@ export async function applyProviderSelection(
   // 异步化后读与写之间出现了让出点，不加锁就可能把对方刚写好的 provider 选择
   // 用旧快照盖掉（最坏情况：明文 api_key 复活）。锁只圈文件 RMW，不圈上面那个
   // 凭据可达性 await，避免把外部服务的延迟算进持锁时间。
-  await updateConfigLocked(paths.ocrConfigJson, async () => {
-    // 写侧必须用严格读：「读不到」与「文件不存在」在这里是两种后果完全不同的状态，
-    // 折成空串就等于用只含本次选择的新文档覆盖掉用户既有的全部配置。
-    const existing = readExistingText(paths.ocrConfigJson, messages);
-    const next = renderSelectedConfig(
-      {
-        existingText: existing,
-        configLabel: paths.ocrConfigJson,
-        providers,
-        provider,
-        model,
-        apiKeyCmd,
-        // 空白不是「用户想清空语言」的合法值：renderSelectedConfig 只在非空白时落键
-        //（同一条判断在 lib/config-store.ts，两边各写一遍会不一致）。
-        ...(selection.language === undefined || selection.language.trim() === ""
-          ? {}
-          : { language: selection.language.trim() }),
-      },
-      messages,
-    );
-    await writeConfigAtomic(paths.ocrConfigJson, next);
-  });
+  await updateConfigLocked(
+    paths.ocrConfigJson,
+    async () => {
+      // 写侧必须用严格读：「读不到」与「文件不存在」在这里是两种后果完全不同的状态，
+      // 折成空串就等于用只含本次选择的新文档覆盖掉用户既有的全部配置。
+      const existing = readExistingText(paths.ocrConfigJson, messages);
+      const next = renderSelectedConfig(
+        {
+          existingText: existing,
+          configLabel: paths.ocrConfigJson,
+          providers,
+          provider,
+          model,
+          apiKeyCmd,
+          // 空白不是「用户想清空语言」的合法值：renderSelectedConfig 只在非空白时落键
+          //（同一条判断在 lib/config-store.ts，两边各写一遍会不一致）。
+          ...(selection.language === undefined || selection.language.trim() === ""
+            ? {}
+            : { language: selection.language.trim() }),
+        },
+        messages,
+      );
+      await writeConfigAtomic(paths.ocrConfigJson, next, messages);
+    },
+    messages,
+  );
   return { provider: target.name, model, url: target.baseURL, protocol: target.protocol };
 }
 
@@ -464,27 +507,31 @@ export async function migratePlaintextKeys(
     reachableEnvKeys,
     messages,
   };
-  const outcome = await updateConfigLocked(paths.ocrConfigJson, async () => {
-    // 锁内不再判一次"空文件"：`parseExistingConfig`（lib/config-store.ts）对空白输入返回
-    // `{}`，两个 provider 桶都不存在时下面自然走成同一条"无可迁移对象"的早返回，
-    // 多写一次判断只会留下一条永远测不到的分支。
-    const doc = parseExistingConfig(
-      readExistingText(paths.ocrConfigJson, messages),
-      paths.ocrConfigJson,
-      messages,
-    );
-    const custom = migrateSection(doc, "custom_providers", envByProvider, migrateContext);
-    const presets = migrateSection(doc, "providers", envByProvider, migrateContext);
-    const migratedNames = [...new Set([...custom.migrated, ...presets.migrated])];
-    const skippedNames = [...new Set([...custom.skippedUnknown, ...presets.skippedUnknown])];
-    if (migratedNames.length === 0) {
+  const outcome = await updateConfigLocked(
+    paths.ocrConfigJson,
+    async () => {
+      // 锁内不再判一次"空文件"：`parseExistingConfig`（lib/config-store.ts）对空白输入返回
+      // `{}`，两个 provider 桶都不存在时下面自然走成同一条"无可迁移对象"的早返回，
+      // 多写一次判断只会留下一条永远测不到的分支。
+      const doc = parseExistingConfig(
+        readExistingText(paths.ocrConfigJson, messages),
+        paths.ocrConfigJson,
+        messages,
+      );
+      const custom = migrateSection(doc, "custom_providers", envByProvider, migrateContext);
+      const presets = migrateSection(doc, "providers", envByProvider, migrateContext);
+      const migratedNames = [...new Set([...custom.migrated, ...presets.migrated])];
+      const skippedNames = [...new Set([...custom.skippedUnknown, ...presets.skippedUnknown])];
+      if (migratedNames.length === 0) {
+        return { migrated: migratedNames, skippedUnknown: skippedNames };
+      }
+      // 渲染形态只有一处唯一来源（lib/config-store.ts 的 renderConfigDoc）：本文件其余
+      // 写回点已经用它，这里再手写一份缩进/结尾换行就等于留一条会漂的第二实现。
+      await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc), messages);
       return { migrated: migratedNames, skippedUnknown: skippedNames };
-    }
-    // 渲染形态只有一处唯一来源（lib/config-store.ts 的 renderConfigDoc）：本文件其余
-    // 写回点已经用它，这里再手写一份缩进/结尾换行就等于留一条会漂的第二实现。
-    await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc));
-    return { migrated: migratedNames, skippedUnknown: skippedNames };
-  });
+    },
+    messages,
+  );
   // 等的是那把文件锁与锁内的一次写：回执必须落定后才报迁移了哪几条
   //（`return await` 被 typescript/return-await 判违规，故先落变量再回）。
   return outcome;
@@ -540,19 +587,23 @@ export async function ensureKeyScriptPointer(
     // 的快照，据此决定跳过锁内重读，只在「别的进程恰好在两次读之间修好了」时才与锁内
     // 结论一致——为了省一次锁而多留一个必须靠并发才能触发的分支，不值。锁是一次 mkdir +
     // 一次 wx 建锁，相对一次分钟级评审可忽略。
-    const repointed = await updateConfigLocked(paths.ocrConfigJson, async () => {
-      const doc = parseExistingConfig(
-        readExistingText(paths.ocrConfigJson, messages),
-        paths.ocrConfigJson,
-        messages,
-      );
-      const result = repointDanglingKeyScripts(doc, current, messages);
-      if (result.repointed.length === 0) {
+    const repointed = await updateConfigLocked(
+      paths.ocrConfigJson,
+      async () => {
+        const doc = parseExistingConfig(
+          readExistingText(paths.ocrConfigJson, messages),
+          paths.ocrConfigJson,
+          messages,
+        );
+        const result = repointDanglingKeyScripts(doc, current, messages);
+        if (result.repointed.length === 0) {
+          return result.repointed;
+        }
+        await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc), messages);
         return result.repointed;
-      }
-      await writeConfigAtomic(paths.ocrConfigJson, renderConfigDoc(doc));
-      return result.repointed;
-    });
+      },
+      messages,
+    );
     return { repointed, checked: true };
   } catch {
     return { repointed: [], checked: false };

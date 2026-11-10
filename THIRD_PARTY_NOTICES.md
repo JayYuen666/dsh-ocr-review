@@ -59,7 +59,7 @@ SOFTWARE.
 - 上游项目：`open-code-review`
 - 上游仓库：https://github.com/alibaba/open-code-review
 - 上游许可：Apache-2.0，Copyright 2026 Alibaba
-- 验证版本：1.13.5（声明在 package.json 的 `ocrCliVersion`，代码里的镜像常量、两侧 README 和随包文档由一条门禁对齐到同一个数字）
+- 验证版本：1.13.6（声明在 package.json 的 `ocrCliVersion`，代码里的镜像常量、两侧 README 和随包文档由一条门禁对齐到同一个数字）
 
 本包**使用**而非**包含**以下接口（`host.ts` / `lib/cli.ts` 的头注释按该版本源码逐条核对）：
 
@@ -84,7 +84,7 @@ SOFTWARE.
 
 | 依赖 | 版本 | 许可 | 引入方 |
 | --- | --- | --- | --- |
-| `@alibaba-group/open-code-review` | 1.13.5（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
+| `@alibaba-group/open-code-review` | 1.13.6（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
 | `js-yaml` | 5.5.0（精确钉版） | MIT | `scripts/get-cred.mjs` 读 dsh 托管凭据文档 |
 | `@jayyuen66/dsh-plugin-shared` | catalog（伞根 ^0.2.4） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共模块（值导入，构建时外部化） |
 | `zod` | catalog（伞根 4.6.7） | MIT | 设置卡 `src/remote.ts` 的 strict codec 形状校验；client 产物由宿主 `PLATFORM_MODULES` 提供 |
