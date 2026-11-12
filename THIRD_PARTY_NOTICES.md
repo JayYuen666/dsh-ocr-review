@@ -86,7 +86,7 @@ SOFTWARE.
 | --- | --- | --- | --- |
 | `@alibaba-group/open-code-review` | 1.13.7（核对版本，非依赖） | Apache-2.0（Alibaba） | **不在依赖表里**：用户自选 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@<版本>`，本包只 spawn 它 |
 | `js-yaml` | 5.5.0（精确钉版） | MIT | `scripts/get-cred.mjs` 读 dsh 托管凭据文档 |
-| `@jayyuen66/dsh-plugin-shared` | catalog（伞根 ^0.2.5） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共模块（值导入，构建时外部化） |
+| `@jayyuen66/dsh-plugin-shared` | catalog（伞根 ^0.2.8） | MIT | `host.ts` / `lib/*` / `src/*` 的 job-outcome、locale、record、errors、card-* 等公共模块（值导入，构建时外部化） |
 | `zod` | catalog（伞根 4.6.7） | MIT | 设置卡 `src/remote.ts` 的 strict codec 形状校验；client 产物由宿主 `PLATFORM_MODULES` 提供 |
 
 dsh 宿主侧的包分两档：产物里以**值**导入、且列在 `peerDependencies` 的五枚（`@deepseek-ai/schemastery` 宿主 fork、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`）由宿主在场提供、不随本包分发；其余 `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 只在 `devDependencies` 里，用途是把类型绑到官方声明上（type-only 绑定），产物里不留说明符。本包按 dsh `0.2.2-rc.2` 逐条核对过（同版的 cordis `4.1.0` 与 schemastery `3.19.0` fork 一并核对）。

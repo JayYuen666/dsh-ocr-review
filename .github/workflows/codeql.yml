@@ -61,7 +61,7 @@ jobs:
           # 也没有 git 写动词——它不需要 git 凭据，所以 token 不留在 .git/config 里。
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: ${{ matrix.language }}
       - name: Perform CodeQL Analysis
@@ -73,6 +73,6 @@ jobs:
         # 外部贡献的代码就成了「未扫描即绿」，合并前盲区原样留着。
         # head.repo.fork 放在 && 右侧：非 pull_request 事件取不到它，短路后那些事件恒为 false。
         continue-on-error: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
-        uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           category: /language:${{ matrix.language }}
