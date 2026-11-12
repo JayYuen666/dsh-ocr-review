@@ -62,6 +62,8 @@ export interface OcrReviewMessages {
   readonly ocrSandboxReadOnly: string;
   /** inherit + 认不出的模式：不猜。{mode} = 执行器自报的那个值。 */
   readonly ocrSandboxUnknownMode: string;
+  /** inherit + Windows + workspace-write：额外可写目录不下发给受限进程。{path} = 状态目录。 */
+  readonly ocrSandboxWindowsUnsupported: string;
   /** inherit + 放行根建不出来/折不成真实绝对路径。{path}/{reason}。 */
   readonly ocrSandboxRootUnavailable: string;
   /** 后台模式的轮询指引（ocr_session 三步）。 */
@@ -396,6 +398,11 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "不在已知的 read-only / workspace-write / danger-full-access 三档里。这里不猜：" +
       "未知档可能比已知档更宽，把它当成 full 等于让一个以为自己更严的部署悄悄拿到全盘写权限。" +
       "把宿主执行器换回已知档，或把 ocrSandbox 设成 full。",
+    ocrSandboxWindowsUnsupported:
+      "ocrSandbox=inherit 在 Windows 上遇到宿主执行器的 workspace-write 时直接拒绝：" +
+      "dsh 0.2.2-rc.2 起，Windows 的额外可写目录只作用于宿主的文件工具，不再下发给受限子进程，" +
+      "而 ocr 必须写自己的状态目录 {path}（config.json 与会话记录都在它下面），这一档下它写不了，" +
+      "所以没有起进程。把本插件的 ocrSandbox 设成 full，或在 POSIX 宿主上使用 inherit。",
     ocrSandboxRootUnavailable:
       "ocrSandbox=inherit 要放行 {path}，但它既建不出来、也折不成真实绝对路径（{reason}）。" +
       "宿主会拒收不存在/不是目录/是软链的放行根（整条 ocr 调用当场 spawn 失败），所以这里先停。" +
@@ -630,7 +637,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramRule: "repo 根内的自定义规则 JSON 路径（OCR --rule；只允许仓库内普通文件）",
     paramBackgroundFile:
       "repo 根内的 Markdown 需求文件路径（OCR --background-file；优先于 background）",
-    paramNoPlan: "true=跳过 scan 的逐文件 PLAN_TASK 预检（降本）",
+    paramNoPlan:
+      "true=跳过 scan 的逐文件 PLAN_TASK 预检（降本；1.13.7 起不足 200 行的文件已自动跳过预检，此旗标只影响更大的文件）",
     paramNoDedup: "true=跳过 scan 的批内 DEDUP_TASK（降本）",
     paramNoSummary: "true=跳过 scan 结束后的 PROJECT_SUMMARY_TASK（降本）",
     paramScanResume: "从之前中断的 scan 会话 id 恢复",
@@ -759,6 +767,12 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "Nothing is guessed here: an unknown mode may be wider than the known ones, and treating it " +
       "as full would quietly hand full-disk writes to a deployment that believes it is stricter. " +
       "Point the host executor back at a known mode, or set ocrSandbox to full.",
+    ocrSandboxWindowsUnsupported:
+      "ocrSandbox=inherit refuses a workspace-write host executor on Windows: since dsh 0.2.2-rc.2, " +
+      "Windows applies additional writable roots to the host's file tools only, never to a confined " +
+      "subprocess, and ocr must write its own state directory {path} (config.json and the session " +
+      "records live there), which this mode cannot permit, so no process was started. Set this " +
+      "plugin's ocrSandbox to full, or use inherit on a POSIX host.",
     ocrSandboxRootUnavailable:
       "ocrSandbox=inherit must allow {path}, but it can be neither created nor resolved to a real " +
       "absolute directory ({reason}). The host rejects missing, non-directory, and symlinked " +
@@ -1064,7 +1078,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramRule: "Path to a custom rule JSON inside the repo root (OCR --rule; regular files only)",
     paramBackgroundFile:
       "Path to a Markdown requirements file inside the repo root (OCR --background-file; takes precedence over background)",
-    paramNoPlan: "true = skip scan's per-file PLAN_TASK pre-pass (cheaper)",
+    paramNoPlan:
+      "true = skip scan's per-file PLAN_TASK pre-pass (cheaper; since 1.13.7 files under 200 lines skip it automatically, so this only affects larger files)",
     paramNoDedup: "true = skip scan's per-batch DEDUP_TASK (cheaper)",
     paramNoSummary: "true = skip scan's post-run PROJECT_SUMMARY_TASK (cheaper)",
     paramScanResume: "Resume a previously interrupted scan session id",

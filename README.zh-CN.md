@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-ocr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-ocr-review/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.1-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -31,22 +31,24 @@
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 目录
 
-- [它做什么](#它做什么)
-- [安装](#安装)
-- [外部 CLI](#外部-cli)
-- [确认它真的在工作](#确认它真的在工作)
-- [它不提供什么](#它不提供什么)
-- [在 dsh 里启用](#在-dsh-里启用)
-- [提供给模型的工具](#提供给模型的工具)
-- [设置项](#设置项)
-- [对外接口](#对外接口)
-- [凭据与 OCR 配置文件](#凭据与-ocr-配置文件)
-- [后台运行与官方作业](#后台运行与官方作业)
-- [数据与隐私](#数据与隐私)
-- [已知边界](#已知边界)
-- [常见问题](#常见问题)
-- [开发](#开发)
-- [许可](#许可)
+- [ 目录](#-目录)
+- [ 它做什么](#-它做什么)
+- [ 安装](#-安装)
+  - [ shared 的版本下限](#-shared-的版本下限)
+- [ 外部 CLI](#-外部-cli)
+- [ 确认它真的在工作](#-确认它真的在工作)
+- [ 它不提供什么](#-它不提供什么)
+- [ 在 dsh 里启用](#-在-dsh-里启用)
+- [ 提供给模型的工具](#-提供给模型的工具)
+- [ 设置项](#-设置项)
+- [ 对外接口](#-对外接口)
+- [ 凭据与 OCR 配置文件](#-凭据与-ocr-配置文件)
+- [ 后台运行与官方作业](#-后台运行与官方作业)
+- [ 数据与隐私](#-数据与隐私)
+- [ 已知边界](#-已知边界)
+- [ 常见问题](#-常见问题)
+- [ 开发](#-开发)
+- [ 许可](#-许可)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
 
@@ -67,7 +69,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 卸载用 `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`。包在公共 npm 上，安装不需要凭据。
 
 - **升级已装的那一份要「先 remove 再 add」。** profile 跑着 HMR（出厂那几个都跑）时，`add` 一个 profile 已经依赖着的包会在 pnpm 动手之前就被拒（`already-installed`）——先 `remove` 再 `add` 目标版本，新版不必重启就起跑。没跑 HMR 时同一个 `add` 照样走 pnpm，报 `restart-required`。
-- **要求 Node.js `>= 24.9`，宿主 dsh 在 `0.2.1-rc.5` 或 `0.2.2-alpha.3` 线上。** 宿主只读 `engines.dsh`（`^0.2.1-rc.5 || ^0.2.2-alpha.3`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `>= 24.9`，宿主 dsh 在 `0.2.2-rc.1` 或更新的 `0.2.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.2-rc.1`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 用 `nodeLinker: hoisted` 与 `autoInstallPeers: false` 安装，宿主包进了那张表就会落成真实目录，与宿主进程已加载的那份并存。`@deepseek-ai/dsh-tools` 的调度器键是普通 `Symbol`（不是 `Symbol.for`），符号身份按实例计算——那个 profile 里**每一次原生工具调用都抛**，而本包的构建、类型检查与覆盖率门在此前一路绿。
 - **`host.js` 以值导入的五枚宿主包是非 optional 的 peer**：`@deepseek-ai/schemastery`（宿主 fork——`.volatile()` 的解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`（Remote 的 Service 基类）。五枚同时以同一钉版另列进 `devDependencies`，本仓自己的类型检查才解析得到；构建对 manifest 三张表一律外部化，产物里保持裸说明符。
 - **发布清单**（以 `package.json` 的 `files` 为准）：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`locale/*.json`、`docs/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepare` 重建两个 bundle，发出去的永远是当前源码的产物。
@@ -78,11 +80,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 外部 CLI
 
-本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.6** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
+本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.7** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
 
 ```sh
 brew install open-code-review                        # formula 只跟上游最新版
-npm i -g @alibaba-group/open-code-review@1.13.6      # 钉在本包核对的那一版
+npm i -g @alibaba-group/open-code-review@1.13.7      # 钉在本包核对的那一版
 ```
 
 - **brew 钉不住版本。** `homebrew/core` 里只有一份 stable formula、没有版本化变体，`brew install` / `brew upgrade` 拿到的永远是上游最新。带得上核对版本的只有 npm 那条。
@@ -153,7 +155,7 @@ npm i -g @alibaba-group/open-code-review@1.13.6      # 钉在本包核对的那�
 | `stdoutMaxBytes` | `400000` | shell 执行器的 stdout 缓冲上限，前台与后台共用（评审结果走 `--output` 临时文件，正是为了绕开它） |
 | `ocrNoAutoUpdate` | `false` | 置真时本包起的每条命令都带 `OCR_NO_UPDATE=1`，拦住上游在评审中途把新版 `npm i -g` 装上；置假保持上游行为。版本探测不受本开关影响，恒定带上该变量 |
 | `ocrInstallHint` | `both` | 还没装时先推哪条装法：`both` / `brew` / `npm`。只是兜底而不是强制——机器上已经有一份时按那份自己的来源说，因为对着 brew 用户端出 `npm i -g` 会多出第二份、PATH 上还是旧的。npm 那条恒带核对版本，brew 那条恒带不了 |
-| `ocrSandbox` | `full` | ocr 子进程的文件围栏。`full` 一律请求 `danger-full-access`（0.1.14 起的既有行为：ocr 的状态在 `$HOME/.opencodereview`、落在工作区之外，收窄后跑完的评审会在 `finalize session` 处丢掉）。`inherit` 改为跟随宿主执行器自报的沙箱模式：`workspace-write` 收窄到工作区根，另加 OCR 状态目录与系统临时区的 `additionalWritableRoots`；`read-only` 与认不出的模式直接拒绝。继承档不带上部署自己配的 `additionalWritableRoots`——要放行更多路径的部署请用 `full` |
+| `ocrSandbox` | `full` | ocr 子进程的文件围栏。`full` 一律请求 `danger-full-access`（0.1.14 起的既有行为：ocr 的状态在 `$HOME/.opencodereview`、落在工作区之外，收窄后跑完的评审会在 `finalize session` 处丢掉）。`inherit` 改为跟随宿主执行器自报的沙箱模式：`workspace-write` 收窄到工作区根，另加 OCR 状态目录与系统临时区的 `additionalWritableRoots`；`read-only` 与认不出的模式直接拒绝；Windows 上的 `workspace-write` 也直接拒绝——dsh 0.2.2-rc.2 起 Windows 的额外可写目录只作用于文件工具、不下发给受限子进程，OCR 的状态目录放不进去。继承档不带上部署自己配的 `additionalWritableRoots`——要放行更多路径的部署请用 `full` |
 
 ## <img src="https://api.iconify.design/lucide/network.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 对外接口
 

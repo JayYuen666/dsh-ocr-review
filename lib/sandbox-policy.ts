@@ -21,6 +21,9 @@
 //       报错让用户换档（说清楚换成什么），而不是静默退回放开；
 //   `inherit` + 认不出的新档：同样拒绝并点名那个值——比已知档更宽的新档若被当成 `full`，
 //       等于把「宿主以为更严」的用户悄悄放到全盘。
+//   `inherit` + Windows + `workspace-write`：拒绝——dsh 0.2.2-rc.2 起 Windows 的额外可写目录
+//       只作用于宿主的文件工具、不下发给受限子进程，OCR 的状态目录放不进去；报错让用户换
+//       `full`，而不是让 ocr 跑到 finalize session 才丢结果。
 //
 // 为什么不继承部署自己的 `additionalWritableRoots`：那一位只有 `ctx.sandboxPolicy.resolve()`
 // 读得到（`SandboxPolicyRequest` 只带 `session`/`mode`），而本包不依赖那个服务——执行器自报的
@@ -58,6 +61,15 @@ export interface OcrSandboxRequest {
   readonly stateHome: string;
   /** 系统临时区：`--output` 临时文件与 session export 目录都建在它下面。 */
   readonly tempRoot: string;
+  /**
+   * 执行宿主所在平台（生产侧传 `process.platform`）。
+   *
+   * 单列成入参而不是在判定层读 `process.platform`：这条判据只有 Windows 一档，
+   * 测试在任何 CI 上都能把两条分支钉住。dsh 0.2.2-rc.2 起，Windows 的
+   * `additionalWritableRoots` 只作用于宿主的文件工具、不下发给受限子进程，
+   * 于是 `workspace-write` 下 OCR 的状态目录放不进去——这一档在 Windows 上不可用。
+   */
+  readonly platform: NodeJS.Platform;
   /** 文案表：调用方现取（它只决定拒绝时的措辞，不参与判决）。 */
   readonly messages: OcrReviewMessages;
   /** 目录「建出来 + 折成真实绝对路径」的实现；缺省用 `mkdir(recursive)+realpath`。 */
@@ -108,12 +120,13 @@ async function preparedRoots(
  * 把「部署级开关 + 执行器自报模式」折成这次 spawn 要携带的 `SandboxExecutionPolicy`。
  *
  * @throws 错误文案来自消息表：`ocrSandboxReadOnly` / `ocrSandboxUnknownMode` /
- *   `ocrSandboxRootUnavailable`（三条合起来覆盖 inherit 的所有失败形态，模型与用户读得到成因）。
+ *   `ocrSandboxWindowsUnsupported` / `ocrSandboxRootUnavailable`（四条合起来覆盖 inherit 的
+ *   所有失败形态，模型与用户读得到成因）。
  */
 export async function chooseOcrSandboxPolicy(
   request: OcrSandboxRequest,
 ): Promise<SandboxExecutionPolicy> {
-  const { hostMode, messages, mode, stateHome, tempRoot, workspaceRoot } = request;
+  const { hostMode, messages, mode, platform, stateHome, tempRoot, workspaceRoot } = request;
   if (mode === "full" || hostMode === undefined || hostMode === FULL_ACCESS) {
     return fullAccess(workspaceRoot);
   }
@@ -122,6 +135,11 @@ export async function chooseOcrSandboxPolicy(
   }
   if (hostMode !== WORKSPACE_WRITE) {
     throw new Error(format(messages.ocrSandboxUnknownMode, { mode: hostMode }));
+  }
+  // Windows 的受限进程不收额外可写目录（rc.2 起显式只作用于文件工具），OCR 的状态目录
+  // 因此放不进 workspace-write；在这里拒绝，而不是让 ocr 跑到 finalize session 才丢结果。
+  if (platform === "win32") {
+    throw new Error(format(messages.ocrSandboxWindowsUnsupported, { path: stateDirOf(stateHome) }));
   }
   const prepare = request.prepareRoot ?? defaultPrepareRoot;
   const roots = await preparedRoots([stateDirOf(stateHome), tempRoot], prepare, messages);
@@ -143,6 +161,7 @@ export async function hostSandboxPolicy(
     workspaceRoot,
     stateHome: run.stateHome,
     tempRoot: tmpdir(),
+    platform: process.platform,
     messages,
   });
 }

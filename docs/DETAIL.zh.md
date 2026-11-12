@@ -15,11 +15,11 @@
 
 ## 要重启的值
 
-`llmTestTimeoutMs`（90000）、`startupVerify`（默认开：装载时只做一次本地 CLI 版本测量，不联网；装载期永远不打上游端点——端点检查只发生在「测试连接」或 `autoVerify` 应用时）、`ocrBackgroundMaxMs`（0 表示不设兜底窗口）、`stdoutMaxBytes`（400000）、`ocrNoAutoUpdate`（默认 false，即保留上游的自动升级，除非你明确关掉）、`ocrInstallHint`（`both`/`brew`/`npm`），以及 `ocrSandbox`（`full` 表示每个 ocr 子进程都请求 `danger-full-access`；`inherit` 表示跟随宿主执行器自报的沙箱模式——`workspace-write` 另加 OCR 状态目录与临时区的可写根，`read-only` 直接拒绝；继承档不带上部署自己配的 additional roots）。写在本插件于 `cordis.patch.yml` 注册行的 `config:` 块，改值随重启生效。
+`llmTestTimeoutMs`（90000）、`startupVerify`（默认开：装载时只做一次本地 CLI 版本测量，不联网；装载期永远不打上游端点——端点检查只发生在「测试连接」或 `autoVerify` 应用时）、`ocrBackgroundMaxMs`（0 表示不设兜底窗口）、`stdoutMaxBytes`（400000）、`ocrNoAutoUpdate`（默认 false，即保留上游的自动升级，除非你明确关掉）、`ocrInstallHint`（`both`/`brew`/`npm`），以及 `ocrSandbox`（`full` 表示每个 ocr 子进程都请求 `danger-full-access`；`inherit` 表示跟随宿主执行器自报的沙箱模式——`workspace-write` 另加 OCR 状态目录与临时区的可写根，`read-only` 直接拒绝；Windows 上的 `workspace-write` 也直接拒绝，因为 dsh 0.2.2-rc.2 起 Windows 的额外可写目录不下发给受限子进程；继承档不带上部署自己配的 additional roots）。写在本插件于 `cordis.patch.yml` 注册行的 `config:` 块，改值随重启生效。
 
 ## 需要外部提供什么
 
-`ocr` 命令行，期望版本 **1.13.6**；这个期望唯一声明在 `package.json` 的 `ocrCliVersion`，代码常量与两份 README 镜像同一个字符串，版本不符只作为提示报出，从不中断评审。装法是 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@1.13.6`。PATH 上一个候选都没有时，预检报「no ocr candidate on either path」并附安装提示；「command not found」（exit 127）是另一种情况：候选在，但真二进制跑不起来。版本探测一律强制 `OCR_NO_UPDATE=1`，以免探测顺手触发升级。
+`ocr` 命令行，期望版本 **1.13.7**；这个期望唯一声明在 `package.json` 的 `ocrCliVersion`，代码常量与两份 README 镜像同一个字符串，版本不符只作为提示报出，从不中断评审。装法是 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@1.13.7`。PATH 上一个候选都没有时，预检报「no ocr candidate on either path」并附安装提示；「command not found」（exit 127）是另一种情况：候选在，但真二进制跑不起来。版本探测一律强制 `OCR_NO_UPDATE=1`，以免探测顺手触发升级。
 
 API 凭据不存这里：本插件写的是一个 `api_key_cmd`，运行时的密钥由那支辅助脚本现取，不进配置文件。脚本缺失时卡上给出告警，而不是发一次没有鉴权的请求。
 

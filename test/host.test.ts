@@ -33,6 +33,7 @@ import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import type { JobId, JobKind } from "@deepseek-ai/dsh-jobs";
 import { SessionId as brandSessionId } from "@deepseek-ai/dsh-session";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
+import { pinPlatform, restorePlatform } from "./fixtures/platform-stub.ts";
 import { MESSAGES } from "../lib/messages.ts";
 import { resolveOcrAvailability, EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 import type { OcrAvailabilityProbe } from "../host.ts";
@@ -1046,6 +1047,18 @@ function makeSandboxHost(
   return sandboxHost;
 }
 
+/** 在 POSIX 判定下跑一段：`inherit` + `workspace-write` 的接线用例要验「放行根交下去了」，
+ *  而判定层在 Windows 上会先拒绝这一档（rc.2 起放行根不下发给受限进程）。Windows CI 上
+ *  因此把宿主平台钉成 POSIX——这条用例验的是接线，平台判据由 test/sandbox-policy.test.ts 钉。 */
+async function onPosix<Result>(body: () => Promise<Result>): Promise<Result> {
+  pinPlatform("linux");
+  try {
+    return await body();
+  } finally {
+    restorePlatform();
+  }
+}
+
 /** brew 那条装法命令的原文（多处断言共用）。 */
 const BREW_INSTALL = "brew install open-code-review";
 /** `ocr version` 跑通且与核对版本同版那份回执。 */
@@ -1656,56 +1669,63 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
     });
 
     it("ocrSandbox=inherit + 执行器 workspace-write：放行 OCR 状态目录与系统临时区", async () => {
-      const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
-      try {
-        const sandboxHost = makeSandboxHost(
-          OCR_SANDBOX_INHERIT,
-          SANDBOX_WORKSPACE_WRITE,
-          path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
-        );
-        sandboxHost.shell.scripts.push({ output: REVIEW_JSON });
-        await toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo" }, makeExec());
+      await onPosix(async () => {
+        const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
+        try {
+          const sandboxHost = makeSandboxHost(
+            OCR_SANDBOX_INHERIT,
+            SANDBOX_WORKSPACE_WRITE,
+            path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
+          );
+          sandboxHost.shell.scripts.push({ output: REVIEW_JSON });
+          await toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo" }, makeExec());
 
-        const call = sandboxHost.shell.resolveCalls.at(-1);
-        expect(call?.sandboxPolicy).toStrictEqual({
-          mode: SANDBOX_WORKSPACE_WRITE,
-          workspaceRoot: call?.workdir,
-          // 两根都由插件自己 mkdir+realpath：macOS 的 /var → /private/var 折法在这里生效，
-          // 所以期望值不能用 mkdtemp 的原样串。fs/promises 的 realpath 走 libuv 原生实现，
-          // Windows 上会把 8.3 短名（RUNNER~1）折成长名，而 realpathSync 的 JS 实现不解短名，
-          // 期望值必须用 .native 才与实现同口径。
-          additionalWritableRoots: [
-            realpathSync.native(path.join(home, OCR_DIR_NAME)),
-            realpathSync.native(tmpdir()),
-          ],
-        });
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
+          const call = sandboxHost.shell.resolveCalls.at(-1);
+          expect(call?.sandboxPolicy).toStrictEqual({
+            mode: SANDBOX_WORKSPACE_WRITE,
+            workspaceRoot: call?.workdir,
+            // 两根都由插件自己 mkdir+realpath：macOS 的 /var → /private/var 折法在这里生效，
+            // 所以期望值不能用 mkdtemp 的原样串。fs/promises 的 realpath 走 libuv 原生实现，
+            // Windows 上会把 8.3 短名（RUNNER~1）折成长名，而 realpathSync 的 JS 实现不解短名，
+            // 期望值必须用 .native 才与实现同口径。
+            additionalWritableRoots: [
+              realpathSync.native(path.join(home, OCR_DIR_NAME)),
+              realpathSync.native(tmpdir()),
+            ],
+          });
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
+      });
     });
 
     it("ocrSandbox=inherit 的后台作业同样带放行根（策略在 startBackground 期解析）", async () => {
-      const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
-      try {
-        const sandboxHost = makeSandboxHost(
-          OCR_SANDBOX_INHERIT,
-          SANDBOX_WORKSPACE_WRITE,
-          path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
-        );
-        await toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo", wait: false }, makeExec());
+      await onPosix(async () => {
+        const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
+        try {
+          const sandboxHost = makeSandboxHost(
+            OCR_SANDBOX_INHERIT,
+            SANDBOX_WORKSPACE_WRITE,
+            path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
+          );
+          await toolOf(sandboxHost, "ocr_review").execute(
+            { repo: "/repo", wait: false },
+            makeExec(),
+          );
 
-        const call = sandboxHost.shell.resolveCalls.at(-1);
-        expect(call?.sandboxPolicy).toStrictEqual({
-          mode: SANDBOX_WORKSPACE_WRITE,
-          workspaceRoot: call?.workdir,
-          additionalWritableRoots: [
-            realpathSync.native(path.join(home, OCR_DIR_NAME)),
-            realpathSync.native(tmpdir()),
-          ],
-        });
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
+          const call = sandboxHost.shell.resolveCalls.at(-1);
+          expect(call?.sandboxPolicy).toStrictEqual({
+            mode: SANDBOX_WORKSPACE_WRITE,
+            workspaceRoot: call?.workdir,
+            additionalWritableRoots: [
+              realpathSync.native(path.join(home, OCR_DIR_NAME)),
+              realpathSync.native(tmpdir()),
+            ],
+          });
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
+      });
     });
 
     it("ocrSandbox=inherit + 执行器 read-only：拒绝执行、点名它写不了的状态目录", async () => {
@@ -1727,6 +1747,33 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         expect(sandboxHost.shell.procs).toHaveLength(0);
       } finally {
         rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("ocrSandbox=inherit + Windows + 执行器 workspace-write：拒绝执行、不起进程", async () => {
+      pinPlatform("win32");
+      try {
+        const home = mkdtempSync(path.join(tmpdir(), SANDBOX_HOME_PREFIX));
+        try {
+          const sandboxHost = makeSandboxHost(
+            OCR_SANDBOX_INHERIT,
+            SANDBOX_WORKSPACE_WRITE,
+            path.join(home, OCR_DIR_NAME, OCR_CONFIG_NAME),
+          );
+          await expect(
+            toolOf(sandboxHost, "ocr_review").execute({ repo: "/repo" }, makeExec()),
+          ).rejects.toThrow(
+            format(MESSAGES.zh.ocrSandboxWindowsUnsupported, {
+              path: path.join(home, OCR_DIR_NAME),
+            }),
+          );
+          // 拒绝发生在 resolve 之前：一个进程都不该起来。
+          expect(sandboxHost.shell.procs).toHaveLength(0);
+        } finally {
+          rmSync(home, { recursive: true, force: true });
+        }
+      } finally {
+        restorePlatform();
       }
     });
 

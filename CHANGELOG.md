@@ -6,6 +6,27 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.16
+
+外部 `ocr` 契约抬到 `1.13.7`；宿主开发基线抬到 `0.2.2-rc.2`，支持窗口收到 `^0.2.2-rc.1`。对外工具与 Remote 方法名单不变。
+
+### Changed
+
+- **OCR 契约抬到 `1.13.7`**：`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`、两份 README、随包文档与 `THIRD_PARTY_NOTICES` 统一到 `1.13.7`（readme-parity 门禁对齐）。1.13.7 的命令形态与回执 envelope 与 1.13.6 兼容（真二进制 e2e 取证）；`--no-plan` 文案补出 1.13.7 起不足 200 行的文件已自动跳过 PLAN_TASK 预检。上游移除 `--tools` 的破坏性变更在 1.13.7 之后的未发布 master，本包不用该旗标，不受影响。
+- **宿主开发基线抬到 `0.2.2-rc.2`**：`devDependencies` 整组 `@deepseek-ai/dsh-*` 抬到 `0.2.2-rc.2`，并补上 rc.2 新增的 `@deepseek-ai/dsh-error`（`dsh-llm` 的精确 peer，`autoInstallPeers: false` 下须显式声明）。
+- **支持窗口收到 `^0.2.2-rc.1`**：`engines.dsh` 与 `@deepseek-ai/dsh*` peer 由 `^0.2.1-rc.5 || ^0.2.2-alpha.3` 改为 `^0.2.2-rc.1`（单条 0.2.2 线）；`@deepseek-ai/schemastery` peer 由 `^3.18.5 || ^3.18.6-alpha.1` 收到 `^3.19.0`。devDependencies 仍精确钉版。
+
+### Fixed
+
+- **Windows + `ocrSandbox=inherit` 不再静默跑不通**：dsh 0.2.2-rc.2 起，Windows 的
+  `additionalWritableRoots` 只作用于宿主的文件工具、不再下发给受限子进程（rc.1 是直接抛
+  `SANDBOX_UNSUPPORTED_POLICY`）。`inherit` + `workspace-write` 在 Windows 上现在与
+  `read-only` 同样在起进程前拒绝，并点名 OCR 写不了的状态目录、让部署改用 `full`；
+  `platform` 由 `hostSandboxPolicy` 从 `process.platform` 注入判定层，中英文案、两份 README
+  与两份详情文档同步。测试：`test/sandbox-policy.test.ts` 两条平台判决（win32 拒绝、
+  win32 + `full` 照常放开）+ `test/host.test.ts` 一条接线用例（拒绝且不起进程；POSIX 的
+  两条放行用例把宿主平台钉成 POSIX，Windows CI 上仍验接线而不是平台判据）。
+
 ## 0.1.15
 
 跟随 open-code-review 上游 `1.13.6`（npm latest）：版本核对契约抬到 1.13.6，`--max-tools`

@@ -29,6 +29,8 @@ function request(overrides: Partial<OcrSandboxRequest> = {}): OcrSandboxRequest 
     workspaceRoot: WORKSPACE_ROOT,
     stateHome: STATE_HOME,
     tempRoot: TEMP_ROOT,
+    // 判定层不读 process.platform：POSIX 基准值让这套判决表在 Windows CI 上也按同一口径跑。
+    platform: "linux",
     messages: MESSAGES.zh,
     ...overrides,
   };
@@ -72,6 +74,12 @@ describe("chooseOcrSandboxPolicy：放开档", () => {
       { mode: FULL_ACCESS, workspaceRoot: WORKSPACE_ROOT },
     );
   });
+
+  it("win32 上 mode=full 不受收窄拒绝影响", async () => {
+    await expect(
+      chooseOcrSandboxPolicy(request({ mode: "full", platform: "win32" })),
+    ).resolves.toStrictEqual({ mode: FULL_ACCESS, workspaceRoot: WORKSPACE_ROOT });
+  });
 });
 
 describe("chooseOcrSandboxPolicy：拒绝档", () => {
@@ -91,6 +99,15 @@ describe("chooseOcrSandboxPolicy：拒绝档", () => {
     );
     expect((err as Error).message).toBe(
       format(MESSAGES.zh.ocrSandboxUnknownMode, { mode: UNKNOWN_MODE }),
+    );
+  });
+
+  it("inherit + win32 + workspace-write 直接拒绝（rc.2 起放行根不下发给受限进程）", async () => {
+    const err = await chooseOcrSandboxPolicy(request({ platform: "win32" })).catch(
+      (error: unknown) => error as Error,
+    );
+    expect((err as Error).message).toBe(
+      format(MESSAGES.zh.ocrSandboxWindowsUnsupported, { path: stateDirOf(STATE_HOME) }),
     );
   });
 

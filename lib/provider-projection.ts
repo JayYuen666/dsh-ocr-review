@@ -49,10 +49,12 @@ export interface DshProvider {
 /**
  * llm-pi-ai 的 `api` 协议 → OCR config 的 `protocol` 映射。
  *
- * 两侧枚举的对照（dsh packages/llm/llm-pi-ai/src/provider.ts:44-48 的 PROTOCOLS
+ * 两侧枚举的对照（dsh packages/llm/llm-pi-ai/src/provider.ts:48-53 的 PROTOCOLS
  * 对 OCR config_cmd.go:796 的 "Protocol values: anthropic, anthropic-bedrock,
  * openai, openai-responses"）：openai-completions 与 OCR 的 openai 是同一条
  * OpenAI Chat Completions 线协议；anthropic-messages 即 OCR 的 anthropic。
+ * rc.2 新增的 google-generative-ai 不在下表：OCR 1.13.7 的 protocol 白名单没有
+ * Gemini 原生协议，这一档落进「表外值」由写侧拒绝，不静默降级成 openai。
  * 此前「非 openai-responses 一律 openai」的二值映射会把 anthropic-messages 的
  * 端点按 OpenAI 线协议打出去——select 成功、OCR 调不通。表外值透传，让
  * renderSelectedConfig 的白名单给出可读错误。
@@ -209,7 +211,7 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
 /**
  * settings 命名空间解析值 → provider 列表（纯投影，不含任何 key 值）。
  * 上游形状（settings 里 llm-pi-ai.providers.<name>）：
- *   { displayName?, apiKeyEnv?, api: openai-completions|openai-responses|anthropic-messages,
+ *   { displayName?, apiKeyEnv?, api: openai-completions|openai-responses|anthropic-messages|google-generative-ai,
  *     baseURL, models?: [{id,name,…}] }
  * 形状不合的条目整条丢弃（读侧宽容：卡片要能打开让用户去修），写侧才 fail-loud。
  */

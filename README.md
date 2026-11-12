@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-ocr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-ocr-review/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.1--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.1-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -31,22 +31,24 @@
 
 ## <img src="https://api.iconify.design/lucide/file-text.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Contents
 
-- [What it does](#what-it-does)
-- [Install](#install)
-- [The external CLI](#the-external-cli)
-- [Verify it is live](#verify-it-is-live)
-- [What it does not provide](#what-it-does-not-provide)
-- [Enabling it in dsh](#enabling-it-in-dsh)
-- [Tools exposed to the model](#tools-exposed-to-the-model)
-- [Settings](#settings)
-- [Public interface](#public-interface)
-- [Credentials and the OCR config file](#credentials-and-the-ocr-config-file)
-- [Background runs as host jobs](#background-runs-as-host-jobs)
-- [Data and privacy](#data-and-privacy)
-- [Known boundaries](#known-boundaries)
-- [FAQ](#faq)
-- [Development](#development)
-- [License](#license)
+- [ Contents](#-contents)
+- [ What it does](#-what-it-does)
+- [ Install](#-install)
+  - [ Shared version floor](#-shared-version-floor)
+- [ The external CLI](#-the-external-cli)
+- [ Verify it is live](#-verify-it-is-live)
+- [ What it does not provide](#-what-it-does-not-provide)
+- [ Enabling it in dsh](#-enabling-it-in-dsh)
+- [ Tools exposed to the model](#-tools-exposed-to-the-model)
+- [ Settings](#-settings)
+- [ Public interface](#-public-interface)
+- [ Credentials and the OCR config file](#-credentials-and-the-ocr-config-file)
+- [ Background runs as host jobs](#-background-runs-as-host-jobs)
+- [ Data and privacy](#-data-and-privacy)
+- [ Known boundaries](#-known-boundaries)
+- [ FAQ](#-faq)
+- [ Development](#-development)
+- [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
 
@@ -67,7 +69,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 Remove with `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`. The package is on the public npm registry, so installation needs no credentials.
 
 - **Upgrading an installed copy is remove-then-add.** On a profile running HMR (the shipped ones do), `add` on a package the profile already depends on refuses before pnpm runs (`already-installed`) — run `remove` first, then `add` the target version; the new one starts without a restart. Without HMR the same `add` runs pnpm and reports `restart-required`.
-- **Requires Node.js `>= 24.9` and host `dsh` on the `0.2.1-rc.5` or `0.2.2-alpha.3` line.** The host reads `engines.dsh` (`^0.2.1-rc.5 || ^0.2.2-alpha.3`) and decides on it alone; prereleases participate in the comparison. An incompatible host needs the explicit risk grant `dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<version> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
+- **Requires Node.js `>= 24.9` and host `dsh` on the `0.2.2-rc.1` line or later.** The host reads `engines.dsh` (`^0.2.2-rc.1`) and decides on it alone; prereleases participate in the comparison. An incompatible host needs the explicit risk grant `dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<version> --dsh-version <exact> --accept-risk`. The support window rolls: this package is verified against every released host version inside the window at publish time and re-verified once the window moves, so the version number in this bullet is not a standing promise.
 - **No `@deepseek-ai/*` under `dependencies`, by contract** (`test/publish-manifest.test.ts` enforces it). Consumer profiles install with `nodeLinker: hoisted` and `autoInstallPeers: false`, so a host package there is materialized as a real directory next to the copy the running host already loaded. `@deepseek-ai/dsh-tools` keys its scheduler with a plain `Symbol` (not `Symbol.for`), so symbol identity is per instance and **every native tool call in that profile throws** — while this package's build, typecheck and coverage gates stay green right up to that moment.
 - **The five host packages `host.js` imports as values are required peers**: `@deepseek-ai/schemastery` (the host fork — only it resolves `.volatile()` fields), `@deepseek-ai/dsh-credentials`, `@deepseek-ai/dsh-home-paths`, `@deepseek-ai/dsh-atomic-write` and `@deepseek-ai/dsh-typert-protocol` (the Remote service base). Each also appears in `devDependencies` pinned to the compile-time host line (which may differ from the peer support window above) so this repository's own typecheck resolves them; the build externalizes all manifest tables, keeping bare specifiers in the artifact.
 - **What ships** (see `files` in `package.json`): `host.js`, `client.js`, `cordis.patch.yml`, `scripts/`, `locale/*.json`, `docs/`, `icon.svg`, `CHANGELOG.md` and `THIRD_PARTY_NOTICES.md`. `prepare` rebuilds the bundles, so nothing stale is published.
@@ -78,11 +80,11 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> The external CLI
 
-This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.6** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
+This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.7** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
 
 ```sh
 brew install open-code-review                        # the formula tracks the newest release
-npm i -g @alibaba-group/open-code-review@1.13.6      # pinned to the version this plugin verifies against
+npm i -g @alibaba-group/open-code-review@1.13.7      # pinned to the version this plugin verifies against
 ```
 
 - **brew cannot pin.** `homebrew/core` carries one stable formula and no versioned variant, so `brew install` / `brew upgrade` always yields whatever is newest upstream. The npm command is the only one that can carry the verified version.
@@ -153,7 +155,7 @@ The deployment keys below are deliberately **not** on the card — they are plai
 | `stdoutMaxBytes` | `400000` | Shell executor stdout cap, shared by foreground and background runs (review results go through the `--output` temp file precisely to step outside it) |
 | `ocrNoAutoUpdate` | `false` | true puts `OCR_NO_UPDATE=1` on every command this package spawns, stopping upstream's mid-review `npm i -g` of a newer release; false keeps upstream behaviour. The version probe sets the variable regardless |
 | `ocrInstallHint` | `both` | Which install command to lead with when nothing is installed: `both` / `brew` / `npm`. A fallback, not an override — an existing copy is always described by its own source, because telling a formula user to run `npm i -g` leaves a second copy behind while PATH still resolves the old one. The npm command always carries the verified version; the brew one never can |
-| `ocrSandbox` | `full` | File fence for the `ocr` subprocesses. `full` requests `danger-full-access` (the behaviour since 0.1.14: ocr keeps its state in `$HOME/.opencodereview`, outside the workspace, and a confined run loses finished reviews at `finalize session`). `inherit` follows the sandbox mode the host executor reports instead: `workspace-write` narrows to the workspace root plus `additionalWritableRoots` for the OCR state directory and the system temp area, while `read-only` and unrecognised modes are refused. The inherited policy never carries the deployment's own `additionalWritableRoots` — deployments that need more paths should use `full` |
+| `ocrSandbox` | `full` | File fence for the `ocr` subprocesses. `full` requests `danger-full-access` (the behaviour since 0.1.14: ocr keeps its state in `$HOME/.opencodereview`, outside the workspace, and a confined run loses finished reviews at `finalize session`). `inherit` follows the sandbox mode the host executor reports instead: `workspace-write` narrows to the workspace root plus `additionalWritableRoots` for the OCR state directory and the system temp area, while `read-only` and unrecognised modes are refused; `workspace-write` on Windows is refused too — since dsh 0.2.2-rc.2, Windows applies additional writable roots to file tools only and never to a confined subprocess, so the OCR state directory cannot be granted. The inherited policy never carries the deployment's own `additionalWritableRoots` — deployments that need more paths should use `full` |
 
 ## <img src="https://api.iconify.design/lucide/network.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Public interface
 
