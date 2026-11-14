@@ -26,6 +26,7 @@ import type { JsonSchemaNode } from "@deepseek-ai/dsh-tools";
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { OCR_TOOL_ERROR_CODES, OcrToolError } from "./tool-error.ts";
 
 /** 守卫支持的 schema 关键字（官方 enforced subset 的全部关键字，见
  *  installed dsh-tools lib/index.js:206；description/title/default/examples 是
@@ -113,7 +114,10 @@ function assertKnownKeywords(
 ): void {
   for (const keyword of Object.keys(schema)) {
     if (!SUPPORTED_KEYWORDS.has(keyword)) {
-      throw new Error(format(messages.resultSchemaUnsupported, { tool: toolName, keyword }));
+      throw new OcrToolError(
+        OCR_TOOL_ERROR_CODES.outputShape,
+        format(messages.resultSchemaUnsupported, { tool: toolName, keyword }),
+      );
     }
   }
 }
@@ -552,7 +556,9 @@ export function assertToolOutput(
     // 一份最终只列 20 条的清单先把几十万条字符串留在内存里。
     const omitted = sink.total - sink.messages.length;
     const listed = sink.messages.join("; ") + (omitted > 0 ? ` …(+${omitted})` : "");
-    throw new Error(
+    // 码是 OUTPUT_SHAPE 而不是 BAD_ARGUMENTS：这条错在**本插件**自己的出口，模型改参数救不了。
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.outputShape,
       format(messages.resultSchemaViolation, {
         tool: toolName,
         violations: redactKeyMaterial(listed).slice(0, MAX_VIOLATION_CHARS),

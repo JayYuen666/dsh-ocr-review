@@ -348,8 +348,19 @@ export interface OcrReviewMessages {
   readonly sessionResumeHint: string;
   readonly rulesCheckHint: string;
   readonly llmHint: string;
-  // ── systemPrompt 注入段 ───────────────────────────────────────────────────
+  // ── systemPrompt 注入段 + skill 正文 ──────────────────────────────────────
+  /** 工具路由规则**全文**：注册成虚拟 skill 的正文，模型按需加载。 */
   readonly routingText: string;
+  /** 工具路由**摘要**：常驻 systemPrompt 的那一段。
+   *  只保留「不照做就会审错对象 / 白烧 token」的规范；口径细节（两套读法、重试与
+   *  resume、provider 覆盖）留在 routingText 里由 skill 按需加载。 */
+  readonly routingSummary: string;
+  /** skill 目录里那行说明（模型据此决定要不要加载 routingText）。 */
+  readonly skillDescription: string;
+  // ── 前台耗时 ──────────────────────────────────────────────────────────────
+  /** 前台长任务（review / scan）回执尾部的墙钟耗时。`{duration}` = 已排好版的时长，
+   *  如 `5m12s`：单位用缩写而不是「分钟/秒」，同一份模板因此两语通用。 */
+  readonly elapsedNote: string;
 }
 
 export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
@@ -531,7 +542,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     sessionCompareHint:
       "四桶含义：new=只在后一次出现；persisting=两次都有；resolved=只在前一次出现且后一次审过该文件；not_reviewed=只在前一次出现且后一次没审该文件（不算已解决）。",
     sessionExportHint:
-      "已导出为自包含 HTML 文件；路径在 sessionOutput 里，直接用浏览器打开即可（文件留在临时目录，过期后由后续导出自动清理）。",
+      "已导出为自包含 HTML 文件，路径在 sessionOutput 里（文件留在临时目录，过期后由后续导出自动清理）。" +
+      "这是给用户看的成品：用 present 工具把它声明为交付物——present 的 files 里写这个路径——用户才能在回复结束后一键打开；" +
+      "急着让用户自己打开就先在回复里直接给出路径。",
     sourceSettingsUnavailable:
       "dsh 设置服务（ctx.settings）未装配：本插件需要它读取已配置的 provider 列表",
     sourceSettingsFailed: "调用 dsh 设置服务失败：{message}",
@@ -711,6 +724,27 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
   工具层超时（min(请求, shell 执行器自己设置项里的 maxTimeoutMs)，缺省 10 分钟）或部分文件失败后，可
   ocr_session 查 session_id、用 ocr_review --resume 恢复中断的区间/commit 评审，或 ocr_scan --resume 续扫。
 `.trim(),
+    routingSummary: [
+      "用户要求「审查代码/Review/检查我的改动/审这个 commit/PR」时，用 ocr 工具做代码审查：",
+      "- 先判断要哪一种：ocr_review（工作区/commit/分支变更，OCR 用自己的 LLM 独立审）、" +
+        "ocr_scan（无 git 历史的目录或指定路径，全文件审）、" +
+        "ocr_delegate_preview / ocr_delegate_rule（只取「文件清单 + 适配规则」，OCR 端零 LLM，" +
+        "配合 git diff 由你自己审）。",
+      "- 不确定范围时先 ocr_delegate_preview 或 preview=true：只列文件选择与排除原因，零 LLM、不建会话；" +
+        "范围过大用 exclude 收敛或按 commit 拆。",
+      "- 调用 ocr_review / ocr_scan 前先用 git log/diff/提交信息提炼 3-5 句业务上下文放进 background。",
+      "- ocr_session 查历史（list/show/comments/compare/export）；ocr_rules_check / ocr_llm 是只读诊断，" +
+        "不评审、不花 token。",
+      "- OCR 端点/provider/model 由「设置 → 插件 → ocr-review 卡片」选，也可用工具参数逐次覆盖。",
+      "",
+      "本段只列「选错工具会审错对象或白烧 token」的那几条。读结果的两套口径、内置重试与 resume、" +
+        "toolCalls.failure 的判读等完整规则见 skill `ocr-review`：需要时用 skill 工具按名加载。",
+    ].join("\n"),
+    skillDescription:
+      "ocr-review 工具的完整使用规则：三个入口怎么选、preview 与 exclude 的收敛用法、background 该写什么、" +
+      "读结果的两套口径（coverage / budgetExceeded）、内置重试与 --resume 续审、provider/model 覆盖。",
+    elapsedNote:
+      "本次前台执行的实际墙钟耗时为 {duration}：含 OCR 子进程的启动与退出，不含排队等宿主调度的时间。",
   },
   en: {
     middleEllipsis: " …[middle omitted]… ",
@@ -925,7 +959,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     sessionCompareHint:
       "Bucket meanings: new = only in the later run; persisting = in both; resolved = only in the earlier run and the later run reviewed that file; not_reviewed = only in the earlier run and the later run never looked at that file (not resolved).",
     sessionExportHint:
-      "Exported as a self-contained HTML file; the path is in sessionOutput — open it in a browser. It stays in the temp directory and older exports are cleaned up automatically.",
+      "Exported as a self-contained HTML file; the path is in sessionOutput. It stays in the temp directory and older exports are cleaned up automatically. " +
+      "This is a finished deliverable for the user: declare it with the present tool — put this path in present's files — so the user can open it once your turn ends; if they need it sooner, give the path in your reply.",
     sourceSettingsUnavailable:
       "the dsh settings service (ctx.settings) is not wired up: this plugin needs it to read the configured provider list",
     sourceSettingsFailed: "calling the dsh settings service failed: {message}",
@@ -1162,6 +1197,32 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
   10 minutes by default) or partial file failures, use ocr_session to find the session_id and ocr_review --resume
   to continue an interrupted range/commit review, or ocr_scan --resume to continue a scan.
 `.trim(),
+    routingSummary: [
+      'When the user asks to "review the code / Review / check my changes / review this commit or PR", use the ocr tools:',
+      "- Pick the entry point first: ocr_review (workspace/commit/branch changes reviewed independently by OCR's own LLM), " +
+        "ocr_scan (whole-file review of directories without git history, or of given paths), " +
+        'ocr_delegate_preview / ocr_delegate_rule (only "file list + fitting rules", zero LLM on the OCR side; ' +
+        "pair it with git diff and review yourself).",
+      "- When the scope is uncertain, start with ocr_delegate_preview or preview=true: it only lists file selection " +
+        "and exclusion reasons, costs no LLM, and creates no session; for large scopes use exclude or split by commit.",
+      "- Before ocr_review / ocr_scan, skim git log/diff/the commit message and distill 3-5 sentences of business " +
+        "context into background.",
+      "- ocr_session reads history (list/show/comments/compare/export); ocr_rules_check / ocr_llm are read-only " +
+        "diagnostics that never review and never spend tokens.",
+      "- The OCR endpoint/provider/model comes from the ocr-review card under Settings -> Plugins, and tool arguments " +
+        "may override it per call.",
+      "",
+      "This section lists only what makes a call review the wrong thing or burn tokens for nothing. The full rules " +
+        "(the two ways to read results, built-in retries and resume, how to read toolCalls.failure) live in the skill " +
+        "`ocr-review`: load it by name with the skill tool when needed.",
+    ].join("\n"),
+    skillDescription:
+      "The full ocr-review tool rules: how to choose among the three entry points, how preview and exclude narrow " +
+      "the scope, what to put in background, the two ways to read results (coverage / budgetExceeded), built-in " +
+      "retries and --resume, and provider/model overrides.",
+    elapsedNote:
+      "Wall-clock time for this foreground run: {duration} (includes the OCR subprocess start and exit; time spent " +
+      "queued for host scheduling is not counted).",
   },
 };
 

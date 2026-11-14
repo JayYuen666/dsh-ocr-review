@@ -19,7 +19,7 @@
 
 ## 需要外部提供什么
 
-`ocr` 命令行，期望版本 **1.13.7**；这个期望唯一声明在 `package.json` 的 `ocrCliVersion`，代码常量与两份 README 镜像同一个字符串，版本不符只作为提示报出，从不中断评审。装法是 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@1.13.7`。PATH 上一个候选都没有时，预检报「no ocr candidate on either path」并附安装提示；「command not found」（exit 127）是另一种情况：候选在，但真二进制跑不起来。版本探测一律强制 `OCR_NO_UPDATE=1`，以免探测顺手触发升级。
+`ocr` 命令行，期望版本 **1.13.9**；这个期望唯一声明在 `package.json` 的 `ocrCliVersion`，代码常量与两份 README 镜像同一个字符串，版本不符只作为提示报出，从不中断评审。装法是 `brew install open-code-review` 或 `npm i -g @alibaba-group/open-code-review@1.13.9`。PATH 上一个候选都没有时，预检报「no ocr candidate on either path」并附安装提示；「command not found」（exit 127）是另一种情况：候选在，但真二进制跑不起来。版本探测一律强制 `OCR_NO_UPDATE=1`，以免探测顺手触发升级。
 
 API 凭据不存这里：本插件写的是一个 `api_key_cmd`，运行时的密钥由那支辅助脚本现取，不进配置文件。脚本缺失时卡上给出告警，而不是发一次没有鉴权的请求。
 

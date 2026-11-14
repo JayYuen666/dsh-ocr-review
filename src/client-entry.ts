@@ -66,6 +66,7 @@ import {
 } from "@jayyuen66/dsh-plugin-shared/client";
 import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
 import { OCR_BUNDLE_PACKAGE } from "../lib/remote-shape.ts";
+import { OCR_LOGO_DATA_URI } from "./ocr-icon.ts";
 import { createOcrReader } from "./remote.ts";
 import type { OcrReader } from "./remote.ts";
 import type { OcrSelectRequest } from "../lib/remote-shape.ts";
@@ -91,6 +92,13 @@ const NS: LocaleNs = "ocr-review";
  * settings 命名空间用）。
  */
 const BUNDLE_PKG = OCR_BUNDLE_PACKAGE;
+
+/** 设置页左侧一级分区的 id（`settings.section` 的 `id`，图标靠同一个值对上）。
+ *  与 `NS` 分开写：分区 id 是**页面位置**的名字，`NS` 是**配置与文案**的名字。 */
+const SECTION_ID = "ocr-review";
+
+/** 分区在导航里的位次：宿主已占 -10/0/10/15/20，本包三仓的分区排在 agent-presets 之后。 */
+const SECTION_ORDER = 32;
 
 /** 未知值 → 安全字符串（非字符串给 ''）。 */
 function strOf(value: unknown): string {
@@ -266,6 +274,10 @@ const CARD_CSS = [
   ".ocr-ok{color:var(--dsw-alias-label-primary,inherit)}",
   ".ocr-muted{color:var(--dsw-alias-label-tertiary,#8a8f99)}",
   ".ocr-adminTextarea{min-height:160px}",
+  // 一级分区里没有插件页那层卡片外壳，自己给一点上下留白。
+  ".ocr-page{padding:4px 0 8px}",
+  // 导航图标：官方标记（绿底 + 黑眼睛）的 SVG 原样内联。图形自带对比度，两种主题都成立。
+  `.ocr-icon{display:inline-block;background-image:url(${OCR_LOGO_DATA_URI});background-size:100% 100%;background-repeat:no-repeat}`,
 ].join("\n");
 
 export interface DshModel {
@@ -1837,6 +1849,42 @@ export interface CardSlotProps {
 }
 
 /**
+ * 设置页导航图标（`settings.section.icon`）。
+ *
+ * 图形是 **open-code-review 官方标记**（`src/ocr-icon.ts` 里内联的那份 SVG）：用户要求三个仓
+ * 都用官方图形。这枚图标是「绿底 + 黑色眼睛」，**自带对比度**，深色与浅色主题下都看得清，
+ * 所以直接当背景图铺上即可 —— 不需要按主题换色，也就没有拆遮罩的必要。
+ *
+ * 与另外两仓的差别值得记一笔：rtk 与 scrapling 的官方标记是单色线稿/剪影，直接放进去会在
+ * 某一种主题下看不见，那两仓因此走「alpha 遮罩 + currentColor」；这里不需要。
+ *
+ * @param props - `size` 是导航行要的方形边长，`active` 表示该分区当前被选中。
+ * @returns 一个铺了官方标记的方块。
+ */
+function OcrSectionIcon(props: { readonly size: number; readonly active: boolean }): ReactNode {
+  return createElement("span", {
+    className: "ocr-icon",
+    style: { width: props.size, height: props.size },
+    "aria-hidden": true,
+    "data-ocr-section-icon": props.active ? "active" : "idle",
+  });
+}
+
+/**
+ * 一级分区的页面外壳。
+ *
+ * 分区 owner props 里**没有 `view`**（那是插件详情页那一侧的位），而 `OcrCard` 不看 `view`
+ * —— 它只从 inject 拿数据，所以这里原样透传即可，不需要像 scrapling 那样补一个显式的
+ * `view: "page"`。外面这层只负责补一级分区缺的那点上下留白。
+ *
+ * @param props - 卡片那套 inject 面（与 `plugins.bundle.config` 那份同形）。
+ * @returns 分区页面。
+ */
+function OcrSection(props: CardSlotProps): ReactNode {
+  return createElement("div", { className: "ocr-page" }, createElement(OcrCard, props));
+}
+
+/**
  * 这张卡用到的 ctx 上的成员：`effect` 和 `slots` 直接取官方服务的类型，`locale` 取官方**带类型的**
  * 重载，只有 `configForms` 仍是方法子集投影（原因见那一条）。
  *
@@ -1928,6 +1976,19 @@ function apply(ctx: ClientCtx): void {
   // 抛可读错误，卡片照常渲染、数据那一栏显示原因。`$mount` 幂等（随卡片卸载自动撤），
   // 反复拉取只挂一次。
   const reader = createOcrReader(ctx);
+  // 卡片的两份 inject 完全同形：`plugins.bundle.config` 与 `settings.section` 吃同一批位，
+  // 写成一处工厂是为了「两个地方显示的是同一份配置」没有第二种实现。
+  const cardInject = (): {
+    t: Translate;
+    hooks: { readonly card: typeof store };
+    set: (field: string, value: unknown) => boolean | Promise<boolean>;
+    reader: OcrReader;
+  } => ({
+    t,
+    hooks: { card: store },
+    set: (field: string, value: unknown): boolean | Promise<boolean> => scope.set(field, value),
+    reader,
+  });
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {
@@ -1939,14 +2000,7 @@ function apply(ctx: ClientCtx): void {
         // 表单侧不变：上面 `ctx.configForms.get(NS)` 仍吃裸条目 id。
         name: "plugins.bundle.config",
         key: BUNDLE_PKG,
-        inject: () => ({
-          t,
-          hooks: { card: store },
-          set: (field: string, value: unknown): boolean | Promise<boolean> =>
-            scope.set(field, value),
-          // 宿主的读取接口（remote 的消费侧）。
-          reader,
-        }),
+        inject: cardInject,
       },
       OcrCard,
     );
@@ -1999,6 +2053,36 @@ function apply(ctx: ClientCtx): void {
         inject: () => cliShare,
       },
       OcrCliActivation,
+    ),
+  );
+
+  // 设置页一级分区：宿主导航里多一页，内容就是这张卡（`plugins.bundle.config` 那份保留 ——
+  // 用户要求插件详情页与设置页两处都能改配置）。
+  ctx.slots.inject("settings.section", () =>
+    ctx.slots.register(
+      {
+        name: "settings.section",
+        id: SECTION_ID,
+        order: SECTION_ORDER,
+        // `label` 给 thunk 而不是字符串：宿主每次读导航行都会重新求值，于是切语言时这一行
+        // 跟着变，而不需要本插件重新注册。
+        label: () => t("navLabel"),
+        inject: cardInject,
+      },
+      OcrSection,
+    ),
+  );
+
+  // 导航图标：id 必须与上面那条 `settings.section` 的 id 逐字相同，对不上时宿主一条都不渲染
+  // （`settings.section.icon` 的 doc 原文），症状是分区还在、图标一直是默认齿轮。
+  ctx.slots.inject("settings.section.icon", () =>
+    ctx.slots.register(
+      {
+        name: "settings.section.icon",
+        id: SECTION_ID,
+        order: SECTION_ORDER,
+      },
+      OcrSectionIcon,
     ),
   );
 }

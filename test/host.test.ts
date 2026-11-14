@@ -35,6 +35,7 @@ import { SessionId as brandSessionId } from "@deepseek-ai/dsh-session";
 import { PI_AI_SETTINGS_VALUE, descriptorsWithValue } from "./fixtures/settings-fixture.ts";
 import { pinPlatform, restorePlatform } from "./fixtures/platform-stub.ts";
 import { MESSAGES } from "../lib/messages.ts";
+import { SKILL_NAME } from "../lib/skill.ts";
 import { resolveOcrAvailability, EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 import type { OcrAvailabilityProbe } from "../host.ts";
 import { sweepStaleSessionExports } from "../lib/tmp-cleanup.ts";
@@ -588,6 +589,12 @@ interface FakeTool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  /** 官方 `ToolDefinition.isConcurrencySafe?(args)`：调度阶段宿主会调它决定串行还是并行。 */
+  isConcurrencySafe?: (args: unknown) => boolean;
+  /** 官方 `ToolDefinition.timeoutMs`：宿主 timeout 策略按它给每次调用套墙钟截止。 */
+  timeoutMs?: number;
+  /** 官方 `ToolDefinition.presentCall?(args)`：调用态卡片，宿主在 execute 之前画。 */
+  presentCall?: (args: unknown) => { card?: string; kind?: string; title?: string } | undefined;
   output: {
     schema: Record<string, unknown>;
     render: (args: unknown, value: unknown) => { type: string; text: string }[];
@@ -642,6 +649,8 @@ interface FakeHost {
   effectDisposers: (() => void)[];
   /** `reflect.provide` 收到的服务（Remote 的读取接口是否上线、它的依赖能不能取到数据）。 */
   provided: Map<string, unknown>;
+  /** 注册进 skill 服务的条目（顺序即注册顺序）：条目形状是官方 SkillRegistration 的子集。 */
+  skillsRegistered: { name: string; description: string; content: string }[];
   /** cordis `Service` 构造期的注册口：apply 里的 `installOcrRemote` 只认这一位。 */
   reflect: { provide: (name: string, service: unknown) => void };
   /** `inject(...)` 子 fiber 的 effect 登记的释放器。与上面**分开存**：混在一队就分不出
@@ -692,6 +701,8 @@ interface FakeHostOptions {
   configured?: string[];
   /** false ⇒ get("jobs") 交不出注册表（宿主没装 dsh-jobs-local 的那一档）。 */
   jobs?: boolean;
+  /** false ⇒ get("skills") 交不出注册表（精简 profile 没装 dsh-skill 的那一档）。 */
+  skills?: boolean;
   /** true ⇒ describe/resolve 直接 reject（宿主侧凭据服务故障，不该把卡片打成 500）。 */
   credentialsReject?: boolean;
   /** true ⇒ resolve 命中但值是空串（凭据层的「空值即不存在」规则）。 */
@@ -701,6 +712,13 @@ interface FakeHostOptions {
    * 缺省 = 该命名空间未被投影出来 → 文案按中文默认（与 ctx-observe 同款替身）。
    */
   locale?: { preference?: string };
+}
+
+/** hint 的第一行。
+ *  review/scan 的 hint 现在是「摘要 + 前台耗时」两段（以换行分隔），所以「摘要一字不多」这类
+ *  断言要落到第一行上；拿整条 hint 去比会随耗时那一句一起红，而它测的本来不是耗时。 */
+function firstLineOf(hint: string): string {
+  return hint.split("\n")[0] ?? "";
 }
 
 function noop(): () => void {
@@ -755,6 +773,7 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
     agents,
     effectDisposers: [],
     provided: new Map(),
+    skillsRegistered: [],
     reflect: {
       provide: (name, service) => {
         host.provided.set(name, service);
@@ -864,6 +883,15 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
         service = host.settings;
       } else if (name === "jobs" && options.jobs !== false) {
         service = host.jobs;
+      } else if (name === "skills" && options.skills !== false) {
+        // 官方 SkillRegistry 的最小替身：只实现 register，把实参收进记录。
+        // 官方签名是 `register(skill: SkillRegistration): () => void`。
+        service = {
+          register: (skill: { name: string; description: string; content: string }) => {
+            host.skillsRegistered.push(skill);
+            return noop();
+          },
+        };
       } else if (name === "agents") {
         // 官方 agent 注册表：只给 owner 判定读的那一位（会话 id → 活 Agent）。
         service = {
@@ -930,6 +958,8 @@ const DEPLOYMENT = [
   "ocrNoAutoUpdate",
   "startupVerify",
   "stdoutMaxBytes",
+  // 工具级墙钟预算：宿主只读注册时那一份，所以必须是部署值而不是 volatile 设置项。
+  "toolTimeoutMs",
 ];
 
 /**
@@ -1294,6 +1324,122 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(host.registeredRoutes, "HTTP 数据面已迁到官方 Remote").toStrictEqual([]);
       // Remote 的读取接口无条件上线：它存不存在只由 apply 决定，和 webServer 到不到位无关。
       expect(host.provided.has(OCR_REMOTE_NAMESPACE)).toBe(true);
+      // 路由**全文**不是丢了，而是搬进虚拟 skill：常驻提示词只剩摘要。
+      expect(host.skillsRegistered).toHaveLength(1);
+      // 名字的字面量由 test/skill.test.ts 钉住；这里只验「注册的是本包那枚 skill」。
+      expect(host.skillsRegistered[0]?.name).toBe(SKILL_NAME);
+      expect(host.skillsRegistered[0]?.content).toBe(MESSAGES.zh.routingText);
+      expect(host.sections[0]?.text).toBe(MESSAGES.zh.routingSummary);
+    });
+
+    it("宿主没装 skill 服务时照常装配（可选依赖，不进 inject）", () => {
+      const host = makeHost({ skills: false });
+      applyPlugin(host);
+      expect(host.skillsRegistered).toStrictEqual([]);
+      // 摘要段与七个工具一个都不能少：缺 skill 服务只意味着「全文按需加载不了」。
+      expect(host.sections).toHaveLength(1);
+      expect(host.sections[0]?.text).toBe(MESSAGES.zh.routingSummary);
+      expect(host.registeredTools).toHaveLength(7);
+    });
+
+    it("七个工具都声明并发分类器，且只有 ocr_session 判不安全", () => {
+      // 期望表独立写死（不从实现派生）：rc.2 起宿主按 `isConcurrencySafe` 决定同批工具
+      // 串行还是并行，**只认恰好 true**；未声明一律 exclusive。所以「声明了没有」与
+      // 「声明成什么」是两件事，这里两件都盯。
+      // 判据是「并行会不会改变可观察结果」：review/scan 各自用 mkdtempSync 的私有临时目录、
+      // finally 回收；preview/rule/rules_check/llm 只读规则与配置、不起 LLM 会话；
+      // 唯有 ocr_session 会写 ~/.opencodereview/sessions/<repo>/<id>.jsonl，同 repo 的两次
+      // 调用共用父目录而写入端用 O_TRUNC ⇒ 并行会截断前一次正在写的记录。
+      const expected = new Map<string, boolean>([
+        ["ocr_review", true],
+        ["ocr_scan", true],
+        ["ocr_delegate_preview", true],
+        ["ocr_delegate_rule", true],
+        ["ocr_rules_check", true],
+        ["ocr_llm", true],
+        ["ocr_session", false],
+      ]);
+      const host = makeHost();
+      applyPlugin(host);
+      for (const [name, safe] of expected) {
+        const classifier = toolOf(host, name).isConcurrencySafe;
+        expect(classifier, `${name} 没声明 isConcurrencySafe`).toBeTypeOf("function");
+        // 宿主按调度阶段的入参调它：分类器必须吃任意入参而不抛错，返回反布尔就退回串行。
+        expect(classifier?.({}), `${name} 的分类器结果`).toBe(safe);
+      }
+      // 反向钉子：把上面那张表当成全集核对，工具面多一个少一个这里就红。
+      expect(host.registeredTools.map((tool) => tool.name).toSorted()).toStrictEqual(
+        [...expected.keys()].toSorted(),
+      );
+    });
+
+    it("七个工具都声明调用态卡片，且参数不是对象时也画得出来", () => {
+      const host = makeHost();
+      applyPlugin(host);
+      const names = [
+        "ocr_review",
+        "ocr_scan",
+        "ocr_delegate_preview",
+        "ocr_delegate_rule",
+        "ocr_session",
+        "ocr_rules_check",
+        "ocr_llm",
+      ];
+      for (const name of names) {
+        const presenter = toolOf(host, name).presentCall;
+        expect(presenter, `${name} 没声明 presentCall`).toBeTypeOf("function");
+        expect(presenter?.({ repo: "/tmp/repo" })?.card, `${name} 的卡片类型`).toBe("generic");
+        // 宿主把模型交的 arguments 原样递进来：顶层可能不是对象，那时也必须给出标题
+        // 而不是抛——画不出卡片比画得朴素代价大得多。
+        for (const bogus of [null, [], "text", 42]) {
+          expect(
+            presenter?.(bogus)?.title,
+            `${name} 面对 ${JSON.stringify(bogus)} 应回落工具名`,
+          ).toBe(name);
+        }
+      }
+      // 反向钉子：卡片表就是全集。
+      expect(host.registeredTools.map((tool) => tool.name).toSorted()).toStrictEqual(
+        names.toSorted(),
+      );
+    });
+
+    it("七个工具的工具级墙钟是兜底天花，不是 OCR 的时长预算", () => {
+      // 期望值独立写死（不从实现派生）。
+      //
+      // 这一格早先按「宿主 bash-local 的 maxTimeoutMs 默认 10 分钟 + git 探测 10 秒」
+      // 算成 15 分钟，**那是错的**：`timeoutMinutes` 非 0 时本包走 `onExpiry: "none"`
+      // 加自管截止（lib/run-scope.ts 的 `runExpiry`），刻意绕开宿主那道上限，所以一次
+      // 全仓 ocr_scan 真的可以跑几个小时。工具级这一枚若按「宿主上限」给，就会在一次
+      // 正常的长审查中途把调用掐掉，而模型读到的是宿主那句 `tool call timed out after
+      // Nms`，本包自己的超时归因根本没机会说话。
+      //
+      // 所以判据不是「装得下内部最坏路径」，而是「大到不参与判断、只防永久挂死」：
+      // 一小时，覆盖实测见过的「最长几小时」这一档。
+      const FLOOR = 1 * 60 * 60_000;
+      const host = makeHost();
+      applyPlugin(host);
+      const names = [
+        "ocr_review",
+        "ocr_scan",
+        "ocr_delegate_preview",
+        "ocr_delegate_rule",
+        "ocr_session",
+        "ocr_rules_check",
+        "ocr_llm",
+      ];
+      for (const name of names) {
+        const declared = toolOf(host, name).timeoutMs;
+        expect(declared, `${name} 没声明 timeoutMs`).toBeTypeOf("number");
+        expect(Number.isFinite(declared) && (declared ?? 0) > 0, `${name} 的预算非正`).toBe(true);
+        expect(declared ?? 0, `${name} 的兜底天花太小，会掐掉正常的长审查`).toBeGreaterThanOrEqual(
+          FLOOR,
+        );
+      }
+      // 反向钉子：预算表就是全集。
+      expect(host.registeredTools.map((tool) => tool.name).toSorted()).toStrictEqual(
+        names.toSorted(),
+      );
     });
 
     it("行 config 的 undefined 字段落回 schema 默认（0.1.6 内置底座的等价）", () => {
@@ -1413,6 +1559,9 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         ocrNoAutoUpdate: false,
         // 装法默认两条都给：替他选装法是部署的决定，不是本包的偏好。
         ocrInstallHint: "both",
+        // 1 小时：兜底天花，不是 OCR 的预算（理由见上面「七个工具的工具级墙钟」那条用例）。
+        // 手写字面值，不引常量——期望值一旦引用实现，实现改了它就跟着改，等于没断言。
+        toolTimeoutMs: 3_600_000,
         // 围栏默认 full：0.1.14 起每个 ocr 子进程都请求 danger-full-access，换默认
         // 会静默改变既有部署的权限面（要收窄是部署显式写 inherit 的决定）。
         ocrSandbox: "full",
@@ -3295,8 +3444,11 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       const exported = (await session.execute(
         { repo: "/repo", action: "export", id: "s1" },
         makeExec(),
-      )) as { sessionOutput: string };
+      )) as { sessionOutput: string; hint: string };
       expect(exported.sessionOutput.endsWith(path.join(EXPORT_HTML))).toBe(true);
+      // 导出的 HTML 是给用户看的成品，不是喂回模型的正文：hint 必须点出交付路径（present），
+      // 否则模型多半只把它当一条日志，用户永远看不到那份报告。
+      expect(exported.hint).toContain("present");
       expect(String(host.shell.resolveCalls[0]?.command)).toContain("session export");
       rmSync(path.dirname(exported.sessionOutput), { recursive: true, force: true });
       host.shell.scripts.push({ stdoutText: "[]" });
@@ -3444,6 +3596,65 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
     });
   });
 
+  // ── 前台耗时 ────────────────────────────────────────────────────────────────
+
+  describe("前台长任务在回执里报墙钟耗时（后台不报）", () => {
+    let host: FakeHost;
+    beforeEach(() => {
+      host = makeHost();
+      applyPlugin(host);
+    });
+
+    it("review 前台成功 ⇒ hint 尾部多一句耗时，前缀仍是摘要", async () => {
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const ok = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as { hint: string };
+      const lines = ok.hint.split("\n");
+      expect(lines[0]).toBe(zh.reviewSummaryHint);
+      // 第二行是耗时：stub 的 shell 立刻返回，所以这里只能钉形态（`…为 <数字+单位>（…）`），
+      // 精确数字由 test/duration.test.ts 独立钉住。
+      expect(lines[1]).toMatch(/^本次前台执行的实际墙钟耗时为 \d+[a-z]+/u);
+      // 文案里点明了口径（含子进程起停、不含排队），否则模型会把这段墙钟当成 OCR 的净耗时。
+      expect(lines[1]).toContain("排队");
+    });
+
+    it("scan 前台同样带耗时（两条长任务走同一个 runForeground）", async () => {
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      const ok = (await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as { hint: string };
+      expect(ok.hint.split("\n")[0]).toBe(zh.reviewSummaryHint);
+      expect(ok.hint).toMatch(/本次前台执行的实际墙钟耗时为 \d+[a-z]+/u);
+    });
+
+    it("后台启动回执不带耗时（耗时属于作业记录，模型用 job_output 看）", async () => {
+      const receipt = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: false },
+        makeExec(),
+      )) as Record<string, unknown>;
+      // 后台回执是结构化对象：既没有 hint 位，也不许把耗时塞进别的字段。
+      expect(receipt["hint"]).toBeUndefined();
+      expect(JSON.stringify(receipt)).not.toContain("墙钟");
+      const [proc] = host.shell.procs;
+      proc?.settle();
+      await settledTick();
+    });
+
+    it("解析失败分支不受影响：那条回执是说明字符串，本来就没有 hint 位", async () => {
+      host.shell.scripts.push({ output: `{"error":"auth failed"}` });
+      const failed = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as string;
+      expect(failed).toBeTypeOf("string");
+      expect(failed).toContain("输出解析失败");
+      expect(failed).not.toContain("墙钟");
+    });
+  });
+
   describe("外部 CLI 版本核对：实测值让模型也看得见", () => {
     it("实测与核对版本不同 ⇒ 摘要的 hint 尾部多出那一句，并把两个数字都写出来", async () => {
       const host = await hostWithMeasuredVersion("open-code-review 9.9.9 darwin/arm64\n");
@@ -3459,7 +3670,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(ok.hint).toContain(EXPECTED_OCR_CLI_VERSION);
     });
 
-    it("实测就是核对的那一版 ⇒ hint 一字不多（不给模型编一个没发生过的问题）", async () => {
+    it("实测就是核对的那一版 ⇒ 不给模型编一个没发生过的版本问题", async () => {
       const host = await hostWithMeasuredVersion(VERSION_OK_OUT);
       host.shell.scripts.push({ output: REVIEW_JSON });
       const ok = (await toolOf(host, "ocr_review").execute(
@@ -3468,7 +3679,10 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       )) as {
         hint: string;
       };
-      expect(ok.hint).toBe(zh.reviewSummaryHint);
+      // hint 现在是两段：摘要 + 前台耗时（见「前台耗时」那一组用例）。这条只钉版本那一段——
+      // 版本一致时不许出现任何版本结论，耗时是另一条独立的信息，不是「编出来的问题」。
+      expect(firstLineOf(ok.hint)).toBe(zh.reviewSummaryHint);
+      expect(ok.hint).not.toContain(EXPECTED_OCR_CLI_VERSION);
     });
 
     it("没测过（自检关着又没点检测）⇒ 不报任何版本结论，也不因此少给一份摘要", async () => {
@@ -3481,7 +3695,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       )) as {
         hint: string;
       };
-      expect(ok.hint).toBe(zh.reviewSummaryHint);
+      expect(firstLineOf(ok.hint)).toBe(zh.reviewSummaryHint);
       expect(host.shell.resolveCalls).toHaveLength(1);
     });
 
@@ -3530,14 +3744,17 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(concurrency).toBe("Concurrent group count (OCR --concurrency; unset = OCR native 8)");
       expect(toolOf(host, "ocr_scan").description).toBe(MESSAGES.en.scanToolDescription);
       expect(JSON.stringify(toolOf(host, "ocr_scan").parameters)).toContain("Per-file tool-call");
-      expect(host.sections[0]?.text).toBe(MESSAGES.en.routingText);
+      expect(host.sections[0]?.text).toBe(MESSAGES.en.routingSummary);
+      // 全文不是丢了，而是搬进 skill：语言必须跟着同一份偏好走。
+      expect(host.skillsRegistered[0]?.content).toBe(MESSAGES.en.routingText);
     });
 
     it("locale 未注册或 preference 为中文系 ⇒ 中文默认（未注册不抛）", () => {
       const unset = makeHost();
       applyPlugin(unset);
       expect(toolOf(unset, "ocr_review").description).toBe(MESSAGES.zh.reviewToolDescription);
-      expect(unset.sections[0]?.text).toBe(MESSAGES.zh.routingText);
+      expect(unset.sections[0]?.text).toBe(MESSAGES.zh.routingSummary);
+      expect(unset.skillsRegistered[0]?.content).toBe(MESSAGES.zh.routingText);
       const explicit = makeHost({ locale: { preference: "zh-Hans-CN" } });
       applyPlugin(explicit);
       expect(toolOf(explicit, "ocr_session").description).toBe(MESSAGES.zh.sessionToolDescription);
@@ -3569,7 +3786,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       const ok = (await review.execute({ repo: "/repo", wait: true }, makeExec())) as {
         hint: string;
       };
-      expect(ok.hint).toBe(MESSAGES.en.reviewSummaryHint);
+      expect(firstLineOf(ok.hint)).toBe(MESSAGES.en.reviewSummaryHint);
     });
 
     it("命令构造层的拒绝理由也随 en（绝对路径 / 错类型 / 空清单三类闸判定不变）", async () => {

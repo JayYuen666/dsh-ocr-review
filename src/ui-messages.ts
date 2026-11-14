@@ -16,6 +16,8 @@ import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
 
 /** 本包设置卡产出的全部界面文案。 */
 export interface UiMessages {
+  /** 设置页左侧一级分区的导航名（`settings.section` 的 label）。 */
+  readonly navLabel: string;
   /** 小节标题：「模型」「审查参数」；动作行的标签。 */
   readonly modelSection: string;
   readonly reviewSection: string;
@@ -238,6 +240,7 @@ export type Translate = OfficialTranslateNS<typeof LOCALE_NS_KEY>;
 
 export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
   zh: {
+    navLabel: "ocr 审查",
     modelSection: "模型",
     reviewSection: "审查参数",
     actionsLabel: "动作",
@@ -343,6 +346,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     binaryGuideDismiss: "知道了",
   },
   en: {
+    navLabel: "ocr review",
     modelSection: "Model",
     reviewSection: "Review parameters",
     actionsLabel: "Actions",

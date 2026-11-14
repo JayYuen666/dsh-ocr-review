@@ -82,6 +82,7 @@ import type { CredentialProvider } from "@deepseek-ai/dsh-credentials";
 // 执行与输出用到的载荷（ToolRunContext、ToolOutputDefinition、JsonSchemaNode）一旦在上游
 // 改名或换形状，typecheck 立刻在本包报错，而不是运行时静默注册不上。仍是 type-only——
 // 产物里不留说明符（锁见 test/build-host.test.ts）。
+import { callViewOf } from "./lib/present.ts";
 import type {
   JsonSchemaNode,
   ToolOutputDefinition,
@@ -131,8 +132,10 @@ import {
 // 进会话日志的自制切点一律走这里，裸 slice 会在切点留下孤立高/低代理。
 import { truncateEnd, truncateStart } from "@jayyuen66/dsh-plugin-shared/lib/text";
 import { MESSAGES, format } from "./lib/messages.ts";
+import { foregroundSummaryOf, RAW_ECHO_LIMIT } from "./lib/foreground-summary.ts";
 import { echoRaw, readOutFile, withCoverageDetail } from "./lib/output-file.ts";
 import { containedProbe } from "./lib/probe-guard.ts";
+import { OCR_TOOL_ERROR_CODES, OcrToolError } from "./lib/tool-error.ts";
 import type { OcrReviewMessages } from "./lib/messages.ts";
 import { assertToolOutput, redactKeyMaterial, stripAnsi } from "./lib/output.ts";
 import {
@@ -159,14 +162,11 @@ import {
 import type { OcrBinaryStatus, OcrInstallChannel, OcrInstallPreference } from "./lib/cli.ts";
 import { clampEffort } from "./lib/argv-guard.ts";
 import {
-  parseReviewOutput,
   parsePreviewOutput,
   parseSessionCompare,
   parseDelegatePreview,
   parseDelegateRules,
-  summarizeReview,
 } from "./lib/parse.ts";
-import type { ReviewSummaryView } from "./lib/parse.ts";
 import {
   REVIEW_OUTPUT_SCHEMA,
   PREVIEW_OUTPUT_SCHEMA,
@@ -175,6 +175,7 @@ import {
   TEXT_OUTPUT_SCHEMA,
 } from "./lib/tool-schemas.ts";
 import { ROUTING_NAME, ROUTING_ORDER } from "./lib/routing.ts";
+import { registerRoutingSkill } from "./lib/skill.ts";
 import {
   providersForCard,
   applyProviderSelection,
@@ -254,11 +255,37 @@ const LLM_TEST_TIMEOUT_MS = 90_000;
  *  直跑原生二进制；我们从 shell 起、还要过一层 JS launcher，故放宽到 15 秒。它只在
  *  人按下「检测」时跑，不进任何热路径，因此不做成设置项。 */
 const VERSION_PROBE_TIMEOUT_MS = 15_000;
+/**
+ * 工具级墙钟预算的默认值（rc.2 的 `ToolDefinition.timeoutMs`，由宿主
+ * `@deepseek-ai/dsh-tool-call-timeout-policy` 兑现）。
+ *
+ * **为什么它必须是一个独立声明的部署值，而不能从 `timeoutMinutes` 算出来**：
+ * `timeoutMinutes` 是 **volatile**（卡片上运行期可改），本包每趟执行都现读它；
+ * 而工具级这一枚由宿主在 `tools.register` 时校验并**存成静态数字**，之后每次
+ * execute 只读那一份、绝不重算（`dsh-tools/lib/index.js` 的 `register()` +
+ * `dsh-tool-call-timeout-policy/lib/index.js` 的 `ctx.tools.get(...)?.timeoutMs`）。
+ * 若让它跟着 volatile 改动，卡片上把超时调大、工具级上限却停在旧值，两层就各说一套。
+ *
+ * **它是兜底天花，不是 OCR 的预算**——这一条决定了默认值该有多大。正常时长由
+ * `timeoutMinutes` 管（并且 `timeoutMinutes > 0` 时走 `onExpiry: "none"` + 本包自管
+ * 截止，**刻意绕开宿主 `shell.maxTimeoutMs` 的收敛**，见 lib/run-scope.ts 的
+ * `runExpiry`）。于是这条路径真的可以跑几个小时：一次全仓 `ocr_scan` 在大型仓库上
+ * 就是数小时量级（用户实测见过最长几小时）。
+ *
+ * 所以这一枚只该防「调用永久挂死」，不该参与时长判断。按「宿主默认上限 10 分钟 +
+ * git 探测」算出来的值（早先写过 15 分钟）**是个错**：它会在一次正常的长审查中途
+ * 把调用掐掉，而模型看到的是宿主那句 `tool call timed out after Nms`，读不出是 OCR
+ * 还没跑完、还是插件卡了——本包自己的超时归因（`execTimedOutExplicit`）根本没机会说话。
+ *
+ * 默认 1 小时：覆盖「几小时」这一档实测，同时仍是一条有限的兜底。要跑更久的部署
+ * 直接抬这一枚（它是部署值，改完随重启生效）；前台长审查本来就该优先走
+ * `wait: false` 的后台模式——那条路径启动即返回，根本不经过这条墙钟。
+ */
+const TOOL_TIMEOUT_MS = 1 * 60 * 60_000;
 const STDOUT_MAX_BYTES = 400_000;
-/** 解析失败时回显给模型的原始内容长度上限（UTF-16 码元；已脱敏）。
- *  单位写码元而不是"字符"：本常量喂给 `echoRaw`→`truncateEnd`，那一刀按码元数计
- *  （一张 emoji = 2 枚），写"字符"会把给模型的说明夸大约一倍。 */
-const RAW_ECHO_LIMIT = 500;
+// RAW_ECHO_LIMIT 的正文在 lib/foreground-summary.ts（与前台长任务收尾同一处口径），
+// 这里转出同名一份给本文件其余工具（delegate / session 的解析失败回显）与既有测试用。
+export { RAW_ECHO_LIMIT } from "./lib/foreground-summary.ts";
 /** 评论截断条数的内置默认（旧 BUILTIN_BASE 的那一项）：schema 的 `.default()` 与
  *  「读到坏值时的回退」（readMaxComments）共用这一个数，两处不许各写一份字面量。 */
 const MAX_COMMENTS_DEFAULT = 12;
@@ -761,6 +788,10 @@ interface ForegroundRun {
   truncated: boolean;
   /** 完整输出的写到磁盘位置（截断且执行器给得出写到磁盘路径时才有）。 */
   spillPath: string | undefined;
+  /** 这次前台执行的墙钟毫秒（`host.shell.execute` 起、`result()` 落），供回执报耗时。
+   *  只在前台路径上有值：后台作业的耗时属于作业记录（模型用 job_output 看），
+   *  不在本包的统计范围内（用户裁定：给前台作业加耗时统计，后台运行的不加）。 */
+  elapsedMs: number;
 }
 
 /** 截断说明（stdoutTruncated 的文案 + 可选的写到磁盘的位置），判断依据见 ForegroundRun 的注释。 */
@@ -801,7 +832,11 @@ async function runForeground(
     sandboxPolicy,
   });
   const exec = await host.shell.execute(spec);
+  const startedAt = Date.now();
   const result = await exec.result();
+  // 计时口径：从 execute 交回句柄那一刻起算（进程这时已经起来），到 result() 落定为止。
+  // 不含 resolve 里的沙箱探测与 git 查询——那几段是本包的准备工作，不是 OCR 在跑。
+  const elapsedMs = Date.now() - startedAt;
   expiry.deadline?.cancel();
   const failed = result.exitCode !== 0 || result.timedOut || result.aborted;
   if (failed) {
@@ -809,7 +844,10 @@ async function runForeground(
       // 这条截止是**本包**设的（显式 timeoutMinutes），不是宿主按 maxTimeoutMs 收敛出来的，
       // 所以文案不能说「= min(请求, 宿主上限)」，否则用户会去调宿主那格设置而白忙。
       const minutes = Math.round(spec.timeoutMs / 60_000);
-      throw new Error(format(messages.execTimedOutExplicit, { minutes: String(minutes) }));
+      throw new OcrToolError(
+        OCR_TOOL_ERROR_CODES.timedOut,
+        format(messages.execTimedOutExplicit, { minutes: String(minutes) }),
+      );
     }
     if (result.timedOut) {
       // 报 spec.timeoutMs 而不是 run.timeoutMs：resolve 已按
@@ -817,20 +855,27 @@ async function runForeground(
       // run.timeoutMs 是请求值，timeoutMinutes 留空时为 MAX_TIMEOUT_REQUEST_MS
       // (2^31-1)，照它算会把「实际生效 N 分钟」印成 35791 这种天文数字。
       const minutes = Math.round(spec.timeoutMs / 60_000);
-      throw new Error(format(messages.execTimedOut, { minutes: String(minutes) }));
+      throw new OcrToolError(
+        OCR_TOOL_ERROR_CODES.timedOut,
+        format(messages.execTimedOut, { minutes: String(minutes) }),
+      );
     }
     if (result.aborted) {
-      throw new Error(messages.execAborted);
+      throw new OcrToolError(OCR_TOOL_ERROR_CODES.aborted, messages.execAborted);
     }
     if (result.exitCode === 127) {
-      throw new Error(messages.execNotFound);
+      // 127 是 shell 的「命令不存在」：出路是装 ocr，不是改参数或重试。
+      throw new OcrToolError(OCR_TOOL_ERROR_CODES.binaryMissing, messages.execNotFound);
     }
     const detail = failureDetail(result, messages);
     const head = format(messages.execFailed, { exitCode: String(result.exitCode) });
-    throw new Error(detail === "" ? head : `${head}${messages.detailSeparator}${detail}`);
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.commandFailed,
+      detail === "" ? head : `${head}${messages.detailSeparator}${detail}`,
+    );
   }
   const { text, truncated, spillPath } = result.stdout;
-  return { text, truncated, spillPath };
+  return { text, truncated, spillPath, elapsedMs };
 }
 
 /** 后台任务描述（>5 参数会撞 max-params，收成对象）。 */
@@ -942,7 +987,8 @@ async function startBackground(
   if (registry === undefined) {
     // 没有注册表就不起进程：本包不再自带一张作业表，"起了但谁也看不见、谁也停不掉"
     // 正是本包要消灭的形态。前台（wait:true）路径不受影响。
-    throw new Error(
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.jobsUnavailable,
       "background review unavailable: the host provides no ctx.jobs (load @deepseek-ai/dsh-jobs-local); run it with wait:true instead",
     );
   }
@@ -1136,12 +1182,12 @@ export function requiredKeys(
     return [];
   }
   if (!Array.isArray(raw)) {
-    throw new TypeError(messages.requiredNotArray);
+    throw new OcrToolError(OCR_TOOL_ERROR_CODES.badArguments, messages.requiredNotArray);
   }
   const out: string[] = [];
   for (const key of raw) {
     if (typeof key !== "string") {
-      throw new TypeError(messages.requiredItemNotString);
+      throw new OcrToolError(OCR_TOOL_ERROR_CODES.badArguments, messages.requiredItemNotString);
     }
     out.push(key);
   }
@@ -1156,7 +1202,8 @@ function execArgs(
   messages: OcrReviewMessages,
 ): Record<string, unknown> {
   if (!isRecord(args)) {
-    throw new TypeError(
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.badArguments,
       format(messages.argsMustBeObject, {
         name,
         received: Array.isArray(args) ? "array" : typeof args,
@@ -1173,16 +1220,50 @@ interface ToolSpec {
   parameters: Record<string, unknown>;
   /** 该工具自己的 canonical 输出契约（与 execute 返回逐分支对齐）。 */
   schema: JsonSchemaNode;
+  /**
+   * 并发分类器（rc.2 的 `ToolDefinition.isConcurrencySafe`）。
+   *
+   * 宿主只认**恰好 `true`**：未声明、返回非布尔、抛错一律按 `exclusive` 串行
+   * （`dsh-tools/lib/pipeline.js` 的 `executionMode`）。判据取「并行会不会改变可观察结果」：
+   *  - `ocr_review` / `ocr_scan` 各自在 `mkdtempSync` 造的**私有**临时目录里工作、`finally`
+   *    里回收，互不共享路径 ⇒ 并行安全。
+   *  - `ocr_delegate_preview` / `ocr_delegate_rule` / `ocr_rules_check` / `ocr_llm` 只读规则与
+   *    配置、不起 LLM 会话 ⇒ 并行安全。
+   *  - `ocr_session` 会写 `~/.opencodereview/sessions/<encoded-repo>/<id>.jsonl`，同 repo 的两次
+   *    调用落在**同一父目录**，且 `jsonlWriter.open()` 用 `O_TRUNC` 打开同名文件；并行时后开的
+   *    一次会把前一次正在写的记录截断 ⇒ 串行。
+   * 参数不参与判定：这七条按工具名固定，与入参无关，所以写成常量而不是按 args 分支。
+   */
+  concurrencySafe: boolean;
   run: (args: Record<string, unknown>, exec: ToolExec) => Promise<unknown>;
 }
 
-function define(host: HostCtx, spec: ToolSpec): void {
-  const { name, description, parameters, schema, run } = spec;
+/**
+ * 注册一条工具。
+ *
+ * `config` 只为一件事：把**工具级墙钟预算**（rc.2 的 `ToolDefinition.timeoutMs`，
+ * 由宿主 `@deepseek-ai/dsh-tool-call-timeout-policy` 兑现）钉进注册项。七条工具
+ * 都起 ocr 子进程、共用同一份预算，所以不放进 `ToolSpec` 让每个调用点重复一遍
+ * —— 那七行除了占行数没有信息量，还容易被抄漏一处。
+ *
+ * 预算取 `config.toolTimeoutMs`（**非 volatile** 部署值）：宿主在 `tools.register`
+ * 时校验它是正有限数，之后每次 execute 只读注册时那一份、从不重算。因此它不能
+ * 跟着 `timeoutMinutes`（volatile、卡片运行期可改）走，否则卡片把超时调大、
+ * 工具级上限停在旧值，两层各说一套。
+ */
+function define(host: HostCtx, config: Config, spec: ToolSpec): void {
+  const { name, description, parameters, schema, run, concurrencySafe } = spec;
   const required = requiredKeys(parameters, localeMessages(host));
   host.tools.register({
     name,
     description,
     parameters,
+    isConcurrencySafe: (): boolean => concurrencySafe,
+    // 工具级墙钟：宿主 timeout-policy 按它给每次调用套截止，超时产出 TOOL_TIMEOUT。
+    timeoutMs: config.toolTimeoutMs,
+    // 调用态卡片：规格表在 lib/present.ts（只读参数、不预判结果）。未登记的工名
+    // 交回 undefined，宿主按「无视图」处理——漏一行规格不该让画卡片抛错。
+    presentCall: (rawArgs) => callViewOf(name, isRecord(rawArgs) ? rawArgs : {}),
     output: {
       schema,
       // 不写形参标注：官方 `ToolOutputDefinition.render(args: unknown, value: JsonValue)`
@@ -1198,7 +1279,10 @@ function define(host: HostCtx, spec: ToolSpec): void {
       const values = execArgs(args, name, messages);
       const missing = required.filter((key) => values[key] === undefined);
       if (missing.length > 0) {
-        throw new Error(format(messages.missingRequiredArgs, { name, keys: missing.join(", ") }));
+        throw new OcrToolError(
+          OCR_TOOL_ERROR_CODES.badArguments,
+          format(messages.missingRequiredArgs, { name, keys: missing.join(", ") }),
+        );
       }
       // 出口自检：返回值必须命中该工具自己的 output schema（违规 = 指向工具名的
       // 插件内错误，而不是 harness 深处的 INVALID_TOOL_OUTPUT 丢掉整次结果）。
@@ -1303,6 +1387,15 @@ export interface Config {
   ocrSandbox: OcrSandboxMode;
   /** shell 执行器的 stdout 缓冲上限（字节）：前台与后台共用同一字段。 */
   stdoutMaxBytes: number;
+  /**
+   * 工具级墙钟预算（毫秒，交给宿主 `ToolDefinition.timeoutMs`）。部署级值：改值随重启生效。
+   *
+   * 与 `timeoutMinutes`（本包内部、volatile、卡片可改）不是一回事：这一枚是宿主在工具
+   * 外面套的截止，超时产出 `{ code: 'TOOL_TIMEOUT' }`，与「ocr 自己跑超时」在归因上分开。
+   * 它必须**大于**本包内部一次执行可能达到的最坏耗时（`timeoutMinutes` 与宿主
+   * `shell.maxTimeoutMs` 收敛之后的那个值），否则宿主会先掐断，本包的超时文案永远说不出话。
+   */
+  toolTimeoutMs: number;
 }
 
 /** settings 命名空间与 loader 行 config 共用同一 schema（唯一来源，防漂移）。
@@ -1329,6 +1422,8 @@ const configSchema = Schema.object({
   // 不再走 `jobs.wait`。
   ocrBackgroundMaxMs: Schema.natural().default(OCR_BACKGROUND_MAX_MS),
   stdoutMaxBytes: Schema.natural().min(1).default(STDOUT_MAX_BYTES),
+  // 工具级墙钟：非 volatile（宿主只读注册时那一份），默认值见 TOOL_TIMEOUT_MS 的注释。
+  toolTimeoutMs: Schema.natural().min(1).default(TOOL_TIMEOUT_MS),
   // 默认关：维持上游行为（CLI 的 npm 包装层会自行 `npm i -g` 升到 latest）。
   ocrNoAutoUpdate: Schema.boolean().default(false),
   // 缺省 both：把两条装法都给用户，替他选装法是部署的决定而不是本包的偏好。
@@ -1519,34 +1614,6 @@ function cliStatusPayload(
   };
 }
 
-/**
- * 把版本核对提示追加到摘要的 `hint` 尾部，让模型读得到「这份结果不是按插件核对的版本跑的」。
- *
- * 为什么写在 hint 里而不是新增一枚字段：output schema 是 `additionalProperties: false` +
- * 逐字段 `required`，加一枚要同时动 schema、必填表和 lib/output.ts 的形态闸三处；而这条信息
- * 的全部价值就是「模型读到它」，hint 那段本来就是教模型怎么读这份结果。
- * 没实测值（装载期自检关着、或那条命令跑砸了）就原样交回：不知道就是不知道，
- * 编一句「版本可能不一致」会让模型把没发生过的事转述给用户。
- * @param summary - summarizeReview 的产物。
- * @param measured - 最近一次实测到的外部 CLI 版本；null = 还没测过。
- * @param messages - 文案表。
- * @returns 同一份摘要，或 hint 尾部多了一句的副本。
- */
-function withCliVersionNote(
-  summary: ReviewSummaryView,
-  measured: string | null,
-  messages: OcrReviewMessages,
-): ReviewSummaryView {
-  if (measured === null || measured === EXPECTED_OCR_CLI_VERSION) {
-    return summary;
-  }
-  const note = format(messages.versionMismatch, {
-    actual: measured,
-    expected: EXPECTED_OCR_CLI_VERSION,
-  });
-  return { ...summary, hint: `${summary.hint}\n${note}` };
-}
-
 /** 运行 ocr llm test 校验当前配置（select 后自动验证 / 手动测试共用）。
  *  命令词与七个工具同一解析源（buildLlmTestCommand 走 ocrCommand()：卡片验的那一份与评审
  *  吃的那一份必须同一个二进制），HOME 随 ocrConfigPath 重定向。墙钟与输出上限都是 entry
@@ -1578,7 +1645,8 @@ function effortOf(
     return readEffort(config);
   }
   if (typeof value !== "string") {
-    throw new TypeError(
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.badArguments,
       format(messages.mustBeString, { name: "effort", received: describeValue(value) }),
     );
   }
@@ -1599,7 +1667,10 @@ function waitOf(value: unknown, messages: OcrReviewMessages): boolean {
     return false;
   }
   if (typeof value !== "boolean") {
-    throw new TypeError(format(messages.waitMustBeBoolean, { received: describeValue(value) }));
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.badArguments,
+      format(messages.waitMustBeBoolean, { received: describeValue(value) }),
+    );
   }
   return value;
 }
@@ -1615,7 +1686,8 @@ function previewOf(value: unknown, messages: OcrReviewMessages): boolean {
     return false;
   }
   if (typeof value !== "boolean") {
-    throw new TypeError(
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.badArguments,
       format(messages.boolMustBeBoolean, { name: "preview", received: describeValue(value) }),
     );
   }
@@ -2182,7 +2254,11 @@ export function assertOcrPresent(
   install: string,
 ): void {
   if (status.source === "none") {
-    throw new Error(format(messages.ocrBinaryMissing, { install }));
+    // 工具路径内唯一的「装不上就是装不上」：码与 execFailed 的 127 支同源（binaryMissing）。
+    throw new OcrToolError(
+      OCR_TOOL_ERROR_CODES.binaryMissing,
+      format(messages.ocrBinaryMissing, { install }),
+    );
   }
 }
 
@@ -2202,7 +2278,7 @@ interface PreviewRun {
 async function runReviewPreview(run: PreviewRun): Promise<unknown> {
   const { host, config, args, repo, signal, messages } = run;
   if (args["wait"] !== undefined && args["wait"] !== null && !waitOf(args["wait"], messages)) {
-    throw new Error(messages.previewNeedsForeground);
+    throw new OcrToolError(OCR_TOOL_ERROR_CODES.badArguments, messages.previewNeedsForeground);
   }
   const tmp = mkdtempSync(path.join(tmpdir(), "ocr-review-preview-"));
   const outPath = path.join(tmp, "preview.json");
@@ -2244,7 +2320,7 @@ async function runReviewPreview(run: PreviewRun): Promise<unknown> {
 async function runScanPreview(run: PreviewRun): Promise<unknown> {
   const { host, config, args, repo, signal, messages } = run;
   if (args["wait"] !== undefined && args["wait"] !== null && !waitOf(args["wait"], messages)) {
-    throw new Error(messages.previewNeedsForeground);
+    throw new OcrToolError(OCR_TOOL_ERROR_CODES.badArguments, messages.previewNeedsForeground);
   }
   const tmp = mkdtempSync(path.join(tmpdir(), "ocr-scan-preview-"));
   const outPath = path.join(tmp, "preview.json");
@@ -2293,7 +2369,7 @@ function registerReviewTool(
   // 执行期每次现取，回显文本立即跟随设置页偏好。
   const msgs = localeMessages(host);
   // ocr_review：自驱 diff 审查。
-  define(host, {
+  define(host, config, {
     name: "ocr_review",
     description: msgs.reviewToolDescription,
     parameters: {
@@ -2332,6 +2408,7 @@ function registerReviewTool(
         backgroundFile: { type: "string", description: msgs.paramBackgroundFile },
       },
     },
+    concurrencySafe: true,
     schema: REVIEW_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
@@ -2392,28 +2469,21 @@ function registerReviewTool(
             ledger,
           );
         }
+        let foreground: ForegroundRun;
         try {
-          await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+          foreground = await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
         } catch (error) {
           // 非零退出时 CLI 仍会写出 --output：那里面才有「哪些文件没审成」。
           throw withCoverageDetail(error, outPath, runMsgs);
         }
-        const text = readOutFile(outPath, runMsgs);
-        const parsed = parseReviewOutput(text, runMsgs);
-        if (!parsed.ok) {
-          // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支），
-          // 不报假干净也不假装结构化。
-          return format(runMsgs.parseFailedWithReason, {
-            tool: "ocr",
-            message: parsed.message,
-            limit: String(RAW_ECHO_LIMIT),
-            // 脱敏与截断的次序不变：仍是 echoRaw(原文, 上限)
-            raw: echoRaw(text, RAW_ECHO_LIMIT),
-          });
-        }
-        // summarizeReview 的结构化对象直返（canonical value，不再 stringify 进 {text}）。
-        const summary = summarizeReview(parsed, runMsgs, { maxComments: readMaxComments(config) });
-        return withCliVersionNote(summary, versionSink.value, runMsgs);
+        return foregroundSummaryOf({
+          outPath,
+          elapsedMs: foreground.elapsedMs,
+          toolName: "ocr",
+          measuredVersion: versionSink.value,
+          maxComments: readMaxComments(config),
+          messages: runMsgs,
+        });
       } finally {
         if (tmp !== undefined) {
           rmSync(tmp, { recursive: true, force: true });
@@ -2432,7 +2502,7 @@ function registerScanTool(
 ): void {
   const msgs = localeMessages(host);
   // ocr_scan：无 git diff 的全文件扫描。
-  define(host, {
+  define(host, config, {
     name: "ocr_scan",
     description: msgs.scanToolDescription,
     parameters: {
@@ -2471,6 +2541,7 @@ function registerScanTool(
         rule: { type: "string", description: msgs.paramRule },
       },
     },
+    concurrencySafe: true,
     schema: REVIEW_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
@@ -2529,26 +2600,21 @@ function registerScanTool(
             ledger,
           );
         }
+        let foreground: ForegroundRun;
         try {
-          await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+          foreground = await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
         } catch (error) {
           // 非零退出时 CLI 仍会写出 --output：那里面才有「哪些文件没审成」。
           throw withCoverageDetail(error, outPath, runMsgs);
         }
-        const text = readOutFile(outPath, runMsgs);
-        const parsed = parseReviewOutput(text, runMsgs);
-        if (!parsed.ok) {
-          // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）。
-          return format(runMsgs.parseFailedWithReason, {
-            tool: "ocr scan",
-            message: parsed.message,
-            limit: String(RAW_ECHO_LIMIT),
-            raw: echoRaw(text, RAW_ECHO_LIMIT),
-          });
-        }
-        // 结构化摘要直返（同 ocr_review 的 canonical 契约）。
-        const summary = summarizeReview(parsed, runMsgs, { maxComments: readMaxComments(config) });
-        return withCliVersionNote(summary, versionSink.value, runMsgs);
+        return foregroundSummaryOf({
+          outPath,
+          elapsedMs: foreground.elapsedMs,
+          toolName: "ocr scan",
+          measuredVersion: versionSink.value,
+          maxComments: readMaxComments(config),
+          messages: runMsgs,
+        });
       } finally {
         if (tmp !== undefined) {
           rmSync(tmp, { recursive: true, force: true });
@@ -2565,7 +2631,7 @@ function registerDelegatePreviewTool(
 ): void {
   const msgs = localeMessages(host);
   // ocr_delegate_preview：文件清单 + 模式元数据（零 LLM 消耗）。
-  define(host, {
+  define(host, config, {
     name: "ocr_delegate_preview",
     description: msgs.previewToolDescription,
     parameters: {
@@ -2585,6 +2651,7 @@ function registerDelegatePreviewTool(
         exclude: { type: "array", items: { type: "string" }, description: msgs.paramExcludeShort },
       },
     },
+    concurrencySafe: true,
     schema: PREVIEW_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
@@ -2645,7 +2712,7 @@ function registerDelegateRuleTool(
 ): void {
   const msgs = localeMessages(host);
   // ocr_delegate_rule：规则分组（零 LLM 消耗）。
-  define(host, {
+  define(host, config, {
     name: "ocr_delegate_rule",
     description: msgs.ruleToolDescription,
     parameters: {
@@ -2661,6 +2728,7 @@ function registerDelegateRuleTool(
       },
       required: ["paths"],
     },
+    concurrencySafe: true,
     schema: RULES_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
@@ -2710,7 +2778,7 @@ function registerDelegateRuleTool(
 function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
   const msgs = localeMessages(host);
   // ocr_session：历史评审会话（配合恢复中断的 review 这条链路）。
-  define(host, {
+  define(host, config, {
     name: "ocr_session",
     description: msgs.sessionToolDescription,
     parameters: {
@@ -2739,6 +2807,8 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
         limit: { type: "integer", description: msgs.paramSessionLimit },
       },
     },
+    // 同 repo 的两次 ocr_session 会争同一份 sessions JSONL（O_TRUNC） ⇒ 并行不安全。
+    concurrencySafe: false,
     schema: SESSION_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
@@ -2826,7 +2896,7 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
 
 function registerRulesCheckTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
   const msgs = localeMessages(host);
-  define(host, {
+  define(host, config, {
     name: "ocr_rules_check",
     description: msgs.rulesCheckToolDescription,
     parameters: {
@@ -2839,6 +2909,7 @@ function registerRulesCheckTool(host: HostCtx, config: Config, probe: OcrAvailab
       },
       required: ["path"],
     },
+    concurrencySafe: true,
     schema: TEXT_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
@@ -2868,7 +2939,7 @@ function registerRulesCheckTool(host: HostCtx, config: Config, probe: OcrAvailab
 
 function registerLlmTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
   const msgs = localeMessages(host);
-  define(host, {
+  define(host, config, {
     name: "ocr_llm",
     description: msgs.llmToolDescription,
     parameters: {
@@ -2883,6 +2954,7 @@ function registerLlmTool(host: HostCtx, config: Config, probe: OcrAvailabilityPr
       },
       required: ["action"],
     },
+    concurrencySafe: true,
     schema: TEXT_OUTPUT_SCHEMA,
     run: async (args, exec) => {
       const runMsgs = localeMessages(host);
@@ -2890,7 +2962,8 @@ function registerLlmTool(host: HostCtx, config: Config, probe: OcrAvailabilityPr
       assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       const rawAction = args["action"];
       if (rawAction !== "providers" && rawAction !== "models") {
-        throw new Error(
+        throw new OcrToolError(
+          OCR_TOOL_ERROR_CODES.badArguments,
           format(runMsgs.invalidAction, {
             action: typeof rawAction === "string" ? rawAction : describeValue(rawAction),
             expected: "providers/models",
@@ -3000,12 +3073,16 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
   registerRulesCheckTool(host, config, probe);
   registerLlmTool(host, config, probe);
 
-  // systemPrompt 路由段（正文是文案，随官方 locale 偏好走）。
+  // systemPrompt 路由段（正文是文案，随官方 locale 偏好走）+ 规则全文的虚拟 skill。
+  // 常驻的只有摘要（逐条对应「不做就会走错路」）；全文注册成 skill `ocr-review`，
+  // 模型按需用 skill 工具加载。拆开的理由与两边各放什么见 lib/skill.ts 的头注释。
+  const messages = localeMessages(host);
   host.systemPrompt.section({
     name: ROUTING_NAME,
     order: ROUTING_ORDER,
-    text: localeMessages(host).routingText,
+    text: messages.routingSummary,
   });
+  registerRoutingSkill(host, messages.routingText, messages.skillDescription);
 
   // 设置卡的官方读取接口（Typert Remote）：九条方法经宿主网关暴露给**本 profile 的客户端**。
   // 无条件上线——依赖都由这里交进去；来源校验与鉴权由宿主网关承担。

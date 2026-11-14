@@ -40,7 +40,7 @@ function strOf(value: unknown): string {
 }
 
 /**
- * OCR 1.13.7 的内置 provider 名（`ocr llm providers` 的 NAME 列）。
+ * OCR 1.13.9 的内置 provider 名（`ocr llm providers` 的 NAME 列）。
  *
  * 为什么这枚表是必需的：OCR 的 provider 解析是**按名字**分桶的（resolver.go 的
  * tryProviderConfig：`LookupProvider(name)` 命中就读 `providers.<name>`，否则读

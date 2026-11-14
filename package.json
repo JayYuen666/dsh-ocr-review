@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-ocr-review",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "dsh 工作区代码审查插件：把 open-code-review（ocr CLI）封装为 7 个模型工具 + 设置卡片（从宿主设置服务的 provider 清单选 provider/model 应用到 OCR 配置）。",
   "keywords": [
     "ai-code-review",
@@ -100,6 +100,7 @@
     "@deepseek-ai/dsh-session-projection": "0.2.2-rc.2",
     "@deepseek-ai/dsh-settings": "0.2.2-rc.2",
     "@deepseek-ai/dsh-shell": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-skill": "0.2.2-rc.2",
     "@deepseek-ai/dsh-subprocess": "0.2.2-rc.2",
     "@deepseek-ai/dsh-subprocess-local": "0.2.2-rc.2",
     "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.2",
@@ -126,15 +127,16 @@
     "vitest": "catalog:"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-atomic-write": "^0.2.2-rc.1",
-    "@deepseek-ai/dsh-credentials": "^0.2.2-rc.1",
-    "@deepseek-ai/dsh-home-paths": "^0.2.2-rc.1",
-    "@deepseek-ai/dsh-typert-protocol": "^0.2.2-rc.1",
+    "@deepseek-ai/dsh-atomic-write": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-credentials": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-error": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-home-paths": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "^0.2.2-rc.2",
     "@deepseek-ai/schemastery": "^3.19.0"
   },
   "icon": "icon.svg",
   "engines": {
-    "dsh": "^0.2.2-rc.1",
+    "dsh": "^0.2.2-rc.2",
     "node": ">=24.9.0"
   },
   "dsh": {
@@ -147,5 +149,5 @@
       "immediately": true
     }
   },
-  "ocrCliVersion": "1.13.7"
+  "ocrCliVersion": "1.13.9"
 }

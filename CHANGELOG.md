@@ -6,6 +6,36 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.18
+
+外部 `ocr` 契约抬到 `1.13.9`；设置页多出一级分区与官方图标；工具结果带上可判的错误码、调用态卡片与前台耗时；常驻提示词缩成摘要、规则全文改为按需加载的虚拟 skill。对外工具与 Remote 方法名单不变。
+
+### Added
+
+- **工具错误码**：新增 `lib/tool-error.ts` 的 `OcrToolError extends HarnessError` 与七枚码（`OCR_BINARY_MISSING` / `OCR_TIMED_OUT` / `OCR_ABORTED` / `OCR_COMMAND_FAILED` / `OCR_BAD_ARGUMENTS` / `OCR_OUTPUT_SHAPE` / `OCR_JOBS_UNAVAILABLE`），`host.ts` 的抛错点逐处换成它（唯一保留 `new Error` 的是 `resolveHost` 的装载期守卫——那不是工具失败）。理由：宿主 `errorInfo()` 判的是 `error instanceof HarnessError`，判不中时 `ToolFailure.info` 整块消失且静默；类身份按模块实例算，所以 `@deepseek-ai/dsh-error` 必须走 `peerDependencies` 才与宿主同一份，写进 `devDependencies` 会被 rolldown 内联成第二个类。`lib/output.ts` 的两处校验失败记 `OCR_OUTPUT_SHAPE` 而不是 `OCR_BAD_ARGUMENTS`：错在本包自己的出口，模型改参数救不了。
+- **调用态卡片**：新增 `lib/present.ts`，七个工具各声明 `presentCall`（review/scan/delegate_preview 是 `search`，delegate_rule/session/rules_check 是 `read`，llm 是 `other`），标题取参数里已有的值、取不到回落工具名。此前七个工具在时间线上都是同一种默认卡片。
+- **虚拟 skill `ocr-review`**：`lib/skill.ts` 把路由规则的**全文**注册成虚拟 skill，常驻 system prompt 只留摘要（`routingSummary`）。规则原文中文由 2694 B 缩到 1215 B、英文 3028 B 缩到 1388 B。`ctx.skills` 是可选服务（不进 `inject`）：精简 profile 没装 `dsh-skill` 时照常装配，只是全文按需加载不了。
+- **前台作业耗时**：新增 `lib/duration.ts` 的 `formatDuration` 与 `lib/foreground-summary.ts` 的 `foregroundSummaryOf`，`ocr_review` / `ocr_scan` 的前台回执多一句实测墙钟（`elapsedNote`）。**后台作业不加**：后台的时长由 `job_output` 的轮询节奏决定，写进回执只会误导。
+- **设置页一级分区与图标**：`settings.section` 注册 `id: "ocr-review"`、`order: 32`（排在宿主既有的 account/general/models/plugins/agent-presets 之后），`settings.section.icon` 用同一 id 挂官方标记。两个 id 必须逐字相同——对不上时宿主一条都不渲染，症状是分区还在、图标一直是默认齿轮。`plugins.bundle.config` 那一份保留：插件详情页与设置页两处都显示同一张卡片。
+
+### Changed
+
+- **OCR 契约抬到 `1.13.9`**：`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`、两份 README、随包文档与 `THIRD_PARTY_NOTICES` 统一到 `1.13.9`（readme-parity 门禁对齐）。逐条核对上游 `v1.13.7..v1.13.9` 后确认本包不受破坏性变更影响：1.13.8 移除 `--tools`（本包从未使用）、`session list --json` 的 `null` 改 `[]`（本包两种都认）、manifest 新增 `coverage.excluded` 键（本包只读五个既有键，多出的被忽略）、MiniMax 模型名单收缩（provider 名单零变化，本包那张表逐名相同）、scan 的 `PLAN_TASK` 预检实现搬家（200 行语义未变）。真二进制实测：`session list --json` 对无 sessions 目录的仓库答 `[]`，`review --help` / `scan --help` 都不再有 `--tools`。
+- **工具级墙钟改成部署值**：新增 `toolTimeoutMs`（非 volatile，默认 3600000），由宿主 `tools.register` 时读一次。**它是兜底天花，不是 OCR 的时长预算**——`timeoutMinutes > 0` 时本包走 `onExpiry: "none"` 加自管截止、刻意绕开 `shell.maxTimeoutMs`，一次整仓 `ocr_scan` 跑几个小时是正常的。此前按「宿主 shell 上限 10 分钟 + git 探测 10 秒」算出的 15 分钟会在一次正常的长审查中途掐断，而模型只看得到宿主那句 `tool call timed out after Nms`、看不到本包的归因。
+- **会话导出的回执改成 present 指引**：`sessionExportHint` 不再只说「路径在 sessionOutput 里，直接用浏览器打开」，而是点名 `present` 工具（把路径写进 `present` 的 `files`，用户才能在回合结束后一键打开）。
+- **宿主开发基线抬到 `0.2.2-rc.2`**：`devDependencies` 整组 `@deepseek-ai/dsh-*` 抬到 `0.2.2-rc.2`，补 `@deepseek-ai/dsh-skill`；`peerDependencies` 与 `engines.dsh` 的支持窗口由 `^0.2.2-rc.1` 收到 `^0.2.2-rc.2`，并新增 `@deepseek-ai/dsh-error` 为 optional peer。
+
+### Fixed
+
+- **两处注释与数值过期**：两份 README 的部署表把 `toolTimeoutMs` 默认值写成 `21600000`（6 小时，是更早一版的取值），与 `host.ts` 的 1 小时不符，已改正；`test/host.test.ts` 里同时留着「默认 15 分钟」和「1 小时」两段互相矛盾的注释，已删掉前者。
+- **过期时间戳的 pnpm-lock 与 catalog**：`pnpm-workspace.yaml` 由根 `sync` 重新投影，`pnpm-lock.yaml` 随 `pnpm install --lockfile-only` 重解（+18 行，只有 `@deepseek-ai/dsh-error` 与 `@deepseek-ai/dsh-skill` 两条新依赖）。
+
+### Verification
+
+- `pnpm run check dsh-ocr-review` 全绿（typecheck × 5 project、oxlint 0/0、oxfmt、两个 bundle 重建、`vitest run --coverage` 四项 100、噪点 0）。
+- 变异测试逐条命中：图标与分区 id 改成不同值 → 门禁红；`host.js` 的 `@deepseek-ai/dsh-error` 说明符改成不存在的名字 → 门禁红；工具级墙钟改回 15 分钟 → 期望表红。
+- OCR 侧三条行为变更用真二进制核对（构建 `v1.13.9` 源码树后 `session list --json` 答 `[]`、`--tools` 已不存在）；版本不符只作为提示报出，从不中断评审。
+
 ## 0.1.17
 
 设置卡的下拉候选与说明浮层不再漂到浏览器最左边；shared 抬到 `^0.2.8`（含运行时几何自检），CI 的 action 钉版升到最新。对外工具与 Remote 方法名单不变。

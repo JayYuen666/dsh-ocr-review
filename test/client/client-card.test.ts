@@ -124,6 +124,10 @@ const CARD_SLOT = "plugins.bundle.config";
 const BADGE_SLOT = "plugins.detail.badge";
 const SECTION_SLOT = "plugins.detail.section";
 const ACTIVATION_SLOT = "plugins.bundle.activation";
+// 设置页一级分区的两条槽（导航行 + 它的图标）。与上面四条同属「注入的槽名」清单：
+// 槽位被改名的症状是那块表面静默不出现，所以这六条一起断言。
+const SETTINGS_SECTION_SLOT = "settings.section";
+const SETTINGS_SECTION_ICON_SLOT = "settings.section.icon";
 
 // ── 最小 document 替身（node 环境没有 jsdom）────────────────────────────────
 // apply 的样式 effect 只用到 createElement / head.append / remove 三件事，
@@ -519,7 +523,15 @@ describe("apply 的官方 locale 接线", () => {
     // 表单按 **profile 条目 id** 取（0.1.7 起设置命名空间即条目 id），本包那一行是
     // cordis.patch.yml 里的不带前缀的 id `ocr-review`（和下面装配那条用例用同一个判断）。
     expect(harness.formEntryIds).toStrictEqual([PLUGIN_ENTRY_ID]);
-    expect(harness.slots).toStrictEqual([CARD_SLOT, BADGE_SLOT, SECTION_SLOT, ACTIVATION_SLOT]);
+    // 六个槽：插件页卡片、详情页徽章、详情页区块、启用指引，加上设置页一级分区与它的导航图标。
+    expect(harness.slots).toStrictEqual([
+      CARD_SLOT,
+      BADGE_SLOT,
+      SECTION_SLOT,
+      ACTIVATION_SLOT,
+      SETTINGS_SECTION_SLOT,
+      SETTINGS_SECTION_ICON_SLOT,
+    ]);
     // 官方类型化 register：一次调用带齐两语，故 (命名空间, locale) 的展开结果与旧的两份
     // 每种语言的注册逐字相同——"两种语言都注册到本包命名空间"这一条没有松动。
     expect(
@@ -548,7 +560,7 @@ describe("apply 的官方 locale 接线", () => {
     );
     // 三个 effect：apply claim + 样式 + locale 字典（locale 字典随 effect 回收）。
     expect(harness.effects).toHaveLength(3);
-    expect(harness.slotCleanups).toHaveLength(4);
+    expect(harness.slotCleanups).toHaveLength(6);
     expect(document.head.querySelector(CARD_STYLE_SELECTOR)).not.toBeNull();
     harness.cleanSlots();
     expect(harness.payloadOf()).toBeNull();
@@ -599,14 +611,16 @@ describe("apply 的官方 locale 接线", () => {
     // 解析；反过来也**不硬抄**那串包名——硬抄一个错值就会像之前那样一路绿到页面上什么都不渲染。
     // 这里只留反向漂移钉：key 必须是非空字符串，且绝不能再退回裸条目 id `ocr-review`
     //（installed dsh-client-ui-renderer/lib/client.js:1154 逐字相等，退回 = 卡片静默消失）。
-    expect(harness.slotDescs).toHaveLength(4);
-    // 四条注册逐个点名（顺序即 apply 里的注册顺序）：槽位被改名的症状是那块表面静默
+    expect(harness.slotDescs).toHaveLength(6);
+    // 六条注册逐个点名（顺序即 apply 里的注册顺序）：槽位被改名的症状是那块表面静默
     // 不出现，比只断言条数更能第一时间红。
     expect(harness.slotDescs.map((one) => one.name)).toStrictEqual([
       CARD_SLOT,
       BADGE_SLOT,
       SECTION_SLOT,
       ACTIVATION_SLOT,
+      SETTINGS_SECTION_SLOT,
+      SETTINGS_SECTION_ICON_SLOT,
     ]);
     // 两条 keyed 槽（卡片、启用指引）必须同键，且那个键既不是空串也不是裸条目 id：
     // renderer 按逐字相等匹配 entryKey，退回不带前缀的 id 就等于让表面静默消失。
@@ -618,7 +632,7 @@ describe("apply 的官方 locale 接线", () => {
     expect(cardKey).not.toBe("");
     expect(cardKey).not.toBe(PLUGIN_ENTRY_ID);
     // disposer 只 unregister：0.1.7 的 ConfigForm 没有 dispose，跑到绊线就抛（→ 用例红）。
-    expect(harness.slotCleanups).toHaveLength(4);
+    expect(harness.slotCleanups).toHaveLength(6);
     harness.cleanSlots();
     expect(harness.disposedOf()).toBe(0);
   });

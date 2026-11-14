@@ -41,16 +41,25 @@ const PKG_NAME = (
 const PKG_DIR = path.resolve(import.meta.dirname, "..");
 
 /**
- * 本包注入的四个槽名。字面量提出来是因为它们在这里要被**逐个点名**断言：槽名和 key
+ * 本包注入的六个槽名。字面量提出来是因为它们在这里要被**逐个点名**断言：槽名和 key
  * 一样，写错的后果都是那块表面静默不出现，而复用同一个串才让"改名"这件事立刻变红。
- * 与 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts 的
- * `SlotMap` 声明逐字一致（keyed：`plugins.bundle.config`、`plugins.bundle.activation`；
- * list：`plugins.detail.badge`、`plugins.detail.section`）。
+ * 与 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts 与
+ * dsh-client-ui-settings/lib/types/client/contract/slots.d.ts 的 `SlotMap` 声明逐字一致
+ * （keyed：`plugins.bundle.config`、`plugins.bundle.activation`；
+ * list：`plugins.detail.badge`、`plugins.detail.section`、
+ * `settings.section`、`settings.section.icon`）。
+ *
+ * 后两个是设置页的一级分区与它的导航图标：两者靠**同一个 id** 对上
+ * （`settings.section.icon` 的 doc：「unmatched ids never render」），所以那一位单独断言。
  */
 const CARD_SLOT = "plugins.bundle.config";
 const BADGE_SLOT = "plugins.detail.badge";
 const SECTION_SLOT = "plugins.detail.section";
 const ACTIVATION_SLOT = "plugins.bundle.activation";
+const SETTINGS_SECTION_SLOT = "settings.section";
+const SETTINGS_SECTION_ICON_SLOT = "settings.section.icon";
+/** 分区在导航里的位次（src 的 `SECTION_ORDER`）。独立写死：实现里改了它而这里没改就该红。 */
+const EXPECTED_SECTION_ORDER = 32;
 
 /**
  * 那条 link 是不是指向本检出：`link:` 这类说明符按 profile 所在目录归一（pnpm 写的是
@@ -144,6 +153,12 @@ interface FormTrace {
 interface SlotRecord {
   readonly name: string;
   readonly key: string | undefined;
+  /** list 槽的寻址位（`settings.section` / `settings.section.icon` 靠它配对）。 */
+  readonly id: string | undefined;
+  /** 导航位次（只有 list 槽会带）。 */
+  readonly order: number | undefined;
+  /** 导航文案（thunk：宿主每次读都重新求值，切语言时跟着变）。 */
+  readonly label: (() => string) | undefined;
   readonly payload: unknown;
   readonly cleanup: () => void;
   /** disposer 是否被跑过：装配契约要求每条注册都能被宿主回收。 */
@@ -220,12 +235,18 @@ function makeHost(form: FakeForm): { ctx: unknown; trace: HostTrace } {
       register: (desc: {
         name: string;
         key?: string;
+        id?: string;
+        order?: number;
+        label?: string | (() => string);
         inject?: () => Record<string, unknown>;
       }): (() => void) => {
         const payload = desc.inject?.() ?? null;
         const record: SlotRecord = {
           name: desc.name,
           key: desc.key,
+          id: desc.id,
+          order: desc.order,
+          label: typeof desc.label === "function" ? desc.label : undefined,
           payload,
           released: false,
           cleanup: () => {
@@ -382,7 +403,14 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     assert.deepEqual(trace.entryIds, bareIds, "只取本条目那张共享表单，且只取一次");
 
     // 四个贡献点逐个点名（顺序即 src 的注入顺序）：改名或漏注的症状都是那块表面静默不出现。
-    assert.deepEqual(trace.slotNames, [CARD_SLOT, BADGE_SLOT, SECTION_SLOT, ACTIVATION_SLOT]);
+    assert.deepEqual(trace.slotNames, [
+      CARD_SLOT,
+      BADGE_SLOT,
+      SECTION_SLOT,
+      ACTIVATION_SLOT,
+      SETTINGS_SECTION_SLOT,
+      SETTINGS_SECTION_ICON_SLOT,
+    ]);
     // 每条 register 的 desc.name 必须正好落在它被注入的那个槽上：错槽 = 内容进了别人的槽，
     // 同样是静默不出现，而 inject 与 register 分家后只有这条能把两者钉在一起。
     assert.deepEqual(
@@ -405,6 +433,24 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     assert.equal(slotOf(trace, ACTIVATION_SLOT).key, card.key);
     assert.equal(slotOf(trace, BADGE_SLOT).key, undefined);
     assert.equal(slotOf(trace, SECTION_SLOT).key, undefined);
+    // 一级分区与它的图标都是 list 槽：靠 id 寻址，带 key 等于把自己限定在某个 subject 之外。
+    assert.equal(slotOf(trace, SETTINGS_SECTION_SLOT).key, undefined);
+    assert.equal(slotOf(trace, SETTINGS_SECTION_ICON_SLOT).key, undefined);
+    // 两条注册的 id 必须逐字相同（宿主只按它对图标与分区），而分区 id 又是本包的裸条目 id。
+    assert.equal(
+      slotOf(trace, SETTINGS_SECTION_ICON_SLOT).id,
+      slotOf(trace, SETTINGS_SECTION_SLOT).id,
+      "图标与分区必须用同一个 id，对不上时宿主一条都不渲染",
+    );
+    assert.equal(slotOf(trace, SETTINGS_SECTION_SLOT).id, bareIds[0]);
+    // 导航位次也要对上：两个槽同 order（宿主的导航行按它排），且排在本包声明的 32。
+    // 位次撞车时宿主不报错，只是两页按注册顺序先后 —— 那才是「看起来没问题」的坏法。
+    assert.equal(slotOf(trace, SETTINGS_SECTION_SLOT).order, EXPECTED_SECTION_ORDER);
+    assert.equal(slotOf(trace, SETTINGS_SECTION_ICON_SLOT).order, EXPECTED_SECTION_ORDER);
+    // label 必须是 thunk 而不是算好的字符串：宿主每次读导航行都重新求值，切语言才跟着变。
+    const { label } = slotOf(trace, SETTINGS_SECTION_SLOT);
+    assert.equal(typeof label, "function", "label 必须是 thunk，写死字符串切语言时不会更新");
+    assert.equal(label?.(), "navLabel", "导航文案走本包字典的 navLabel 键");
   });
 
   it("写入仍落到那张按裸条目 id 取回的共享表单；disposer 只注销、不 dispose", async () => {
@@ -427,8 +473,8 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
       [["effort", "low"]],
       "改的是槽 key，不是表单来源：写入仍要落回 configForms.get(裸条目 id) 那张表单",
     );
-    // 四个槽各回收一次：disposer 存在、可调用，且一次都不碰 provider 持有的共享表单。
-    assert.equal(trace.slots.length, 4);
+    // 六个槽各回收一次：disposer 存在、可调用，且一次都不碰 provider 持有的共享表单。
+    assert.equal(trace.slots.length, 6);
     for (const one of trace.slots) {
       one.cleanup();
       assert.equal(one.released, true, `${one.name} 的 disposer 必须可调用`);

@@ -53,7 +53,7 @@ export interface DshProvider {
  * 对 OCR config_cmd.go:796 的 "Protocol values: anthropic, anthropic-bedrock,
  * openai, openai-responses"）：openai-completions 与 OCR 的 openai 是同一条
  * OpenAI Chat Completions 线协议；anthropic-messages 即 OCR 的 anthropic。
- * rc.2 新增的 google-generative-ai 不在下表：OCR 1.13.7 的 protocol 白名单没有
+ * rc.2 新增的 google-generative-ai 不在下表：OCR 1.13.9 的 protocol 白名单没有
  * Gemini 原生协议，这一档落进「表外值」由写侧拒绝，不静默降级成 openai。
  * 此前「非 openai-responses 一律 openai」的二值映射会把 anthropic-messages 的
  * 端点按 OpenAI 线协议打出去——select 成功、OCR 调不通。表外值透传，让
