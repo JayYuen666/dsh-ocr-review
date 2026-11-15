@@ -1,8 +1,9 @@
 // ocr-review 设置卡片（Client 半，build-client.mjs 打包为 client.js）。
 // 功能：经官方 Typert Remote（src/remote.ts）从宿主配置服务列出可选 provider+model，
 // 选择后写到外部 ocr CLI 的 config.json（key 走 api_key_cmd 动态读取，不写到磁盘明文）；
-// 附带 llm test 验证、明文 key 一键迁移，以及 effort/language/autoVerify/ocrConfigPath
-// 设置行（保存条暂存-写入）。React 一律 createElement；卡片注册进 keyed
+// 附带 llm test 验证、明文 key 一键迁移，以及 effort/language/autoVerify/maxComments/
+// timeoutMinutes/ocrConfigPath 与 scanMaxTokens/scanConcurrency 设置行（保存条暂存-写入）。
+// React 一律 createElement；卡片注册进 keyed
 // plugins.bundle.config 槽的 **bundle 包名**键（`@jayyuen66/dsh-ocr-review`，见 BUNDLE_PKG），
 // 不是裸条目 id。
 //
@@ -49,7 +50,6 @@ import type {
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 import {
-  CARD_UI_CSS,
   CardForm,
   Field,
   NumberField,
@@ -60,9 +60,11 @@ import {
   ToggleField,
   claimApply,
   diffTouched,
+  ensureCardUiCss,
   fieldOf,
   isRecord,
   splitHint,
+  useInvalidFields,
 } from "@jayyuen66/dsh-plugin-shared/client";
 import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
 import { OCR_BUNDLE_PACKAGE } from "../lib/remote-shape.ts";
@@ -417,7 +419,16 @@ export interface OcrCardDeps {
   maxCommentsValue: number;
   timeoutMinutesValue: number;
   ocrConfigPathValue: string;
+  /** ocr_scan 的缺省深度（见 host.ts 的 scanMaxTokens / scanConcurrency）。 */
+  scanMaxTokensValue: number;
+  scanConcurrencyValue: number;
   dirty: boolean;
+  /** 有字段越界：整张卡不给保存（越界草稿不进 touched，只看差异会以为什么都不用存）。 */
+  blocked: boolean;
+  /** 保存/撤销后自增一次，把数字框里的越界草稿清回已提交值。 */
+  resetToken: number;
+  /** 数字框把「本字段现在越界」上报给卡片。 */
+  reportInvalid: (field: string, invalid: boolean) => void;
   settingsBusy: boolean;
   saveError: string | null;
   onPickProvider: (name: string) => void;
@@ -1007,6 +1018,10 @@ export function buildSettingsSection(
     step: 1,
     invalidHint: t("outOfRange"),
     disabled: !writable,
+    resetToken: deps.resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      deps.reportInvalid("maxComments", invalid);
+    },
     onChange: (next: number | undefined): void => {
       setField("maxComments", next);
     },
@@ -1020,6 +1035,10 @@ export function buildSettingsSection(
     step: 1,
     invalidHint: t("outOfRange"),
     disabled: !writable,
+    resetToken: deps.resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      deps.reportInvalid("timeoutMinutes", invalid);
+    },
     onChange: (next: number | undefined): void => {
       setField("timeoutMinutes", next);
     },
@@ -1039,9 +1058,10 @@ export function buildSettingsSection(
   });
   const saveRow = createElement(SaveBar, {
     dirty: deps.dirty,
+    blocked: deps.blocked,
     writable,
     busy: deps.settingsBusy,
-    error: deps.saveError,
+    error: deps.saveError ?? (deps.blocked ? t("invalidFields") : null),
     saveLabel: t("save"),
     savingLabel: t("saving"),
     revertLabel: t("revert"),
@@ -1086,6 +1106,54 @@ export interface AdminSectionProps {
   onAuthModelChange: (value: string) => void;
   onCheckAuth: () => void;
   onUseChatGpt: () => void;
+}
+
+/** 扫描深度小节：两枚 volatile（改完下一次 ocr_scan 就生效）+ 一段说明这两条
+ *  只影响 ocr_scan 的缺省值、模型显式传值时以模型为准。
+ *
+ *  为什么要单独一节而不是塞进「审查参数」：那一节里的 effort/timeoutMinutes 作用在
+ *  ocr_review 上，混在一起读会让人以为 maxTokens 也管评审。 */
+function buildScanSection(
+  deps: OcrCardDeps,
+  writable: boolean,
+  setField: (field: string, value: unknown) => void,
+): ReactNode {
+  const { t } = deps;
+  const tokensRow = createElement(NumberField, {
+    label: t("scanMaxTokensLabel"),
+    ...splitHint(t("scanMaxTokensHint")),
+    field: "scanMaxTokens",
+    value: deps.scanMaxTokensValue,
+    ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
+    step: 1,
+    invalidHint: t("outOfRange"),
+    disabled: !writable,
+    resetToken: deps.resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      deps.reportInvalid("scanMaxTokens", invalid);
+    },
+    onChange: (next: number | undefined): void => {
+      setField("scanMaxTokens", next);
+    },
+  });
+  const concurrencyRow = createElement(NumberField, {
+    label: t("scanConcurrencyLabel"),
+    ...splitHint(t("scanConcurrencyHint")),
+    field: "scanConcurrency",
+    value: deps.scanConcurrencyValue,
+    ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
+    step: 1,
+    invalidHint: t("outOfRange"),
+    disabled: !writable,
+    resetToken: deps.resetToken,
+    onInvalidChange: (invalid: boolean): void => {
+      deps.reportInvalid("scanConcurrency", invalid);
+    },
+    onChange: (next: number | undefined): void => {
+      setField("scanConcurrency", next);
+    },
+  });
+  return createElement(Section, { title: t("scanSection") }, tokensRow, concurrencyRow);
 }
 
 function buildMcpAdmin(props: AdminSectionProps): ReactNode {
@@ -1429,6 +1497,8 @@ export interface SaveDraftDeps {
   t: Translate;
   value: Record<string, unknown>;
   touched: Record<string, unknown>;
+  /** 有字段越界：越界草稿没进 touched，这次提交会把它静默丢掉 —— 直接不提交。 */
+  blocked: boolean;
   setTouched: (next: Record<string, unknown>) => void;
   setSettingsBusy: (busy: boolean) => void;
   setSaveError: (message: string | null) => void;
@@ -1442,7 +1512,7 @@ export interface SaveDraftDeps {
 export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   const { t, value, touched } = deps;
   const keys = diffTouched(touched, value);
-  if (keys.length === 0) {
+  if (keys.length === 0 || deps.blocked) {
     return;
   }
   deps.setSettingsBusy(true);
@@ -1491,6 +1561,8 @@ interface DraftFields {
   maxCommentsValue: number;
   timeoutMinutesValue: number;
   ocrConfigPathValue: string;
+  scanMaxTokensValue: number;
+  scanConcurrencyValue: number;
 }
 
 function draftFieldsOf(
@@ -1506,6 +1578,9 @@ function draftFieldsOf(
     maxCommentsValue: numOf(eff("maxComments", 12), 12, COUNT_SCHEMA),
     timeoutMinutesValue: numOf(eff("timeoutMinutes", 0), 0, COUNT_SCHEMA),
     ocrConfigPathValue: strOf(eff("ocrConfigPath", "")),
+    // 0 = 「不传该 flag、用 OCR 模板默认」，是合法初值而不是「未设置」。
+    scanMaxTokensValue: numOf(eff("scanMaxTokens", 0), 0, COUNT_SCHEMA),
+    scanConcurrencyValue: numOf(eff("scanConcurrency", 0), 0, COUNT_SCHEMA),
   };
 }
 
@@ -1642,6 +1717,67 @@ function useMcpPanel(
   };
 }
 
+/** 设置草稿那一段的全部状态与落态口（`OcrCard` 只负责把它们摆进 deps）。 */
+interface SettingsDrafts {
+  touched: Record<string, unknown>;
+  setTouched: (next: Record<string, unknown>) => void;
+  settingsBusy: boolean;
+  setSettingsBusy: (busy: boolean) => void;
+  saveError: string | null;
+  setSaveError: (message: string | null) => void;
+  /** 有未保存的改动（含越界字段：越界那格同样「还没写出去」）。 */
+  dirty: boolean;
+  /** 有字段越界：越界草稿不进 touched，这次提交会把它静默丢掉，所以整张卡不给保存。 */
+  blocked: boolean;
+  /** 保存/撤销后自增一次，把数字框里的越界草稿清回已提交值。 */
+  resetToken: number;
+  /** 数字框把「本字段现在越界」上报进来。 */
+  reportInvalid: (field: string, invalid: boolean) => void;
+  setField: (field: string, draft: unknown) => void;
+  discard: () => void;
+}
+
+/**
+ * 设置行（effort/language/autoVerify/configPath + maxComments/timeoutMinutes 两个数字行
+ * + scan 深度两个数字行）的草稿状态。
+ *
+ * 越界那两位（`onInvalidChange` / `resetToken`）与 `NumberField` 配套：它对越界草稿**不调
+ * `onChange`**，越界值因此根本不进 `touched` —— 只看「草稿 vs 已提交值」的门禁会以为什么都
+ * 没改，用户点保存时其余字段写出去、越界那格静默丢掉。抽成 hook 是为了让 `OcrCard` 的
+ * 行数留在这个仓的函数长度上限内（判据与 lesson-loop 的同名两处一致）。
+ */
+function useSettingsDrafts(value: Record<string, unknown>): SettingsDrafts {
+  const [touched, setTouched] = useState<Record<string, unknown>>({});
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // 越界集与重置信号由 shared 的 `useInvalidFields()` 提供（六个仓共用同一套判定）。
+  const invalid = useInvalidFields();
+  const { blocked, resetToken, reportInvalid } = invalid;
+  const dirty = diffTouched(touched, value).length > 0;
+  const setField = (field: string, draft: unknown): void => {
+    setTouched((prev) => ({ ...prev, [field]: draft }));
+  };
+  const discard = (): void => {
+    setTouched({});
+    setSaveError(null);
+    invalid.clear();
+  };
+  return {
+    touched,
+    setTouched,
+    settingsBusy,
+    setSettingsBusy,
+    saveError,
+    setSaveError,
+    dirty,
+    blocked,
+    resetToken,
+    reportInvalid,
+    setField,
+    discard,
+  };
+}
+
 /** 管理区的状态与动作（MCP 配置 + ChatGPT 登录态/切换）；OcrCard 只负责摆位置。 */
 function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState {
   const mcp = useMcpPanel(reader, t);
@@ -1772,18 +1908,9 @@ function OcrCard(props: CardSlotProps): ReactNode {
     effectiveModel,
   };
 
-  // 设置行（effort/language/autoVerify）。
-  const [touched, setTouched] = useState<Record<string, unknown>>({});
-  const [settingsBusy, setSettingsBusy] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const dirty = diffTouched(touched, value).length > 0;
-  const setField = (field: string, draft: unknown): void => {
-    setTouched((prev) => ({ ...prev, [field]: draft }));
-  };
-  const discard = (): void => {
-    setTouched({});
-    setSaveError(null);
-  };
+  const drafts = useSettingsDrafts(value);
+  const { touched, settingsBusy, saveError, dirty, blocked, resetToken, reportInvalid } = drafts;
+  const { setField, discard } = drafts;
 
   const deps: OcrCardDeps = {
     t,
@@ -1801,7 +1928,10 @@ function OcrCard(props: CardSlotProps): ReactNode {
     binary: data?.ocrBinary ?? null,
     probeMsg,
     ...draftFieldsOf(touched, value),
-    dirty,
+    dirty: dirty || blocked,
+    blocked,
+    resetToken,
+    reportInvalid,
     settingsBusy,
     saveError,
     onPickProvider: pickProvider,
@@ -1819,24 +1949,26 @@ function OcrCard(props: CardSlotProps): ReactNode {
       void runProbe({ t, post, refresh, setBusy, setProbeMsg });
     },
     onField: setField,
+    // 草稿那一整套落态口直接摊进去：`saveSettingsDraft` 只取它声明的几位，多给的键不参与。
     onSave: () => {
-      void saveSettingsDraft({
-        t,
-        value,
-        touched,
-        setTouched,
-        setSettingsBusy,
-        setSaveError,
-        set: props.set,
-      });
+      void saveSettingsDraft({ t, value, ...drafts, set: props.set });
     },
     onDiscard: discard,
   };
   const providerPanel = buildProviderPanel(deps);
   const cliStatus = buildCliStatusRow(deps);
   const settingsSection = buildSettingsSection(deps, writable, setField);
+  const scanSection = buildScanSection(deps, writable, setField);
   const adminSection = buildAdminSection({ ...adminState, t, writable });
-  return createElement(CardForm, null, cliStatus, providerPanel, settingsSection, adminSection);
+  return createElement(
+    CardForm,
+    null,
+    cliStatus,
+    providerPanel,
+    settingsSection,
+    scanSection,
+    adminSection,
+  );
 }
 
 export interface CardSlotProps {
@@ -1949,12 +2081,14 @@ function apply(ctx: ClientCtx): void {
     return;
   }
   ctx.effect(() => {
+    const disposeShared = ensureCardUiCss();
     const tag = document.createElement("style");
     tag.id = "ocr-review-card-css";
-    tag.textContent = `${CARD_CSS}\n${CARD_UI_CSS}`;
+    tag.textContent = CARD_CSS;
     document.head.append(tag);
     return () => {
       tag.remove();
+      disposeShared();
     };
   }, "ocr-review-card: styles");
   // 本包的共享表单：条目 id == cordis.patch.yml 里的裸 id `ocr-review`（隐式

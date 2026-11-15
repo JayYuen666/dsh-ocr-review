@@ -5,9 +5,18 @@ Runs the external `ocr` command line over a change set, reports the comments it 
 ## What the card changes
 
 - **Model** — `ocrProvider` and `ocrModel` are not stored settings: they project the host's model namespace, and entries without a usable key are shown but disabled. `chatGptModel` is a slug this plugin writes into the CLI's own config (provider `chatgpt`, with `api_key` / `api_key_cmd` removed); the credentials behind that provider come from the CLI's own login state, which the plugin only queries (`ocr auth`) and never stores.
-- **Review parameters** — `effort` (`auto`/`low`/`medium`/`high`) is how many review passes run: deeper review costs more time. `language` chooses Chinese or English output. `autoVerify` (on) runs `ocr llm test` after you pick a provider and model, so a wrong choice fails at pick time rather than at first review. `maxComments` (default 12; 0 means all, including comments that cannot be anchored to a line). `timeoutMinutes` (0 requests the host's ceiling; a positive value is minutes enforced by this plugin — the host clamp no longer shortens it). `ocrConfigPath` — empty means `~/.opencodereview/config.json`; a non-empty value must be `<dir>/.opencodereview/config.json` and is honoured by redirecting `HOME`; on Windows the value passes the shape check but the redirection does not happen, and the CLI keeps its default path.
+- **Review parameters** — `effort` (`auto`/`low`/`medium`/`high`) is how many review passes run: deeper review costs more time. **Review only** — the CLI registers `--effort` on `review` alone, and the one thing it changes (the number of passes) does not exist in the scan template, so it cannot make a scan deeper; use the `scan*` settings below for that. `language` chooses Chinese or English output. `autoVerify` (on) runs `ocr llm test` after you pick a provider and model, so a wrong choice fails at pick time rather than at first review. `maxComments` (default 12; 0 means all, including comments that cannot be anchored to a line). `timeoutMinutes` (0 requests the host's ceiling; a positive value is minutes enforced by this plugin — the host clamp no longer shortens it). `ocrConfigPath` — empty means `~/.opencodereview/config.json`; a non-empty value must be `<dir>/.opencodereview/config.json` and is honoured by redirecting `HOME`; on Windows the value passes the shape check but the redirection does not happen, and the CLI keeps its default path.
 
-`effort`, `maxComments`, `timeoutMinutes` and `ocrConfigPath` are read per call, so a change applies on the next review without restarting the host. `language` and `autoVerify` are read when a provider/model selection is applied: `language` is written into the CLI config at that moment, and `autoVerify` only decides whether `ocr llm test` runs then.
+`effort`, `maxComments`, `timeoutMinutes`, `ocrConfigPath`, `scanMaxTokens` and `scanConcurrency` are read per call, so a change applies on the next call without restarting the host. `language` and `autoVerify` are read when a provider/model selection is applied: `language` is written into the CLI config at that moment, and `autoVerify` only decides whether `ocr llm test` runs then.
+
+## Scan depth (the defaults `ocr_scan` uses)
+
+The two fields in the card's "scan depth" section are **defaults for `ocr_scan`**; an explicit argument from the model always wins.
+
+- `scanMaxTokens` — `--max-tokens`; 0 (the default) omits it and uses the CLI template's 58888. The CLI warns once prompt tokens pass 80% of it (47110), so raise this when a big file keeps hitting that gate. Raising `--max-tools` does not help with that.
+- `scanConcurrency` — `--concurrency`; 0 omits it and uses the template's 8. Lower it to be gentler on the provider's rate limit.
+
+Three more stay off the card (deployment keys on the `cordis.patch.yml` registration line's `config:` block, taking effect on restart): `scanMaxTools` (0 = the template's 60; scan treats it as **raise-only**, so anything below 60 does nothing), `scanNoPlan` and `scanNoDedup` (both false by default; when true every call carries the matching `--no-*`).
 
 ## Two separate things called MCP
 
@@ -19,7 +28,7 @@ The card's MCP-servers editor writes the **external `ocr` tool's own** configura
 
 ## What it needs from outside
 
-The `ocr` command line, expected at version **1.13.9**; the expectation is declared once as `ocrCliVersion` in `package.json`, and the code constant plus both READMEs mirror that string, so a mismatch is reported (as a hint, never a hard failure) rather than papered over. Install paths are `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review@1.13.9`. With no candidate on PATH at all, the pre-check reports "no ocr candidate on either path" plus an install hint; "command not found" (exit 127) is the different case where a candidate exists but the binary cannot actually be run. The version probe always forces `OCR_NO_UPDATE=1` so probing cannot trigger an upgrade.
+The `ocr` command line, expected at version **1.13.10**; the expectation is declared once as `ocrCliVersion` in `package.json`, and the code constant plus both READMEs mirror that string, so a mismatch is reported (as a hint, never a hard failure) rather than papered over. Install paths are `brew install open-code-review` or `npm i -g @alibaba-group/open-code-review@1.13.10`. With no candidate on PATH at all, the pre-check reports "no ocr candidate on either path" plus an install hint; "command not found" (exit 127) is the different case where a candidate exists but the binary cannot actually be run. The version probe always forces `OCR_NO_UPDATE=1` so probing cannot trigger an upgrade.
 
 API credentials are not stored here: the plugin writes a `api_key_cmd` that calls a helper script, so the key is fetched at run time instead of landing in a config file. If that script is missing, the card warns rather than sending an unauthenticated request.
 

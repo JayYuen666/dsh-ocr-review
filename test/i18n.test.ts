@@ -5,7 +5,7 @@
 //   1. 值非空、en 那份真不含中文（漏翻会在这里红，而不是在英文界面上露出一句中文）；
 //   2. 模板两侧的 `{占位符}` 集合一致——翻译时漏掉一个插值，运行时只会看到空白，
 //      没有任何报错，所以这条必须有测试；
-//   3. host 半自带的 format() 行为（缺键退空串，绝不在文案里留下未替换的占位符）。
+//   3. host 半的 format() 行为（缺值保留原文：漏传参数时占位符原样留着，一眼可见）。
 import { describe, expect, it } from "vitest";
 import { MESSAGES, format } from "../lib/messages.ts";
 import { UI_MESSAGES } from "../src/ui-messages.ts";
@@ -100,10 +100,10 @@ describe("模板两侧的 {占位符} 集合一致", () => {
 });
 
 describe("host 半 format()（host 侧没有官方插值，自带同语法）", () => {
-  it("按 {name} 替换，缺键退空串（绝不留未替换的占位符）", () => {
+  it("按 {name} 替换，缺值保留原文", () => {
     const params = { count: "3", namespace: "llm-pi-ai" };
     expect(format("共 {count} 个 · {namespace}", params)).toBe("共 3 个 · llm-pi-ai");
-    expect(format("缺一个 {miss} 键", { here: "x" })).toBe("缺一个  键");
+    expect(format("缺一个 {miss} 键", { here: "x" })).toBe("缺一个 {miss} 键");
   });
 
   it(String.raw`非 \w+ 的花括号片段（如评论格式示例）原样保留`, () => {

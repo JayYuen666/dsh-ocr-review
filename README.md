@@ -80,11 +80,11 @@ If your profile pins `@jayyuen66/dsh-plugin-shared` with a pnpm `overrides` entr
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> The external CLI
 
-This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.9** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
+This package spawns `ocr`; it never installs or upgrades it. The command contract is verified against **1.13.10** (`EXPECTED_OCR_CLI_VERSION` in `lib/cli.ts`, declared once as `ocrCliVersion` in package.json — tests pin the manifest, the code constant and both READMEs to the same string).
 
 ```sh
 brew install open-code-review                        # the formula tracks the newest release
-npm i -g @alibaba-group/open-code-review@1.13.9      # pinned to the version this plugin verifies against
+npm i -g @alibaba-group/open-code-review@1.13.10      # pinned to the version this plugin verifies against
 ```
 
 - **brew cannot pin.** `homebrew/core` carries one stable formula and no versioned variant, so `brew install` / `brew upgrade` always yields whatever is newest upstream. The npm command is the only one that can carry the verified version.
@@ -121,9 +121,9 @@ npm i -g @alibaba-group/open-code-review@1.13.9      # pinned to the version thi
 
 | Tool | Arguments and constraints |
 | --- | --- |
-| `ocr_review` | repo (absolute path, default = the session workspace), scope workspace/commit/branch (branch needs both from+to and is mutually exclusive with commit), effort, background, exclude, provider/model/resume — resume only with commit/branch; a workspace run cannot be resumed. preview (file-selection only), noFilter, maxGitProcs, rule/backgroundFile (repo-root files only), wait |
+| `ocr_review` | repo (absolute path, default = the session workspace), scope workspace/commit/branch (branch needs both from+to and is mutually exclusive with commit), effort, background, exclude, provider/model/resume — resume works for workspace/commit/branch alike (OCR 1.13.10+); whether a session can be resumed is decided by OCR itself, and a rejected resume comes back as a localized hint. preview (file-selection only), noFilter, maxGitProcs, rule/backgroundFile (repo-root files only), wait |
 | Numeric group (review and scan) | concurrency / timeoutMinutes / maxTools / maxTokens / maxTokensBudget, mapped to `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`. Values pass through faithfully; min floors are 1 for concurrency and 0 for the rest, and non-integers or below-floor values error instead of clamping |
-| `ocr_scan` | repo, path, exclude, batch none/by-language/by-directory, provider/model (the CLI's native shared flags), the same numeric group, preview, noPlan/noDedup/noSummary, resume, maxGitProcs, rule (repo-root file), wait. The repo is normalized to the git top level (path/exclude are rebased from the original directory, so the scan scope is unchanged), which makes scan sessions started in a subdirectory visible to `ocr_session`. Whole-repo scanning, no git diff required |
+| `ocr_scan` | repo, path, exclude, batch none/by-language/by-directory, provider/model (the CLI's native shared flags), the same numeric group, maxTools (raise-only: values below the template default of 60 do nothing), maxTokens (the 58888 template default trips the 80% prompt gate), preview, noPlan/noDedup/noSummary, resume, maxGitProcs, rule (repo-root file), wait. The scan-depth knobs default to the plugin settings (`scanMaxTokens` / `scanConcurrency` / `scanMaxTools` / `scanNoPlan` / `scanNoDedup`), and an explicit argument always wins. The repo is normalized to the git top level (path/exclude are rebased from the original directory, so the scan scope is unchanged), which makes scan sessions started in a subdirectory visible to `ocr_session`. Whole-repo scanning, no git diff required |
 | `ocr_delegate_preview` / `ocr_delegate_rule` | preview: repo, scope/commit/from/to, exclude, background, backgroundFile/rule/maxGitProcs; returns the complete file list plus totalFiles/reviewableCount/excludedCount (no truncation). rule: repo plus paths — required, up to 200 entries, positional after `--`, each escaped — plus rule. Zero LLM cost on the OCR side: they return the file list and the rule groups |
 | `ocr_session` | repo, action list/show/comments/compare/export, id, before/after (compare), severity/category (comments filter), limit — default 10; an explicit value must be an integer in 1–100 and out-of-range errors rather than clamping. compare returns the four buckets; export returns an HTML path (older export directories are cleaned up by TTL on later exports) |
 | `ocr_rules_check` | repo, path (required), rule (repo-root file): print the winning rule layer, glob and body; no LLM call |
@@ -138,12 +138,14 @@ The namespace is the entry id `ocr-review`; the card fields are the `.volatile()
 
 | Field | Values, default, use |
 | --- | --- |
-| `effort` | auto/low/medium/high, default auto; `auto` omits `--effort` so OCR's own configured effort wins. Used when `ocr_review` is called without an explicit effort |
+| `effort` | auto/low/medium/high, default auto; `auto` omits `--effort` so OCR's own configured effort wins. Used when `ocr_review` is called without an explicit effort. **Review only** — OCR registers `--effort` on `review`, and the one thing it changes (`MaxReviewRounds`) does not exist in the scan template, so it cannot make a scan deeper; use the `scan*` keys below for that |
 | `language` | 中文/English, default 中文; written as the top-level `language` key of the CLI config when a selection is applied |
 | `autoVerify` | default true; a successful select also runs `ocr llm test` (capped by `llmTestTimeoutMs`) |
 | `maxComments` | default 12, the number of comments kept in the summary; 0 = no truncation, non-integers and negatives fall back to 12 |
 | `timeoutMinutes` | default 0 = request the host cap (the host clamps to min(request, shell.maxTimeoutMs), 10 min by default in `bash-local`); above 0 is a number of minutes and is enforced **by this plugin** (`onExpiry` is turned off so the host cap does not shorten it) |
 | `ocrConfigPath` | Where the CLI config lives; empty derives `<home>/.opencodereview/config.json`, `~` and `~/` prefixes accepted, relative paths error. A custom value must follow the `<X>/.opencodereview/config.json` layout — the CLI has no file-level path override, so the plugin injects `HOME=<X>` into the subprocess (config and sessions redirect together); anything else is rejected at the setting layer. POSIX-only: Windows has no such channel |
+| `scanMaxTokens` | default 0 = omit `--max-tokens` and use the OCR template's 58888. OCR warns once prompt tokens pass 80% of it (47110), so raise this when a large file keeps hitting that gate |
+| `scanConcurrency` | default 0 = omit `--concurrency` and use the OCR template's 8. Lower it to be gentler on the provider's rate limit (OCR still retries internally) |
 
 The deployment keys below are deliberately **not** on the card — they are plain (non-volatile) fields of the exported `Config`, settable only on the profile's `config:` line and taking effect on restart:
 
@@ -153,6 +155,9 @@ The deployment keys below are deliberately **not** on the card — they are plai
 | `startupVerify` | `true` | Run one CLI version measurement at apply (local, no network). Turn it off if loads must stay process-free. The provider endpoint is never called at apply — that is a real, billed request, and it happens only when you press “Test connection” or when `autoVerify` runs on apply |
 | `ocrBackgroundMaxMs` | `0` | Backstop window for background reviews (registry wait to the deadline, then kill); 0 = no window — an owned run also ends when its session stops, while an agentless one ends only when the host exits, the plugin unloads or the job is killed |
 | `stdoutMaxBytes` | `400000` | Shell executor stdout cap, shared by foreground and background runs (review results go through the `--output` temp file precisely to step outside it) |
+| `scanMaxTools` | `0` | Default `--max-tools` for `ocr_scan`; 0 = omit it and use the template's 60. Scan treats it as **raise-only**: values below 60 do nothing (review is the one that lifts 1-49 up to 50) |
+| `scanNoPlan` | `false` | Pass `--no-plan` by default: skip the per-file plan pre-check (files under 200 lines already skip it) |
+| `scanNoDedup` | `false` | Pass `--no-dedup` by default: skip the in-batch dedup task |
 | `toolTimeoutMs` | `3600000` | Backstop ceiling handed to the host as `ToolDefinition.timeoutMs` (rc.2's timeout policy enforces it and reports `TOOL_TIMEOUT` on expiry). This is **not** the budget for a review: when `timeoutMinutes` is above 0 this package runs with `onExpiry: "none"` and its own deadline, deliberately bypassing `shell.maxTimeoutMs`, so one whole-repository `ocr_scan` can legitimately take hours. Raising this value to roughly the `shell` limit would cut a healthy long review, and the only trace would be the host's own `tool call timed out` — this package's timeout attribution would never speak. The 1-hour default covers the multi-hour case while still bounding a permanently hung call; raise it if your `timeoutMinutes` goes above 60. Unlike `timeoutMinutes` it cannot be volatile: the host validates it at `tools.register` and never recomputes it |
 | `ocrNoAutoUpdate` | `false` | true puts `OCR_NO_UPDATE=1` on every command this package spawns, stopping upstream's mid-review `npm i -g` of a newer release; false keeps upstream behaviour. The version probe sets the variable regardless |
 | `ocrInstallHint` | `both` | Which install command to lead with when nothing is installed: `both` / `brew` / `npm`. A fallback, not an override — an existing copy is always described by its own source, because telling a formula user to run `npm i -g` leaves a second copy behind while PATH still resolves the old one. The npm command always carries the verified version; the brew one never can |

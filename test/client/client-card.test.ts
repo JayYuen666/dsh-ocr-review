@@ -141,24 +141,34 @@ interface StubStyle {
 const CARD_STYLE_ID = "ocr-review-card-css";
 /** 上面那枚 id 的选择器形态：document.head.querySelector 只吃 `#id`。 */
 const CARD_STYLE_SELECTOR = `#${CARD_STYLE_ID}`;
+/** 共享设置卡样式的固定 id；由 shared 的 ensureCardUiCss 注入。 */
+const SHARED_STYLE_ID = "dsh-card-ui-css";
+const SHARED_STYLE_SELECTOR = `#${SHARED_STYLE_ID}`;
 const injectedStyles: StubStyle[] = [];
 const stubDocument = {
-  createElement: (): StubStyle => ({
-    id: "",
-    textContent: "",
-    remove: () => {
-      const at = injectedStyles.findIndex((tag) => tag.id === CARD_STYLE_ID);
-      if (at !== -1) {
-        injectedStyles.splice(at, 1);
-      }
-    },
-  }),
+  querySelector: (selector: string): StubStyle | null =>
+    injectedStyles.find((tag) => `#${tag.id}` === selector) ?? null,
+  createElement: (): StubStyle => {
+    const tag: StubStyle = {
+      id: "",
+      textContent: "",
+      remove: () => {
+        const at = injectedStyles.indexOf(tag);
+        if (at !== -1) {
+          injectedStyles.splice(at, 1);
+        }
+      },
+    };
+    return tag;
+  },
   head: {
     append: (tag: StubStyle): void => {
       injectedStyles.push(tag);
     },
     querySelector: (selector: string): StubStyle | null =>
-      selector === CARD_STYLE_SELECTOR ? (injectedStyles[0] ?? null) : null,
+      selector === CARD_STYLE_SELECTOR
+        ? (injectedStyles.find((tag) => tag.id === CARD_STYLE_ID) ?? null)
+        : null,
   },
 };
 // stubGlobal 进出平衡的回收挂在文件**末尾**的 describe（见文件末）：
@@ -366,9 +376,17 @@ const BASE_DEPS: OcrCardDeps = {
   maxCommentsValue: 12,
   timeoutMinutesValue: 0,
   ocrConfigPathValue: "",
+  // 0 = 「不传该 flag、用 OCR 模板默认」，是这两枚的合法初值（不是「未设置」）。
+  scanMaxTokensValue: 0,
+  scanConcurrencyValue: 0,
   dirty: false,
   settingsBusy: false,
   saveError: null,
+  // 越界那三位：本文件只读渲染产物，数字框在快照的合法值上不会报越界，所以给不改变
+  // 任何状态的哑实现（`blocked: false` 表示这张卡当前没有越界字段）。
+  blocked: false,
+  resetToken: 0,
+  reportInvalid: noop,
   onPickProvider: noop,
   onPickModel: noop,
   onApply: noop,
@@ -510,6 +528,7 @@ describe("apply 的官方 locale 接线", () => {
   afterEach(() => {
     globalThis.ocrReviewCardApplied = undefined;
     document.head.querySelector(CARD_STYLE_SELECTOR)?.remove();
+    document.querySelector(SHARED_STYLE_SELECTOR)?.remove();
   });
 
   it("inject 声明 locale；两语字典一次性注册进官方 locale", () => {
@@ -736,7 +755,9 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
         modelOptions: SENSENOVA.models,
       });
     const zhModel = textOf(buildProviderSection(modelDeps(tZh)));
-    expect(zhModel).toContain("审查深度 (effort)");
+    // 标签钉住「仅 review」这半句：scan 侧没有 --effort（OCR 只把它注册给 review），
+    // 标签不写明会让用户以为调它能让扫描更深。
+    expect(zhModel).toContain("评审深度 (effort，仅 review)");
     expect(zhModel).toContain("auto — 跟随 OCR 配置");
     expect(zhModel).toContain("medium — 均衡");
     expect(zhModel).toContain("评审语言");
@@ -744,7 +765,7 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     const zh = textOf(buildSettingsSection(depsWith(tZh), true, noop));
     expect(zh).toContain("摘要评论条数 (maxComments)");
     const enModel = textOf(buildProviderSection(modelDeps(tEn)));
-    expect(enModel).toContain("Review depth (effort)");
+    expect(enModel).toContain("Review depth (effort, review only)");
     expect(enModel).toContain("auto — follow the OCR config");
     expect(enModel).toContain("medium — balanced");
     expect(enModel).toContain("Verify after applying");
@@ -1397,6 +1418,8 @@ function saveDeps(
     t: tZh,
     value: {},
     touched,
+    // 本组替身只关心「哪些字段被受理」，越界门禁由卡片层单独覆盖，这里恒为否。
+    blocked: false,
     set: (field: string) => {
       // 表里没列出的字段按「宿主受理」处理：本替身只关心被点名的那些。
       const result = results[field] ?? true;
@@ -1449,6 +1472,7 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
       t: tZh,
       value: {},
       touched: { maxComments: 20, timeoutMinutes: 30 },
+      blocked: false,
       set: (field: string) => {
         seen.push(field);
         if (field === "maxComments") {

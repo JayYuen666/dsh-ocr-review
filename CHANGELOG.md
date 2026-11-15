@@ -6,6 +6,38 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.19
+
+market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（此前第二遍会撞「同名已注册」把 fiber 打成 failed）；设置卡接「有字段越界就不许保存」那道门禁；卡片样式改用 shared 的共享 `<style>`；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距；外部 `ocr` 契约抬到 `1.13.10`，工作区也能恢复评审，设置卡补上扫描深度那组旋钮。对外工具与 Remote 方法名单不变。
+
+### Added
+
+- **单实例锁**：`apply` 在 `resolveHost(ctx)` 之后用 shared 的 `claimInstance` 抢 `INSTANCE_LOCK_KEY = "@jayyuen66/dsh-ocr-review/instance"`，抢不到就 `console.warn` 一行「本次装配让路，工具与设置卡由在册的那一份提供」并直接返回。成因是 dshmarket 运行期热装会在 `<profile>/.dsh-market/` 下造一棵它自己的 Include 子树（`mkt-*`，`file://` 直连 `host.js`），与 profile 的 bundle 层解析到同一份模块却各起一个 fiber ⇒ 同一进程里 `apply` 跑两遍，第二遍的工具、prompt section 与 Typert Remote 服务注册全部撞名。锁随在册那一份的 fiber 卸载自动释放；双挂只发生在用户经 market 现场启用插件的那一次会话里（`hot-*.yml` 每次 boot 被 wipe），下一次启动只剩 bundle 层一条，自己就会恢复。
+- **设置卡的扫描深度（`ocr_scan` 缺省值）**：卡片新增「扫描深度」小节两枚 volatile 键 —— `scanMaxTokens`（`--max-tokens`，0 = 不传、用 CLI 模板的 58888；它在提示词超过这个数的 80%（47110）时告警并收敛）与 `scanConcurrency`（`--concurrency`，0 = 不传、用模板的 8）。另三枚进部署段、不进卡：`scanMaxTools`（0 = 模板的 60；scan 侧**只升不降**，小于 60 完全无效）、`scanNoPlan`、`scanNoDedup`（默认为假）。缺省值的补入由新增的 `lib/scan-defaults.ts` 承担，**模型显式传的值一律优先**，且 0/假一律**不落键**（落成 0 会被下游 `pushFlag` 当成「模型传了 0」，`--concurrency` 的下限是 1，当场抛错）。
+- **回归测试 `test/scan-defaults.test.ts`（8 条）**：只补缺的、0/假不落键、部署值非零时确实补进去、模型给 0 也算给了、不改入参；`test/host.test.ts` 的两条契约表（`EDITABLE` 加两位、`DEPLOYMENT` 加三位）与 `schemaDefaults()` 的五个字面值同步。
+- **回归测试 `test/instance-lock.test.ts`（6 条）**：空作用域抢到且锁名落进服务表 / 已有一份在册时让路且**不再尝试 provide** / `provide` 抛错时让路、不把异常抛给调用方 / 没有注册口时放行（能力缺席不是重复）/ `reflect` 在但没有 `provide` 时放行 / 两个不同键互不影响。`test/host.test.ts` 另加一条装配级用例。
+
+### Changed
+
+- **两处逐字重复收进 shared**：`lib/skill.ts` 的注册正文换成 shared 的 `registerSkill(ctx, spec)`，本文件只剩 `SKILL_NAME` 与收 spec 的那一层；`lib/messages.ts` 的 `format()` 换成 shared 的 `fillPlaceholders`。
+- **`format()` 的缺值语义从「替空串」改成「保留原文」**：漏传参数时原样留着的 `{xxx}` 一眼可见。`test/i18n.test.ts` 那条断言随之改判。
+- **卡片样式改用 shared 的 `ensureCardUiCss()`**：不再把 `CARD_UI_CSS` 整段拼进本仓的 `<style>`，改为固定 id `dsh-card-ui-css` 的幂等注入 + 引用计数。
+- **`OcrCard` 抽出 `useSettingsDrafts(value)`**：把 `touched` / `settingsBusy` / `saveError` / 越界三件与 `setField` / `discard` 收进一个 hook。抽出的直接原因是把越界那两位塞进 `OcrCard` 之后它达到 125 行，撞 `eslint/max-lines-per-function`（120）。
+- **OCR 契约抬到 `1.13.10`**：`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`、两份 README、随包文档与 `THIRD_PARTY_NOTICES` 统一到 `1.13.10`。flag 集合与 1.13.9 逐格相同（`git diff` 确认 `registerReviewFlags` / `registerScanFlags` 零变化），新增的四条 Features 里只有 workspace resume 影响本包（见下条）；`1.13.10` 的 Markdown 摘要渲染只动 CLI 人读输出，`--format json --audience agent` 这条机器路径不受影响。
+- **workspace 也能恢复评审**：删掉 `buildReviewCommand` 里「workspace 不许带 `--resume`」的前置拒绝。1.13.10 删掉了上游那条硬拒（`review_cmd.go` 的 `loadReviewResumeState`），提前拦反而会拦住一个本来能恢复的会话——能不能恢复改由 OCR 自己按 identity 判（基准 commit 与未提交改动都没变才放行）。`test/cli.test.ts` 那条用例随之改判。
+- **`effort` 的标签写明只对 review 生效**：改成「评审深度 (effort，仅 review)」/「Review depth (effort, review only)」，hint 补一句解释 —— 上游只在 `review` 上注册 `--effort`，而它唯一改变的 `MaxReviewRounds` 在 `scan_template.json` 里根本不存在（`effort.go` 的 `ApplyEffort` 只有一行赋值），所以调它不会让扫描更深。扫描深度看「扫描深度」小节。
+- **运行时依赖 shared 抬到 `^0.2.9`**；`THIRD_PARTY_NOTICES.md` 里那一行同步改成 `catalog（伞根 ^0.2.9）`。
+
+### Fixed
+
+- **越界数字草稿会被静默丢掉**：`NumberField` 对越界草稿**不调 `onChange`**，于是它根本不进 `touched`。两个数字字段（`maxComments` / `timeoutMinutes`）现在都接 `onInvalidChange` 上报，卡片据此灰掉保存并在保存条上点名「有字段超出范围，先修正或撤销后再保存。」（`src/ui-messages.ts` 的 `invalidFields`）；`resetToken` 在保存/撤销后把框里的非法草稿清回已提交值。
+- **越界时连撤销都点不动**：上一版把「有未保存改动」与「有越界字段」混成保存条的一个 `disabled`。现在 `SaveBar` 分开算：保存被 `blocked` 拦下，撤销保持可点。
+- **输入控件撑出容器**（shared 侧）：MCP servers 的 textarea 与 ChatGPT（OCR auth）的输入框原先右边缘顶到卡片外——`.dsu-input` 是 `width:100%` + 左右各 12px padding + 1px 边框，默认 `content-box` 让它比容器宽 26px（1280px 视口实测 1258 vs 1232）。`.dsu-form` 整棵子树现在统一 `border-box`。
+- **小节内相邻元素间距为 0**（shared 侧）：MCP servers 小节里 textarea 的下边框直接贴着「保存 MCP」按钮。现在 `.dsu-form .dsu-section>*+*` 给 10px，`.dsu-sectionHint` 4px，`.dsu-field` 之间仍 0。
+
+- **workspace 恢复被拒时模型只能读到英文长句**：OCR 回的是 `resume rejected: …` 一族（`resume_identity.go` 十余处），原文对模型没有行动价值。`host.ts` 的 `failureDetail` 现在只认这一族前缀并换成本包的说明（附中文与原文，原文供排障），其余英文错误一律原样带回——把不认识的失败也翻译掉等于让模型读不到真因。`test/host.test.ts` 加两条互为对照的用例。
+- **scan 缺省值会污染 preview 的「已忽略参数」清单**：设置里的 `scanMaxTokens` / `scanConcurrency` 曾在 preview 判完之前就补进参数，于是预览回执把这两个设置缺省误报成模型显式传的参数。现在缺省值留到 preview 分支之后才补（`host.ts` 的 `registerScanTool`），与 `lib/preview-params.ts` 里「只列显式给出的」判据一致；`test/host.test.ts` 加一条对照用例。
+
 ## 0.1.18
 
 外部 `ocr` 契约抬到 `1.13.9`；设置页多出一级分区与官方图标；工具结果带上可判的错误码、调用态卡片与前台耗时；常驻提示词缩成摘要、规则全文改为按需加载的虚拟 skill。对外工具与 Remote 方法名单不变。

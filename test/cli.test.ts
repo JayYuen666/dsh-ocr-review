@@ -555,6 +555,10 @@ describe("wrapWithHostReaper", () => {
   });
 });
 
+/** 透传断言的固定 session_id 与它拼出来的旗标（三处断言共用，避免重复字面量）。 */
+const RESUME_ID = "abc";
+const RESUME_FLAG = `--resume '${RESUME_ID}'`;
+
 describe("buildReviewCommand", () => {
   it("workspace 默认形态：--audience agent --format json --output", () => {
     const { command, workdir } = reviewCmd({ repo: "/r" }, "/tmp/out.json");
@@ -636,13 +640,22 @@ describe("buildReviewCommand", () => {
     expect(scan).not.toContain("--output");
   });
 
-  it("resume 与 workspace 同给前置拒绝（OCR 契约 workspace 禁恢复，别烧一次进程才报错）", () => {
-    expect(() => reviewCmd({ repo: "/r", resume: "abc" }, "/o")).toThrow(/resume 需要 scope/u);
+  it("workspace 也透传 --resume（1.13.10 起支持工作区恢复，是否接受由 OCR 按 identity 判）", () => {
+    // 旧契约（≤1.13.9）在 review_cmd.go 前置拒绝 workspace resume，本包曾据此提前抛错。
+    // 1.13.10 删掉那条拒绝后，提前拦反而会拦住一个本来能恢复的会话：identity 不匹配时
+    // OCR 自己会回 `resume rejected: …`，由 host.ts 翻成中文——那是唯一该拒的地方。
+    const workspace = reviewCmd({ repo: "/r", resume: RESUME_ID }, "/o");
+    expect(workspace.command).toContain(RESUME_FLAG);
+    // workspace 档不带区间旗标：恢复的对象就是当前工作区。
+    expect(workspace.command).not.toContain("--from");
     // commit/branch 模式下 resume 合法，原样透传。
-    const commit = reviewCmd({ repo: "/r", scope: "commit", commit: "abc", resume: "abc" }, "/o");
-    expect(commit.command).toContain("--resume 'abc'");
-    const branch = reviewCmd({ repo: "/r", from: "main", to: "f", resume: "abc" }, "/o");
-    expect(branch.command).toContain("--resume 'abc'");
+    const commit = reviewCmd(
+      { repo: "/r", scope: "commit", commit: "abc", resume: RESUME_ID },
+      "/o",
+    );
+    expect(commit.command).toContain(RESUME_FLAG);
+    const branch = reviewCmd({ repo: "/r", from: "main", to: "f", resume: RESUME_ID }, "/o");
+    expect(branch.command).toContain(RESUME_FLAG);
   });
 });
 

@@ -903,6 +903,11 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
         };
       } else if (name === "credentials" && options.credentialsService !== false) {
         service = credentials;
+      } else {
+        // 经 reflect.provide 注册的服务（Remote 读取接口、单实例锁）也要能从 get 读到：
+        // 真 cordis 里这两条是同一个 store，替身若只写不读，「后到者让路」这条判据在单测
+        // 里就永远看不见第一份留下的锁（真机是能看见的）。
+        service = host.provided.get(name);
       }
       return service;
     },
@@ -939,13 +944,16 @@ function schemaDefaults(): Record<string, unknown> {
   );
 }
 
-/** 设置卡该能编辑的字段（src/client-entry.ts 的六行设置，一个都不该漏）。 */
+/** 设置卡该能编辑的字段（src/client-entry.ts 的八行设置，一个都不该漏）。 */
 const EDITABLE = [
   "autoVerify",
   "effort",
   "language",
   "maxComments",
   "ocrConfigPath",
+  // ocr_scan 的两个常用旋钮：模型调用本身就在探「该多深/多快」，改完下一次调用就生效。
+  "scanConcurrency",
+  "scanMaxTokens",
   "timeoutMinutes",
 ];
 
@@ -960,13 +968,18 @@ const DEPLOYMENT = [
   "stdoutMaxBytes",
   // 工具级墙钟预算：宿主只读注册时那一份，所以必须是部署值而不是 volatile 设置项。
   "toolTimeoutMs",
+  // scan 的另三个旋钮：maxTools 在 OCR 侧只升不降（小于模板默认 60 完全无效），
+  // noPlan/noDedup 关掉的是整条流水线的一环——三枚都不是「随手调一下」的量。
+  "scanMaxTools",
+  "scanNoDedup",
+  "scanNoPlan",
 ];
 
 /**
  * 复刻 cordis 交进 apply 的那份 Config：**volatile** 字段是稳定引用、其 get() 现读
  * host.settingsValue（与真实 Volatile 的「引用不变、值可变」同构，cosmokit
  * createVolatile 也只有一个 get()，见 vendor/cosmokit/src/volatile.ts:39-45）；
- * **非 volatile** 字段是装载期定值（部署调优三字段走这一分支：行 config 改值要重启，
+ * **非 volatile** 字段是装载期定值（部署调优字段走这一分支：行 config 改值要重启，
  * 与 cordis 对非 volatile 的语义一致，故这里快照而不是给引用）。
  */
 function liveConfig(host: Partial<FakeHost> | null | undefined): Record<string, unknown> {
@@ -1565,6 +1578,13 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         // 围栏默认 full：0.1.14 起每个 ocr 子进程都请求 danger-full-access，换默认
         // 会静默改变既有部署的权限面（要收窄是部署显式写 inherit 的决定）。
         ocrSandbox: "full",
+        // scan 深度五位的默认全是「0 / false = 交回 OCR 自己的模板默认」：
+        // 本插件不替它选一套更浅或更深的算法，部署没要求就一个 flag 都不多传。
+        scanMaxTokens: 0,
+        scanConcurrency: 0,
+        scanMaxTools: 0,
+        scanNoDedup: false,
+        scanNoPlan: false,
       });
     });
 
@@ -1574,11 +1594,11 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(field?.meta?.["volatile"]).toBe(true);
     });
 
-    it("volatileForm(Config) 的字段集恰为六项可编辑字段", () => {
+    it("volatileForm(Config) 的字段集恰为八项可编辑字段", () => {
       const form = volatileFormOf(plugin.Config as unknown as SchemaNode);
       expect(form).not.toBeNull();
       expect(form?.toSorted()).toStrictEqual(EDITABLE);
-      // Config 的字段全集 = 设置卡六项 + 三项部署值（后者不进表单，但仍在 schema 上）
+      // Config 的字段全集 = 设置卡八项 + 部署值（后者不进表单，但仍在 schema 上）
       expect(Object.keys(configDict()).toSorted()).toStrictEqual(
         [...EDITABLE, ...DEPLOYMENT].toSorted(),
       );
@@ -3066,6 +3086,20 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(result.ignoredParams).toStrictEqual(["batch", "noPlan"]);
     });
 
+    it("scan preview 不把设置里的缺省值算成「显式给出的无效参数」", async () => {
+      // 缺省值只服务于实跑；若在 preview 判完之前就补进 args，那句「以下参数已忽略」
+      // 会把设置里的 maxTokens/concurrency 误报成模型这次传的参数。
+      host.settingsValue["scanMaxTokens"] = 30_000;
+      host.settingsValue["scanConcurrency"] = 4;
+      host.shell.scripts.push({ output: PREVIEW_JSON });
+      const result = (await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", preview: true },
+        makeExec(),
+      )) as { ignoredParams: string[]; hint: string };
+      expect(result.ignoredParams).toStrictEqual([]);
+      expect(result.hint).not.toContain("已忽略");
+    });
+
     it("scan preview：同一份解析器；正常扫描的 no-* 开关进命令", async () => {
       host.shell.scripts.push({ output: PREVIEW_JSON });
       const result = (await toolOf(host, "ocr_scan").execute(
@@ -3117,6 +3151,28 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(command).toMatch(/scan --audience agent/u);
       expect(command).toContain("src,test");
       expect(result.totalCommentCount).toBe(1);
+    });
+
+    it("设置里的 scan 缺省值进命令；模型显式给的值优先", async () => {
+      // 设置卡那两枚 volatile 位是「缺省值」，不是硬覆盖：这条从工具入口一路走到命令行，
+      // 验的是接线（applyScanDefaults 自己的逐格判据在 test/scan-defaults.test.ts）。
+      host.settingsValue["scanMaxTokens"] = 30_000;
+      host.settingsValue["scanConcurrency"] = 4;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_scan").execute({ repo: "/repo", wait: true }, makeExec());
+      const fills = String(host.shell.resolveCalls.at(-1)?.command);
+      expect(fills).toContain("--max-tokens 30000");
+      expect(fills).toContain("--concurrency 4");
+      // 模型显式传了就用它的：设置里的 30000 不许压回来。
+      host.settingsValue["scanMaxTokens"] = 30_000;
+      host.shell.scripts.push({ output: REVIEW_JSON });
+      await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", wait: true, maxTokens: 12_000 },
+        makeExec(),
+      );
+      const explicit = String(host.shell.resolveCalls.at(-1)?.command);
+      expect(explicit).toContain("--max-tokens 12000");
+      expect(explicit).not.toContain("--max-tokens 30000");
     });
 
     it("解析失败 ⇒ 回显脱敏原文；未写出文件 ⇒ 抛错且临时目录已清", async () => {
@@ -3209,6 +3265,34 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /^ocr 执行失败（exit=3）$/u,
       );
+    });
+
+    it("workspace 恢复被拒 ⇒ 翻成本包的说明并附上 OCR 原文", async () => {
+      // 1.13.10 起 workspace 也允许 --resume，是否接受由 OCR 按 identity 判（基准 commit
+      // 或未提交改动变了就拒）。它回的是英文长句，模型读到只会照着抄；本包把这一族翻成
+      // 中文说明，原文附在后面供排障。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText:
+          'resume rejected: the workspace changed since session "s-1" — resume requires the same uncommitted changes; start a new review instead of resuming',
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute(
+          { repo: "/repo", resume: "s-1", wait: true },
+          makeExec(),
+        ),
+      ).rejects.toThrow(/恢复被拒：该会话的评审对象与当前工作区不再一致[\s\S]*resume rejected:/u);
+    });
+
+    it("不认识的英文报错原样带回：翻译只做 resume 那一族", async () => {
+      // 把不该翻译的也翻译掉，等于让模型读不到真因（与上一条互为对照）。
+      host.shell.scripts.push({ exitCode: 1, stderrText: "something else broke: exit 2" });
+      await expect(
+        toolOf(host, "ocr_review").execute(
+          { repo: "/repo", resume: "s-1", wait: true },
+          makeExec(),
+        ),
+      ).rejects.toThrow(/something else broke: exit 2/u);
     });
 
     it("失败详情里的明文 key 先脱敏再截断", async () => {
@@ -3978,6 +4062,39 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         "ocr_llm",
       ]);
       expect(host.shell.resolveCalls).toStrictEqual([]);
+    });
+
+    it("同一作用域第二次装配让路：不重复注册、不抛错（market 热挂 + bundle 层双路径的现场）", () => {
+      // 现场：dshmarket 运行期热装会在 `.dsh-market/` 下造一棵 `mkt-*` 子树，把**同一份
+      // host.js** 再挂一次；bundle 层那条行也还在。于是同一进程里 apply 跑两遍，第二遍的
+      // 工具 / prompt section / Remote 服务 / skill 注册全部撞「同名已注册」而抛 —— 抛错
+      // 穿出 apply ⇒ fiber 落 failed，插件页显示「启动失败」。
+      // 判据：第二次装配**不抛**，且**不新增**任何注册。
+      const host = makeHost();
+      applyPlugin(host);
+      const toolsAfterFirst = host.registeredTools.length;
+      const remoteAfterFirst = host.provided.get(OCR_REMOTE_NAMESPACE);
+      expect(toolsAfterFirst).toBeGreaterThan(0);
+      expect(remoteAfterFirst).toBeDefined();
+
+      // 让路那一支会 console.warn 一行（真机上那是给用户看的告知）。这里捕获它：
+      // 一是本仓 `pnpm check` 的噪点表把「测试期间漏出的 console 输出」判成噪点，
+      // 二是顺带把「让路时确实说了一声」变成断言，而不是只看它不抛。
+      const warned: string[] = [];
+      const warn = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]): void => {
+        warned.push(args.map(String).join(" "));
+      });
+      try {
+        expect(() => {
+          applyPlugin(host);
+        }).not.toThrow();
+      } finally {
+        warn.mockRestore();
+      }
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toMatch(/本次装配让路/u);
+      expect(host.registeredTools).toHaveLength(toolsAfterFirst);
+      expect(host.provided.get(OCR_REMOTE_NAMESPACE)).toBe(remoteAfterFirst);
     });
   });
 });

@@ -23,6 +23,7 @@
 // lib/cli.ts 与 lib/output.ts 里被迁走的只是**拒绝理由那半句人话**：shq() 转义、
 // 白名单钳制与 key 脱敏的调用位置一字未动，各道校验闸的先后次序也没变。
 import type { MessagesCatalog } from "@jayyuen66/dsh-plugin-shared/lib/locale";
+import { fillPlaceholders } from "@jayyuen66/dsh-plugin-shared/lib/placeholder";
 
 /** 本包 host 侧产出的全部人读文案。 */
 export interface OcrReviewMessages {
@@ -140,8 +141,8 @@ export interface OcrReviewMessages {
   readonly unknownScope: string;
   /** scope 与范围参数组合矛盾（例如 scope=workspace 却给了 commit）。 */
   readonly scopeMismatch: string;
-  /** resume 与 workspace 同给（OCR 契约：workspace 不支持恢复）。 */
-  readonly resumeNeedsScope: string;
+  /** resumeRejected 的中文说明里点出的出路（哪一档变了就重建会话）。 */
+  readonly resumeRejected: string;
   /** wait 非布尔（字符串 "false" 若按真值处理会静默从后台变前台）。 */
   readonly waitMustBeBoolean: string;
   /** delegate rule 的 paths 为空。 */
@@ -475,8 +476,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     unknownScope: "未知 scope：{scope}（workspace/commit/branch）",
     scopeMismatch:
       "scope={scope} 与 {given} 不能同时给（scope 是声明，{given} 属于另一种范围；两者冲突时按哪个审没有正确答案）",
-    resumeNeedsScope:
-      "resume 需要 scope=commit 或 scope=branch（workspace 工作区评审不支持恢复，OCR 会直接拒绝）；请同时给出 commit 或 from/to",
+    resumeRejected:
+      "恢复被拒：该会话的评审对象与当前工作区不再一致（基准 commit 或未提交改动已变，也可能是 provider/model/规则变了）。请新建一次评审，不要沿用这个 session_id",
     waitMustBeBoolean: "wait 必须是布尔值（true/false），收到 {received}",
     pathsRequired: "paths 必填：至少传一个待审查文件的仓库相对路径",
     invalidAction: "action 非法：{action}（期望 {expected}）",
@@ -694,7 +695,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     sessionTruncated:
       "…[截断] 完整内容见 OCR 会话目录（默认 ~/.opencodereview/sessions/，自定义 ocrConfigPath 时随 HOME 重定向）",
     sessionResumeHint:
-      "要恢复中断的区间/commit 评审：ocr_review ... --resume <session_id>（工作区评审不支持恢复）；scan 会话用 ocr_scan ... --resume <session_id>。",
+      "要恢复中断的评审：ocr_review ... --resume <session_id>（区间 / commit / 工作区三种都支持，OCR 要求评审对象未变）；scan 会话用 ocr_scan ... --resume <session_id>。",
     rulesCheckHint:
       "输出里的 Source 是命中的层（--rule/项目/全局/内置），Pattern 是命中的 glob；规则按声明顺序先到先得。",
     llmHint:
@@ -722,7 +723,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
 - LLM 调用本身有重试：OCR 内置重试（429/408/409 与 5xx 自动退避重试）；per-file 组失败被隔离，进
   coverage.failedItems（产出里没有 manifest 时进 warnings），不整体重跑。
   工具层超时（min(请求, shell 执行器自己设置项里的 maxTimeoutMs)，缺省 10 分钟）或部分文件失败后，可
-  ocr_session 查 session_id、用 ocr_review --resume 恢复中断的区间/commit 评审，或 ocr_scan --resume 续扫。
+  ocr_session 查 session_id、用 ocr_review --resume 恢复中断的评审（工作区/commit/区间都行，评审对象未变才放行），或 ocr_scan --resume 续扫。
 `.trim(),
     routingSummary: [
       "用户要求「审查代码/Review/检查我的改动/审这个 commit/PR」时，用 ocr 工具做代码审查：",
@@ -886,8 +887,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     unknownScope: "unknown scope: {scope} (workspace/commit/branch)",
     scopeMismatch:
       "scope={scope} cannot be combined with {given} (scope declares one range, {given} belongs to another; there is no correct way to pick one)",
-    resumeNeedsScope:
-      "resume requires scope=commit or scope=branch (workspace reviews cannot be resumed; OCR rejects it outright); pass commit or from/to as well",
+    resumeRejected:
+      "resume rejected: this session reviewed a different input than the current one (base commit, uncommitted changes, or provider/model/rules changed). Start a new review instead of reusing this session_id",
     waitMustBeBoolean: "wait must be a boolean (true/false), got {received}",
     pathsRequired: "paths is required: pass at least one repo-relative path of a file to review",
     invalidAction: "invalid action: {action} (expected {expected})",
@@ -1161,7 +1162,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "…[truncated] full content in the OCR session directory (default ~/.opencodereview/sessions/, " +
       "relocated with HOME when ocrConfigPath is customized)",
     sessionResumeHint:
-      "To resume an interrupted range/commit review: ocr_review ... --resume <session_id> (workspace reviews cannot be resumed); scan sessions use ocr_scan ... --resume <session_id>.",
+      "To resume an interrupted review: ocr_review ... --resume <session_id> (range, commit and workspace runs all support it, as long as the reviewed input is unchanged); scan sessions use ocr_scan ... --resume <session_id>.",
     rulesCheckHint:
       "Source names the winning layer (--rule/project/global/built-in) and Pattern the glob; rules are first-match in declaration order.",
     llmHint:
@@ -1195,7 +1196,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
   isolated and land in coverage.failedItems (in warnings when the output carries no manifest) instead of re-running
   everything. After a tool-layer timeout (min(request, the maxTimeoutMs setting of the shell executor itself,
   10 minutes by default) or partial file failures, use ocr_session to find the session_id and ocr_review --resume
-  to continue an interrupted range/commit review, or ocr_scan --resume to continue a scan.
+  to continue an interrupted review (workspace, commit and range alike, as long as the reviewed input
+  is unchanged), or ocr_scan --resume to continue a scan.
 `.trim(),
     routingSummary: [
       'When the user asks to "review the code / Review / check my changes / review this commit or PR", use the ocr tools:',
@@ -1229,16 +1231,16 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
 /** format() 的插值参数（调用方负责把值变成文本）。 */
 export type MessageParams = Record<string, string>;
 
-/** 花括号占位符（键限 \w+；`{path, content}` 这类字面花括号不匹配）。 */
-const PLACEHOLDER = /\{(?<key>\w+)\}/gu;
-
 /**
  * host 半的 `{name}` 插值：与卡片侧官方 Translate 同语法（宿主那份实现在
- * dsh-client-locale 里，host 侧没有 i18n 面，只能自带这一小段）。
+ * dsh-client-locale 里，host 侧没有 i18n 面，只能借 shared 的这份）。
+ *
+ * 实现已收进 shared 的 `@jayyuen66/dsh-plugin-shared/lib/placeholder`，语义统一成
+ * 「缺值保留原文」—— 漏传一个参数时原样留着的 `{xxx}` 一眼可见，不会让一句文案悄悄塌掉。
  * @param template - 带 `{name}` 占位符的文案模板。
- * @param params - 占位符 → 已字符串化的值；缺项替换为空串（不抛）。
+ * @param params - 占位符 → 已字符串化的值。
  * @returns 插值后的文本。
  */
 export function format(template: string, params: MessageParams): string {
-  return template.replaceAll(PLACEHOLDER, (_all: string, key: string) => params[key] ?? "");
+  return fillPlaceholders(template, params);
 }

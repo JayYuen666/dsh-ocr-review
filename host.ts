@@ -2,9 +2,10 @@
 //
 // 职责：
 //   1. 声明设置项（effort、language、autoVerify、maxComments、timeoutMinutes、
-//      ocrConfigPath）。命名空间是**隐式**的：宿主把本包导出 `Config` 里标了
-//      `.volatile()` 的字段投影成设置表单，ns = profile 条目 id（`ocr-review`，见
-//      cordis.patch.yml），没有 `settings.register(ns, schema, { base })` 这一层；
+//      ocrConfigPath、scanMaxTokens、scanConcurrency；另有三枚 scan 部署级旋钮
+//      scanMaxTools / scanNoPlan / scanNoDedup）。命名空间是**隐式**的：宿主把本包
+//      导出 `Config` 里标了 `.volatile()` 的字段投影成设置表单，ns = profile 条目 id
+//      （`ocr-review`，见 cordis.patch.yml），没有 `settings.register(ns, schema, { base })` 这一层；
 //      内置底座逐字段落成 schema 的 `.default()`，读本包设置一律 `config.<field>.get()`。
 //      本包自带卡片，故只登记一次页面策略 `{ auto: false }`，不让宿主再生成一份自动页。
 //   2. 注册 7 个模型工具：ocr_review（自驱 diff 审查）、ocr_scan（全文件扫描）、
@@ -213,6 +214,12 @@ import {
 import { SESSION_EXPORT_PREFIX, sweepStaleSessionExports } from "./lib/tmp-cleanup.ts";
 import { isPathInside, rebaseScanScope } from "./lib/scan-scope.ts";
 import {
+  applyScanDefaults,
+  SCAN_CONCURRENCY_DEFAULT,
+  SCAN_MAX_TOKENS_DEFAULT,
+  SCAN_MAX_TOOLS_DEFAULT,
+} from "./lib/scan-defaults.ts";
+import {
   REVIEW_PREVIEW_IGNORED,
   SCAN_PREVIEW_IGNORED,
   ignoredPreviewParams,
@@ -226,6 +233,10 @@ import type { DshConfigGateway, ProviderDescriptor } from "./lib/provider-source
 import type { OcrPaths } from "./lib/config-store.ts";
 import { hasMethods, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { errorText } from "@jayyuen66/dsh-plugin-shared/lib/errors";
+// 双路径装载的自保：market 热挂子树与 bundle 层会各跑一次 apply，注册面在第二遍撞名即抛。
+// 本模块已收进 shared，各插件仓不再各留一份副本；判据与取舍见它的头注释。
+import { claimInstance } from "@jayyuen66/dsh-plugin-shared/lib/instance-lock";
+import type { InstanceLockContext } from "@jayyuen66/dsh-plugin-shared/lib/instance-lock";
 
 // 官方给生产者的 kind 扩展点（installed dsh-jobs/lib/types/view.d.ts 的 JobKindMap，
 // dsh-tool-pwsh / dsh-tool-workflow 同款写法）：kind 既是命名空间也是 id 前缀。
@@ -283,6 +294,13 @@ const VERSION_PROBE_TIMEOUT_MS = 15_000;
  */
 const TOOL_TIMEOUT_MS = 1 * 60 * 60_000;
 const STDOUT_MAX_BYTES = 400_000;
+/**
+ * 单实例锁的服务名。dshmarket 热挂子树与 bundle 层会各跑一次 `apply`，第二遍的注册面会撞
+ * 「同名已注册」而把 fiber 打成 failed；抢这把锁能把第二遍安静地挡在注册面之外。
+ * 取包名形态而**不带随机后缀**：名字必须每一份实例都算出同一个串才可能互斥，随机后缀等于
+ * 谁都能抢到。判据与边界见 shared 的 lib/instance-lock 头注释。
+ */
+const INSTANCE_LOCK_KEY = "@jayyuen66/dsh-ocr-review/instance";
 // RAW_ECHO_LIMIT 的正文在 lib/foreground-summary.ts（与前台长任务收尾同一处口径），
 // 这里转出同名一份给本文件其余工具（delegate / session 的解析失败回显）与既有测试用。
 export { RAW_ECHO_LIMIT } from "./lib/foreground-summary.ts";
@@ -743,6 +761,11 @@ function textBlock(value: unknown): RenderedContent {
 
 // ── shell 执行与错误映射 ────────────────────────────────────────────────────
 
+/** OCR 的 resume 拒绝文案都以此开头（`internal/session/resume_identity.go` 的
+ *  十几条 `resume rejected: …` 与 `resume session %q …`）。只认这一族前缀，
+ *  其余英文错误原样带回——把不认识的失败也翻译掉，等于让模型读不到真正的原因。 */
+const RESUME_REJECTED = /^resume (?:rejected:|session )/mu;
+
 /** 失败详情：stderr 优先、空则退 stdout；先脱敏再截断（明文 key 绝不进工具错误
  *  ——错误文本会被持久化进会话日志）。省略标记是文案，故脱敏与截断的位置不变，
  *  只把中间的连接标记换成当前语言的那一份。两半各用一个函数，因为它们是两种缺陷：
@@ -752,6 +775,12 @@ function textBlock(value: unknown): RenderedContent {
 function failureDetail(result: ShellRunResult, messages: OcrReviewMessages): string {
   const raw = result.stderr.text === "" ? result.stdout.text : result.stderr.text;
   const detail = redactKeyMaterial(raw);
+  // 恢复被拒是**唯一**需要本地化的一条：workspace 恢复自 1.13.10 起由 OCR 自己按
+  // identity 判（HEAD 或未提交改动变了就拒），它回的是英文长句且带 `start a new
+  // review instead of resuming` 尾巴。翻译只做这一族，原文一并附在后面供排障。
+  if (RESUME_REJECTED.test(detail.trim())) {
+    return `${messages.resumeRejected}${messages.detailSeparator}${detail.trim()}`;
+  }
   return detail.length <= 800
     ? detail
     : `${truncateEnd(detail, 400)}${messages.middleEllipsis}${truncateStart(detail, 400)}`;
@@ -1293,9 +1322,6 @@ function define(host: HostCtx, config: Config, spec: ToolSpec): void {
 
 // ── 输出收尾 ────────────────────────────────────────────────────────────────
 
-/** 原始输出回显给模型或卡片之前的两道处理：截断 + 明文 key 脱敏。 */
-// ── 插件体 ─────────────────────────────────────────────────────────────────
-
 /**
  * OCR 原生数值参数的 tool schema 片段（忠实透传语义，桥接层不设钳制）。
  * unit 区分 review（每组）/ scan（每文件）的措辞；maxToolsTemplate 也按命令分开，因为
@@ -1330,10 +1356,10 @@ function tuningParams(
  *  命名空间不再是本包持有的字符串：宿主按 `.volatile()` 投影表单，ns = profile 条目
  *  id（`ocr-review`，见 cordis.patch.yml）；原先那份 `settings.register(ns, schema,
  *  { base })` 的 `base` 底座已删除，逐字段落成下面的 `.default(...)`（本包没有数组
- *  字段——数组是整体替换，默认值必须是完整的一份）。设置卡上那六项全是用户随时翻的
+ *  字段——数组是整体替换，默认值必须是完整的一份）。设置卡上那几项全是用户随时翻的
  *  开关，故标 `.volatile()`；一个都不标会让整条从 describe() 消失、写入抛
  *  `has no volatile fields`。volatile 字段以引用形态交进来，读当前值一律 `.get()`。
- *  下面另三项是**部署级**调优值，刻意不标 volatile：它们不进设置卡，改值随重启
+ *  其余都是**部署级**调优值，刻意不标 volatile：它们不进设置卡，改值随重启
  *  生效，以普通值的形态交进来（官方 config.md 里区分 volatile 与普通值的标准是「行 config 能不能不改代码改值」，
  *  不是「能不能在页面上改」）。 */
 export interface Config {
@@ -1396,6 +1422,37 @@ export interface Config {
    * `shell.maxTimeoutMs` 收敛之后的那个值），否则宿主会先掐断，本包的超时文案永远说不出话。
    */
   toolTimeoutMs: number;
+  /**
+   * `ocr_scan` 的 `--max-tokens` 缺省值（每次 LLM 请求的提示词预算）。0 = 不传，用 OCR
+   * 模板自带的 58888。卡片上可改（volatile），模型调用时显式传的值优先。
+   *
+   * 为什么要这一位：`scan_template.json` 的 `MAX_TOKENS = 58888`，而 OCR 的压缩闸把
+   * `0.80 × max_tokens`（= 47110）当成提示词上限——超过就在**文件级**报
+   * `prompt tokens (N) exceed 80% of max_tokens(M)` 并让那个文件失败。大文件多的仓
+   * 想逐文件扫完，只能抬这一位；它和 review 的 `--max-tokens` 是同一个 OCR flag
+   * （`shared_flags.go` 的 `maxTokensFlag`），但两边预算互不相干，故分开配。
+   */
+  scanMaxTokens: Volatile<number>;
+  /**
+   * `ocr_scan` 的 `--concurrency` 缺省值（同时在跑的 LLM 文件数）。0 = 不传，用 OCR
+   * 的 8。调低是为了给上游 provider 的限速让路（本包不管限速重试，那在 OCR 内部）。
+   */
+  scanConcurrency: Volatile<number>;
+  /**
+   * `ocr_scan` 的 `--max-tools` 缺省值（单文件工具调用轮数上限）。0 = 不传，用 OCR 模板
+   * 的 60。**语义与 review 不同：scan 只升不降**（`scan_cmd.go` 里
+   * `if opts.maxTools > scanTpl.MaxToolRequestTimes` 才赋值），所以小于 60 的值等于没设。
+   * 部署级：它是「一次扫描允许跑多久」的部署决定，不是随时要翻的开关。
+   */
+  scanMaxTools: number;
+  /**
+   * `ocr_scan` 默认带上 `--no-plan`：跳过逐文件的 PLAN_TASK 预检。部署级。
+   * 默认 false = 维持上游行为；不过 OCR 自己已经对不足 200 行的文件跳过预检
+   * （`PLAN_MODE_LINE_THRESHOLD`），这一位只影响更大的文件。
+   */
+  scanNoPlan: boolean;
+  /** `ocr_scan` 默认带上 `--no-dedup`：跳过批内去重（`DEDUP_MIN_COMMENTS = 4` 以下本就不去重）。部署级。 */
+  scanNoDedup: boolean;
 }
 
 /** settings 命名空间与 loader 行 config 共用同一 schema（唯一来源，防漂移）。
@@ -1431,6 +1488,17 @@ const configSchema = Schema.object({
   // 缺省 full = 保持 0.1.14 起的既有行为；inherit 才按宿主执行器自报的沙箱模式收窄。
   // 两档都由 lib/sandbox-policy.ts 落地，非法的 loader config 由 readOcrSandbox 回落 full。
   ocrSandbox: Schema.union(["full", "inherit"]).default("full"),
+  // ── ocr_scan 的深度旋钮（用户 m38036 选「两组都加」）─────────────────────────
+  // 前两位进设置卡（volatile，改完下一次扫描就生效）；后三位是部署级——它们描述
+  // 「这台机器上一轮扫描的默认姿态」，不该每回合翻。
+  // 0 = 不传该 flag、用 OCR 模板默认值（maxTokens 58888 / concurrency 8 / maxTools 60）。
+  // 不用 min(1) 挡 0：0 在这里是「交回 OCR 默认」的合法语义，与 stdoutMaxBytes 那种
+  // 「0 会让执行器收到零字节上限」的坏值不是一回事。
+  scanMaxTokens: Schema.natural().default(SCAN_MAX_TOKENS_DEFAULT).volatile(),
+  scanConcurrency: Schema.natural().default(SCAN_CONCURRENCY_DEFAULT).volatile(),
+  scanMaxTools: Schema.natural().default(SCAN_MAX_TOOLS_DEFAULT),
+  scanNoPlan: Schema.boolean().default(false),
+  scanNoDedup: Schema.boolean().default(false),
 });
 export { configSchema as Config };
 
@@ -2558,18 +2626,22 @@ function registerScanTool(
       // 原始目录不在 git 顶层内（极少数：符号链接指向仓库外/顶层解析异常）时不提升，
       // 否则 workdir 换了而 path 无法重基，扫描范围会被静默改变。
       const repo = isPathInside(canonical, rawReal) ? canonical : rawReal;
-      const scanArgs = rebaseScanScope(args, rawReal, repo);
-      const preview = previewOf(scanArgs["preview"], runMsgs);
+      // 重基只动 path/exclude，先做；设置里的 scan 缺省值**留到 preview 判完再补**——
+      // 那几位是 LLM-only 的，补早了会让 preview 的「以下参数已忽略」把设置缺省
+      // 误报成模型显式给的参数（判据见 lib/preview-params.ts 的「显式给出」）。
+      const rebased = rebaseScanScope(args, rawReal, repo);
+      const preview = previewOf(rebased["preview"], runMsgs);
       if (preview) {
         return runScanPreview({
           host,
           config,
-          args: scanArgs,
+          args: rebased,
           repo,
           signal: exec.signal,
           messages: runMsgs,
         });
       }
+      const scanArgs = applyScanDefaults(rebased, config);
       // wait=false = 后台：无 tmp、无 --output，结果以会话记录为准（ocr_session 轮询）。
       const wait = waitOf(args["wait"], runMsgs);
       const tmp = wait ? mkdtempSync(path.join(tmpdir(), "ocr-scan-")) : undefined;
@@ -3000,6 +3072,27 @@ function registerLlmTool(host: HostCtx, config: Config, probe: OcrAvailabilityPr
  */
 export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe): void {
   const host = resolveHost(ctx);
+  // 双路径装载的自保：market 热挂子树（`mkt-*`，走 file:// 直连 host.js）与 bundle 层会各跑
+  // 一次 apply，第二遍的工具/section/服务注册会撞「同名已注册」并把这条 fiber 打成 failed
+  // （插件页显示「启动失败」）。抢不到锁就整份让路：注册面已经由在册的那一份提供了，再注册
+  // 一遍本来也不可能成功。锁随那一份的 fiber 卸载自动释放，所以后续装配仍能抢到。
+  // 顺序上「后到者让路」与持久性天然一致：双挂只发生在用户经 market 现场启用插件的那一次会话
+  // 里（`hot-*.yml` 每次 boot 被 wipe），下一次启动只剩 bundle 层一条，自己就会恢复。
+  // `get` 包一层箭头：它是原型上的方法，直接取引用会丢 `this`（cordis 的 ctx 是 Proxy，
+  // 解绑后的方法读不到代理背后的 store）。`reflect` **整个传进去**、不要另包一层
+  // `{ provide: (n, v) => ctx.reflect.provide(n, v) }`：包出来的箭头恒是函数，于是「这台上下文
+  // 根本没有注册口」这一档（单测替身、精简宿主）会被伪装成「有注册口但 provide 抛错」，
+  // 让路判据当场误判成「已有一份在册」而把整份插件关掉。
+  const lockContext: InstanceLockContext = {
+    get: (name: string): unknown => ctx.get(name),
+    reflect: ctx.reflect,
+  };
+  if (!claimInstance(lockContext, INSTANCE_LOCK_KEY)) {
+    console.warn(
+      "[ocr-review] 检测到本插件已在同一作用域内装载：本次装配让路，工具与设置卡由在册的那一份提供。",
+    );
+    return;
+  }
   // 装载期自检：startupVerify 开着时量一次外部 CLI 版本（结论落在本次 apply 的闭包里，
   // 无常驻状态）。上游端点不在这里测——那是一次真实 provider 请求，归用户动作。
   // 外部 CLI 的实测版本同样落在这次 apply 的闭包里：装载期填一次，之后每次「检测」覆盖它。

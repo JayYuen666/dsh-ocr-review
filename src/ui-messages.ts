@@ -24,6 +24,9 @@ export interface UiMessages {
   readonly actionsLabel: string;
   /** 数字输入越界时的就地提示。 */
   readonly outOfRange: string;
+  /** 有字段越界时的保存条提示：`NumberField` 对越界草稿不调 `onChange`，
+   *  只看草稿差异的门禁会以为什么都没改，于是照样提交其余字段。 */
+  readonly invalidFields: string;
   /** 作用域只读时的状态条文本。 */
   readonly statusReadOnly: string;
   /** 有未保存改动时的状态条文本。 */
@@ -94,7 +97,9 @@ export interface UiMessages {
   readonly skippedPrefix: string;
   /** 回执：迁移失败。 */
   readonly migrateFailed: string;
-  /** effort 行标题。 */
+  /** effort 行标题。**必须写明只对 review 生效** —— scan 侧根本没有这个旋钮
+   *  （OCR 的 `--effort` 只注册在 review 上，且它唯一影响的 `MaxReviewRounds` 在
+   *  `scan_template.json` 里不存在），标签含糊就等于让人以为扫描也变深了。 */
   readonly effortLabel: string;
   /** effort 行说明。 */
   readonly effortHint: string;
@@ -118,6 +123,16 @@ export interface UiMessages {
   readonly timeoutLabel: string;
   /** timeoutMinutes 行说明。 */
   readonly timeoutHint: string;
+  /** scan 深度小节标题。 */
+  readonly scanSection: string;
+  /** scanMaxTokens 行标题。 */
+  readonly scanMaxTokensLabel: string;
+  /** scanMaxTokens 行说明。 */
+  readonly scanMaxTokensHint: string;
+  /** scanConcurrency 行标题。 */
+  readonly scanConcurrencyLabel: string;
+  /** scanConcurrency 行说明。 */
+  readonly scanConcurrencyHint: string;
   /** ocrConfigPath 行标题。 */
   readonly configPathLabel: string;
   /** ocrConfigPath 行说明。 */
@@ -245,6 +260,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     reviewSection: "审查参数",
     actionsLabel: "动作",
     outOfRange: "超出允许范围，未保存",
+    invalidFields: "有字段超出范围，先修正或撤销后再保存。",
     statusReadOnly: "当前作用域只读",
     statusDirty: "有未保存的修改，点「保存」生效",
     statusClean: "无未保存的修改",
@@ -280,9 +296,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noPlainKey: "没有需要迁移的明文 key",
     skippedPrefix: "\n跳过（settings 中无对应 apiKeyEnv）：",
     migrateFailed: "迁移失败",
-    effortLabel: "审查深度 (effort)",
+    effortLabel: "评审深度 (effort，仅 review)",
     effortHint:
-      "auto=跟随 OCR 自身配置 / low=1 轮快速反馈 / medium=2 轮 / high=3 轮深查（越深越贵）",
+      "auto=跟随 OCR 自身配置 / low=1 轮快速反馈 / medium=2 轮 / high=3 轮深查（越深越贵）。**只作用于 ocr_review**：OCR 的 --effort 只有 review 注册，它唯一影响的评审批数在 scan 模板里不存在——扫描深度看下面「扫描深度」小节",
     effortAuto: "auto — 跟随 OCR 配置",
     effortLow: "low — 快速",
     effortMedium: "medium — 均衡",
@@ -297,6 +313,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     timeoutLabel: "运行超时 (timeoutMinutes)",
     timeoutHint:
       "前台墙钟超时（分钟）；0 = 请求宿主上限（实际生效值由 shell 执行器自己的 maxTimeoutMs 设置项决定，可在 bash-local / pwsh-local 的设置行里改）；更长的评审用工具 wait=false 后台模式（不设宿主 deadline，兜底窗口看设置项 ocrBackgroundMaxMs，默认 0 = 不设窗口）（默认 0）",
+    scanSection: "扫描深度（ocr_scan 缺省值）",
+    scanMaxTokensLabel: "单次请求 token 预算 (scanMaxTokens)",
+    scanMaxTokensHint:
+      "透传 ocr scan 的 --max-tokens；0 = 用 OCR 模板自带的 58888。OCR 会把它的 80% 当成提示词上限（58888×0.8≈47110），超了就在文件级报 prompt tokens exceeds，大文件多的仓要抬这一位。模型调用时显式传的值优先",
+    scanConcurrencyLabel: "并发文件数 (scanConcurrency)",
+    scanConcurrencyHint:
+      "透传 ocr scan 的 --concurrency；0 = 用 OCR 默认的 8。上游 provider 有限速时调低这一位（限速重试在 OCR 内部，本包不管）",
     configPathLabel: "OCR 配置文件 (ocrConfigPath)",
     configPathHint:
       "外部 open-code-review CLI 自己的配置位置；留空 = ~/.opencodereview/config.json。自定义时必须是 <X>/.opencodereview/config.json 布局（OCR 只认该形状，插件经 HOME 重定向让它生效）",
@@ -351,6 +374,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     reviewSection: "Review parameters",
     actionsLabel: "Actions",
     outOfRange: "Out of the allowed range — not saved",
+    invalidFields: "Some fields are out of range; fix them or revert before saving.",
     statusReadOnly: "This scope is read-only",
     statusDirty: "Unsaved changes — press Save to apply",
     statusClean: "No unsaved changes",
@@ -389,9 +413,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     noPlainKey: "no plain-text keys to migrate",
     skippedPrefix: "\nSkipped (no apiKeyEnv in settings): ",
     migrateFailed: "migration failed",
-    effortLabel: "Review depth (effort)",
+    effortLabel: "Review depth (effort, review only)",
     effortHint:
-      "auto = follow the OCR config / low = 1 pass quick feedback / medium = 2 passes / high = 3 passes deep review (deeper costs more)",
+      "auto = follow the OCR config / low = 1 pass quick feedback / medium = 2 passes / high = 3 passes deep review (deeper costs more). **This only affects ocr_review**: OCR registers --effort for review alone and the pass count it changes does not exist in the scan template — scan depth lives in the section below",
     effortAuto: "auto — follow the OCR config",
     effortLow: "low — quick",
     effortMedium: "medium — balanced",
@@ -406,6 +430,13 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     timeoutLabel: "Run timeout (timeoutMinutes)",
     timeoutHint:
       "Foreground wall-clock timeout in minutes; 0 = ask for the host cap (the effective value comes from the maxTimeoutMs setting of the shell executor itself — edit it on the bash-local / pwsh-local settings row); for longer reviews use the tool's wait=false background mode (no host deadline; the backstop window is the ocrBackgroundMaxMs setting, default 0 = none) (default 0)",
+    scanSection: "Scan depth (ocr_scan defaults)",
+    scanMaxTokensLabel: "Per-request token budget (scanMaxTokens)",
+    scanMaxTokensHint:
+      "Passed through as ocr scan's --max-tokens; 0 = use the OCR template's 58888. OCR treats 80% of it as the prompt ceiling (58888×0.8≈47110) and fails a file with `prompt tokens exceeds` once it goes over, so repositories with large files need this raised. An explicit value in the tool call wins",
+    scanConcurrencyLabel: "Concurrent files (scanConcurrency)",
+    scanConcurrencyHint:
+      "Passed through as ocr scan's --concurrency; 0 = use the OCR default of 8. Lower it when the upstream provider rate-limits you (retries live inside OCR, not here)",
     configPathLabel: "OCR config file (ocrConfigPath)",
     configPathHint:
       "Where the external open-code-review CLI keeps its own config; empty = ~/.opencodereview/config.json. A custom value must follow the <X>/.opencodereview/config.json layout (OCR only reads that shape; the plugin makes it effective via a HOME redirect)",
