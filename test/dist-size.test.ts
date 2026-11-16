@@ -9,8 +9,9 @@
 // 留这一截是给正常演进的——加一条规则、改一句文案不该立刻逼人来改预算；翻倍一定会顶穿。
 // 它不是验收线：确属正常演进就改这里对应的常量，别为了过门去压缩产物正文。
 //
-// 明确不做的事：**不开 minify**。压缩之后，靠标识符匹配文本的那几条断言（内联体的函数名会被改名）会失效，
-// 省下的体积不值得废掉那几条外部化的门禁。
+// minify 的分工：host.js 不压缩——`test/build-host.test.ts` 靠说明符与标识符文本钉外部化，
+// 压缩会废掉那几条门禁；client.js 自 0.1.20 起压缩（build-client.mjs 的 `minify`），包名同源
+// 判据随之改读源码声明，本门对它只看体积。
 import { describe, it } from "vitest";
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
@@ -25,9 +26,9 @@ const BUDGETS: readonly (readonly [string, number])[] = [
   // preview 的 ignoredParams、delegate preview 计数与 MCP URL 严格语法校验。
   ["host.js", 368_000],
   // MCP/ChatGPT 管理区（编辑框、状态与双语按钮）后的正常演进。
-  // 设置卡迁到 @jayyuen66/dsh-plugin-shared/lib/card-ui 后，卡片样式与组件逻辑随包进
-  // client.js（实测增加约 3 KB），预算按迁移后的实量重定。
-  ["client.js", 116_000],
+  // shared 客户端行改为 external 并开启 minify 后实测 45,781 B；shared card-ui 的字节
+  // 不再计入本产物，按实测 × 1.25 取整重定。
+  ["client.js", 58_000],
 ];
 
 describe("产物体积", () => {

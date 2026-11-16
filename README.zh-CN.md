@@ -48,6 +48,7 @@
 - [ 已知边界](#-已知边界)
 - [ 常见问题](#-常见问题)
 - [ 开发](#-开发)
+- [ 反馈](#反馈)
 - [ 许可](#-许可)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
@@ -112,7 +113,7 @@ npm i -g @alibaba-group/open-code-review@1.13.10      # 钉在本包核对的那
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 在 dsh 里启用
 
-- `package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面只有一条 `- id: ocr-review`、`name` 为裸包名——宿主只按裸包名扫描 client 半。卡片组件直接打进 `client.js`（只有 `react` / `zod` 外置给宿主模块表），卡片不再依赖第二份包被装载。
+- `package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，里面有一条 `- id: dsh-plugin-shared` 供应行（必须保持开启；停用后卡片会失去 shared 组件供应），再加一条 `- id: ocr-review`、`name` 为裸包名——宿主只按裸包名扫描 client 半。卡片组件来自 shared 的客户端行，以 `@jayyuen66/dsh-plugin-shared/client` 外置；宿主模块表提供 `react`、`zod` 与这条 shared 供应。
 - 卡片要 web profile（`dsh.client.platform: web`、`immediately: true`）。九个 `ocrReview` 方法由 apply fiber 无条件注册，宿主的 web 层从不起（如 TUI）时工具与设置照常在。
 - 网关只把方法暴露给本 profile 的客户端；本包不在它前面再加一层。
 - 部署默认写在注册行的 `config:` 上（cordis 按导出的 `Config` schema 校验）；优先级：设置卡运行时值 > 行 config > 内置默认。
@@ -243,6 +244,12 @@ pnpm run check   # typecheck（两侧）→ lint → client 构建 → host 构�
 - 往 profile 加本包的**本地目录**（`pnpm add <路径>`）需要 pnpm ≥ 12.3.0：更早的 pnpm 12 把无别名的本地路径当 registry 包名解析（上游 #14437，12.3.0 修复）。从 registry 装不受影响。
 - 产物是否最新由 `test/build-host.test.ts` 固定着：`host.js` / `client.js` 落后于源码就红。发布物不手改；`prepare` 重建。
 - 插件源码是 TypeScript，由宿主的 cordis Loader 直接加载（Node ≥ 22.18 类型剥离）；bundle 只为 npm 发布清单存在。从本地目录安装（`pnpm add <路径>`）读的是源码，因此需要 Node ≥ 22.18，而本包自己声明的下限是 `engines.node`（`>=24.9.0`）。
+
+## 反馈
+
+欢迎提 issue 和 PR：[https://github.com/JayYuen666/dsh-ocr-review/issues](https://github.com/JayYuen666/dsh-ocr-review/issues)。
+
+插件启动失败时，请附上 dsh 宿主版本、profile 安装形态和浏览器控制台原文。`missed the module table` 这一行尤其有用：它能直接说明 shared 客户端供应行有没有被物化。
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 许可
 

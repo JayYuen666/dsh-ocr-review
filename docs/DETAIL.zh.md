@@ -35,3 +35,9 @@ API 凭据不存这里：本插件写的是一个 `api_key_cmd`，运行时的�
 ## 更完整的说明
 
 暴露给模型的工具清单、后台评审如何落成宿主作业、参数守卫的旗标对照表都写在随包 README（`README.md` / `README.zh-CN.md`）。
+
+## 反馈
+
+欢迎提 issue 和 PR：[https://github.com/JayYuen666/dsh-ocr-review/issues](https://github.com/JayYuen666/dsh-ocr-review/issues)。
+
+插件启动失败时，请附上 dsh 宿主版本、profile 安装形态和浏览器控制台原文。`missed the module table` 这一行尤其有用：它能直接说明 shared 客户端供应行有没有被物化。

@@ -35,3 +35,9 @@ API credentials are not stored here: the plugin writes a `api_key_cmd` that call
 ## Further detail
 
 The tool list exposed to the model, how background reviews become host jobs and the argument guard's flag table are in the package README (`README.md` / `README.zh-CN.md`).
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-ocr-review/issues](https://github.com/JayYuen666/dsh-ocr-review/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.

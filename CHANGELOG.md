@@ -6,6 +6,10 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.20
+
+将 `@jayyuen66/dsh-plugin-shared` 抬到 `^0.2.10`。设置卡吸底保存条的旧固定 id 冲突与底色随 shared 修复；shared 的 `registerSkill` 在 effect 挂不上时立即撤销注册并回 `false`，本包 skill 不会再在卸载后留在目录里（`lib/skill.ts` 的入参类型随之收紧为 shared 的 `SkillRegistryContext`，让 `effect` 撤销权这条契约在类型上可见）。设置卡组件改回由 shared 供应：`cordis.patch.yml` 显式插入固定 id `dsh-plugin-shared` 的供应行（停用后卡片失去 shared 组件供应），`package.json` 的 `dsh.client.external` 声明 `@jayyuen66/dsh-plugin-shared/client`，client bundle 外置该行并开启 minify（实测 45,781 B，shared card-ui 的字节不再计入本产物；`verifyName` 的包名同源判据随之从产物文本计数改为读源码声明）。工具、Remote 方法与配置项不变。
+
 ## 0.1.19
 
 market 热挂与 bundle 层双路径装载时第二份 `apply` 整份让路（此前第二遍会撞「同名已注册」把 fiber 打成 failed）；设置卡接「有字段越界就不许保存」那道门禁；卡片样式改用 shared 的共享 `<style>`；shared 抬到 `^0.2.9`，输入框不再撑出容器、小节内补上纵向间距；外部 `ocr` 契约抬到 `1.13.10`，工作区也能恢复评审，设置卡补上扫描深度那组旋钮。对外工具与 Remote 方法名单不变。

@@ -1034,10 +1034,14 @@ function volatileFormOf(node: SchemaNode): string[] | null {
  *  读文件而不是抄常量：卡片/端点/命名空间三处都按它对齐，写死会让测试与包体漂移。 */
 function patchEntryId(): string {
   const yml = readFileSync(fileURLToPath(new URL("../cordis.patch.yml", import.meta.url)), "utf8");
-  const id = Array.from(
+  const ids = Array.from(
     yml.matchAll(/^\s*-\s+id:\s*(?<id>\S+)\s*$/gmu),
     (row) => row.groups?.["id"] ?? "",
-  ).find((candidate) => candidate !== "");
+  );
+  if (!ids.includes("dsh-plugin-shared")) {
+    throw new Error("shared 供应行必须使用固定 id");
+  }
+  const id = ids.find((candidate) => candidate !== "" && candidate !== "dsh-plugin-shared");
   if (typeof id !== "string" || id.length === 0) {
     throw new Error("cordis.patch.yml 里没有本包只写 `- id:` 的条目");
   }
@@ -2869,10 +2873,11 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       // 前提钉子：这一档替身交不出注册表，用例走的才确实是「安静跳过」那一分支。
       expect(host.get("jobs")).toBeUndefined();
       applyPlugin(host);
-      // 释放器确实登记了：主 fiber 上是生命周期取消 + 作业回收两位（插件卸载、会话
-      // dispose），五条端点的释放器挂在注入子 fiber 的 injectEffectDisposers 上；否则
-      // 下面的循环没有实际校验、覆盖率是假象。
-      expect(host.effectDisposers).toHaveLength(3);
+      // 释放器确实登记了，主 fiber 上是四位：生命周期取消、作业回收、会话停止回收，
+      // 以及**虚拟 skill 的撤销权**（shared 的 `registerSkill` 拿到 disposer 后交给调用方
+      // fiber —— 不交的话插件卸载后 skill 仍留在模型目录里）；五条端点的释放器挂在注入子
+      // fiber 的 injectEffectDisposers 上；否则下面的循环没有实际校验、覆盖率是假象。
+      expect(host.effectDisposers).toHaveLength(4);
       for (const dispose of host.effectDisposers) {
         dispose();
       }

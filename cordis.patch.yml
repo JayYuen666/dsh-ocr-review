@@ -14,5 +14,9 @@
 # registry 包名解析；12.1.0/12.2.0 复现，12.2.0 的 release notes 无修复），12.3.0 起修复。
 # 把本包目录加进 profile 前先确认 pnpm ≥12.3.0；从 registry 装不受影响。
 - insert:
+    # 固定 id：该供应行必须保持开启；停用后本包设置卡会失去 shared 客户端供应。
+    # 多个插件共用同一个 id，宿主会把开关标成“无法唯一定位”并禁用。
+    - id: dsh-plugin-shared
+      name: "@jayyuen66/dsh-plugin-shared"
     - id: ocr-review
       name: "@jayyuen66/dsh-ocr-review"

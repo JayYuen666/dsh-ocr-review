@@ -48,6 +48,7 @@
 - [ Known boundaries](#-known-boundaries)
 - [ FAQ](#-faq)
 - [ Development](#-development)
+- [ Feedback](#feedback)
 - [ License](#-license)
 
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> What it does
@@ -112,7 +113,7 @@ npm i -g @alibaba-group/open-code-review@1.13.10      # pinned to the version th
 
 ## <img src="https://api.iconify.design/lucide/plug.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> Enabling it in dsh
 
-- `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, which carries a single entry `- id: ocr-review` with `name` set to the bare package name — the bare name is what makes the host scan the client half. The card components are bundled into `client.js` (only `react` / `zod` stay external to the host's module table), so no second package has to be loaded for the card to work.
+- `dsh.bundle.patch` in `package.json` points at `cordis.patch.yml`, which carries a `- id: dsh-plugin-shared` supplier row (keep it enabled; disabling it removes the cards' shared component supply) plus the `- id: ocr-review` entry with `name` set to the bare package name — the bare name is what makes the host scan the client half. The card components come from the shared client row, externalized as `@jayyuen66/dsh-plugin-shared/client`; the host module table provides `react`, `zod` and that shared row.
 - The card needs a web profile (`dsh.client.platform: web`, `immediately: true`). The nine `ocrReview` methods are installed unconditionally on the apply fiber, so a host whose web layer never comes up (a TUI) still has the tools and settings.
 - The gateway exposes the methods only to clients of this profile; this package adds nothing in front of it.
 - Deployment defaults go on the registration line's `config:` (cordis validates through the exported `Config` schema); precedence: settings-card runtime value > line config > built-in default.
@@ -243,6 +244,12 @@ pnpm run check   # typecheck (both sides) → lint → client build → host bui
 - Adding this package's **local directory** to a profile (`pnpm add <path>`) needs pnpm ≥ 12.3.0: earlier pnpm 12 releases resolve an unaliased local path as a registry package name (upstream #14437, fixed in 12.3.0). Installing from the registry is unaffected.
 - Bundle freshness is pinned by `test/build-host.test.ts`: a stale `host.js` / `client.js` fails the suite. Never hand-edit the bundles; `prepare` rebuilds them.
 - The plugin source is TypeScript loaded directly by the host's cordis loader (Node ≥ 22.18 type stripping); the bundles exist for the published npm surface. Installing from a local path (`pnpm add <path>`) therefore reads the source and needs Node ≥ 22.18, while this package's own declared floor is `engines.node` (`>=24.9.0`).
+
+## Feedback
+
+Issues and pull requests are welcome: [https://github.com/JayYuen666/dsh-ocr-review/issues](https://github.com/JayYuen666/dsh-ocr-review/issues).
+
+If a plugin fails to boot, include the dsh host version, the profile install shape, and the browser console line. The `missed the module table` line is especially useful: it tells us whether the shared client row was materialized.
 
 ## <img src="https://api.iconify.design/lucide/scale.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> License
 
