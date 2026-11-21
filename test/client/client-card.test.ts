@@ -19,8 +19,11 @@ import {
   cardStore,
   buildProviderSection,
   buildSettingsSection,
+  buildScanSection,
   buildAdminSection,
   saveSettingsDraft,
+  runChatGptSwitch,
+  runMcpSave,
   buildCliStatusRow,
   buildCliBadge,
   buildCliSection,
@@ -352,6 +355,11 @@ function makeCtx(options: { bound?: Translate } = {}): CardCtxHarness {
 /** sensenova 样本的模型标识与 baseURL（与 test/fixtures/settings-fixture.ts 同值，
  *  在此独立声明而不引实现侧常量：渲染断言必须对着「期望值」，而不是对着实现自己用的名）。 */
 const SENSENOVA_MODEL = "deepseek-v4-flash";
+const GPT_MODEL = "gpt-6";
+const AUTH_LOGIN_COMMAND = "ocr auth login --provider chatgpt";
+const REFUSE_REASON = "boom";
+const CARRIER_DOWN = "carrier down";
+const MCP_JSON_DRAFT = '{"servers":{}}';
 const SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1";
 
 const BASE_DEPS: OcrCardDeps = {
@@ -359,6 +367,7 @@ const BASE_DEPS: OcrCardDeps = {
   data: null,
   fetchError: null,
   busy: null,
+  configWritesBusy: false,
   actionMsg: null,
   ready: true,
   writable: true,
@@ -402,6 +411,9 @@ const depsWith = (t: Translate, over: Partial<OcrCardDeps> = {}): OcrCardDeps =>
   ...BASE_DEPS,
   t,
   ...over,
+  // configWritesBusy 与 busy 同源（OcrCard 里前者由后者推出）：夹具不显式给值时按 busy
+  // 推导，「动作在飞 ⇒ 各入口按钮禁用」的既有语义不因互斥位的引入而漂移。
+  configWritesBusy: over.configWritesBusy ?? (over.busy !== undefined && over.busy !== null),
 });
 
 // displayName 用 ASCII：英文那份的断言是「整棵子树无汉字」，不能被样本数据里的
@@ -719,7 +731,7 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(loading(tZh)).toContain("加载 providers…");
     expect(loading(tEn)).toContain("loading providers…");
     const failed = (t: Translate): string =>
-      textOf(buildProviderSection(depsWith(t, { fetchError: "boom" })));
+      textOf(buildProviderSection(depsWith(t, { fetchError: REFUSE_REASON })));
     expect(failed(tZh)).toContain("加载 providers 失败：boom（远程面未就绪？重启 dsh 后重试）");
     expect(failed(tEn)).toContain("failed to load providers: boom");
     const degraded = (t: Translate): string =>
@@ -806,6 +818,9 @@ interface ElementProps {
   disabled?: boolean;
   value?: unknown;
   onClick?: (() => void) | undefined;
+  /** shared 的 Callout 走 `field`（组件内再写成 data-field），元素树里只能看这一位。 */
+  field?: string;
+  tone?: string;
 }
 
 /** 元素树里按 data-field 找一位：文本断言看不出 class 与 disabled，属性得单独取。 */
@@ -826,7 +841,8 @@ function fieldProps(node: unknown, field: string): ElementProps | null {
   if (props === undefined) {
     return null;
   }
-  return props["data-field"] === field ? props : fieldProps(props.children, field);
+  const hitHere = props["data-field"] === field || props.field === field;
+  return hitHere ? props : fieldProps(props.children, field);
 }
 
 describe("admin section", () => {
@@ -845,8 +861,8 @@ describe("admin section", () => {
       authOutput: "Logged in as a@b",
       authBusy: false,
       authMsg: null,
-      authModel: "gpt-6",
-      loginCommand: "ocr auth login --provider chatgpt",
+      authModel: GPT_MODEL,
+      loginCommand: AUTH_LOGIN_COMMAND,
       onMcpChange: noop,
       onMcpSave: () => {
         saved += 1;
@@ -859,26 +875,26 @@ describe("admin section", () => {
         used += 1;
       },
     };
-    const node = buildAdminSection(base);
+    const node = buildAdminSection(base, false);
     const zh = textOf(node);
     expect(zh).toContain("MCP servers");
     expect(zh).toContain("检查登录态");
-    expect(zh).toContain("ocr auth login --provider chatgpt");
+    expect(zh).toContain(AUTH_LOGIN_COMMAND);
     expect(zh).toContain("Logged in as a@b");
     expect(fieldProps(node, "mcpJson")?.value).toBe(base.mcpJson);
     expect(fieldProps(node, "mcpJson")?.disabled).toBe(false);
-    expect(fieldProps(node, "chatGptModel")?.value).toBe("gpt-6");
+    expect(fieldProps(node, "chatGptModel")?.value).toBe(GPT_MODEL);
     fieldProps(node, "mcpSave")?.onClick?.();
     fieldProps(node, "authCheck")?.onClick?.();
     fieldProps(node, "chatGptUse")?.onClick?.();
     expect([saved, checked, used]).toStrictEqual([1, 1, 1]);
     // 还没读到当前配置：编辑器与保存都禁用——里面的 "{}" 不是真实配置，保存会整段覆盖。
-    const unloaded = buildAdminSection({ ...base, mcpReady: false });
+    const unloaded = buildAdminSection({ ...base, mcpReady: false }, false);
     expect(fieldProps(unloaded, "mcpJson")?.disabled).toBe(true);
     expect(fieldProps(unloaded, "mcpSave")?.disabled).toBe(true);
-    const disabled = textOf(buildAdminSection({ ...base, available: false }));
+    const disabled = textOf(buildAdminSection({ ...base, available: false }, false));
     expect(disabled).toContain("不可用");
-    const en = textOf(buildAdminSection({ ...base, t: tEn }));
+    const en = textOf(buildAdminSection({ ...base, t: tEn }, false));
     expect(en).not.toMatch(HAN);
     expect(en).toContain("MCP servers");
     expect(en).toContain("Use ChatGPT");
@@ -1087,11 +1103,12 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     const failed = buildCliStatusRow(
       depsWith(tZh, { probeMsg: { ok: false, text: "未取到版本号：x" } }),
     );
-    const props = fieldProps(failed, PROBE_RESULT);
-    expect(String(props?.className)).toContain("ocr-err");
+    // Callout 是函数组件：树里拿到的是 tone prop，class 由 shared 按 tone 映射。
+    const failedProps = fieldProps(failed, PROBE_RESULT);
+    expect(failedProps?.tone).toBe("err");
     expect(textOf(failed)).toContain("未取到版本号：x");
     const passed = buildCliStatusRow(depsWith(tEn, { probeMsg: { ok: true, text: "v" } }));
-    expect(String(fieldProps(passed, PROBE_RESULT)?.className)).toContain("ocr-ok");
+    expect(fieldProps(passed, PROBE_RESULT)?.tone).toBe("ok");
   });
 
   it("loadCliStatus 只读 ocrBinary 那半，读不到（含没有远程通道）都归成 null", async () => {
@@ -1185,7 +1202,7 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
 
   it("buildCliBadge 落出徽标元素并带上短文案", () => {
     const node = buildCliBadge(tZh, viewOf({ source: "bundled" }));
-    expect(String(fieldProps(node, "cli-badge")?.className)).toContain("ocr-hint");
+    expect(String(fieldProps(node, "cli-badge")?.className)).toContain("dsu-hint");
     // textOf 会把 className/data-field 一起拼进来，所以按「含短文案」断言而不是整串相等。
     expect(textOf(node)).toContain("ocr 走随包兜底");
     expect(textOf(buildCliBadge(tEn, null))).toContain("ocr status unavailable");
@@ -1404,14 +1421,19 @@ describe("检测版本这条动作：动作名、回执文本与忙位回收", (
   });
 });
 
-/** 保存动作的替身：按字段给出 true / false / reject，其余记录到 sinks。 */
+/** 保存动作的替身：按字段给出 true / false / reject，其余记录到 sinks。
+ *  `setTouched` 的实参可能是函数式更新（保存往返期间的新编辑不覆盖），替身照 React
+ *  setState 的语义结算：函数就喂入当前值，对象就整体替换。 */
 function saveDeps(
   results: Record<string, boolean | Error>,
   touched: Record<string, unknown>,
   sinks: {
-    setTouched: (next: Record<string, unknown>) => void;
+    setTouched: (
+      next: Record<string, unknown> | ((prev: Record<string, unknown>) => Record<string, unknown>),
+    ) => void;
     setSaveError: (message: string | null) => void;
     setSettingsBusy: (value: boolean) => void;
+    onSaved?: () => void;
   },
 ): SaveDraftDeps {
   return {
@@ -1431,7 +1453,9 @@ function saveDeps(
 
 describe("saveSettingsDraft：按字段收集受理结果，不是一处失败全丢", () => {
   it("部分字段被拒 ⇒ 只把被拒的留在 touched 上，成功的算已写", async () => {
-    let touchedAfter: Record<string, unknown> = { seeded: true };
+    // 函数式更新把「卡片此刻的 touched」当 prev：替身的初值就是 saveDeps 收到的那份，
+    // 不是别的种子对象——否则 keepNewerEdits 的合并基准就是假的。
+    let touchedAfter: Record<string, unknown> = { maxComments: 20, timeoutMinutes: 30 };
     let error: string | null = null;
     let busyAfter: boolean | undefined;
     await saveSettingsDraft(
@@ -1439,8 +1463,8 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
         { maxComments: true, timeoutMinutes: false },
         { maxComments: 20, timeoutMinutes: 30 },
         {
-          setTouched: (next) => {
-            touchedAfter = next;
+          setTouched: (incoming) => {
+            touchedAfter = typeof incoming === "function" ? incoming(touchedAfter) : incoming;
           },
           setSaveError: (message) => {
             error = message;
@@ -1476,7 +1500,7 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
       set: (field: string) => {
         seen.push(field);
         if (field === "maxComments") {
-          return Promise.reject(new Error("boom"));
+          return Promise.reject(new Error(REFUSE_REASON));
         }
         return slow;
       },
@@ -1502,15 +1526,16 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
   });
 
   it("全部受理 ⇒ 清空 touched 且不报错", async () => {
-    let touchedAfter: Record<string, unknown> | null = { seeded: true };
+    // 初值与卡片真实的 touched 同源（见上一条用例的说明）。
+    let touchedAfter: Record<string, unknown> | null = { maxComments: 20 };
     let error: string | null = "stale";
     await saveSettingsDraft(
       saveDeps(
         { maxComments: true },
         { maxComments: 20 },
         {
-          setTouched: (next) => {
-            touchedAfter = next;
+          setTouched: (incoming) => {
+            touchedAfter = typeof incoming === "function" ? incoming(touchedAfter ?? {}) : incoming;
           },
           setSaveError: (message) => {
             error = message;
@@ -1523,6 +1548,370 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
     );
     expect(touchedAfter).toStrictEqual({});
     expect(error).toBeNull();
+  });
+});
+
+// ── 写盘成功才重读（跨入口互斥的另一半：落盘后的远端面刷新）────────────────────
+
+/** 只有 chatGpt/mcp/saveMcp 被点名的写盘体用例用：其余成员全是「不该被调用」的哨兵。 */
+function stubReader(over: Partial<Pick<OcrReader, "chatGpt" | "mcp" | "saveMcp">>): OcrReader {
+  return {
+    providers: unusedReaderMethod,
+    select: unusedReaderMethod,
+    migrate: unusedReaderMethod,
+    test: unusedReaderMethod,
+    probe: unusedReaderMethod,
+    mcp: unusedReaderMethod,
+    saveMcp: unusedReaderMethod,
+    auth: unusedReaderMethod,
+    chatGpt: unusedReaderMethod,
+    ...over,
+  };
+}
+
+describe("runChatGptSwitch：写成功才触发 providers 重读", () => {
+  it("成功 ⇒ onSaved 一次；拒绝回执与传输失败 ⇒ 不触发；busy 两态都回收", async () => {
+    const saved: number[] = [];
+    const busyTrail: boolean[] = [];
+    const msgs: (string | null)[] = [];
+    await runChatGptSwitch({
+      reader: stubReader({ chatGpt: async () => ({ ok: true, model: GPT_MODEL }) }),
+      t: tZh,
+      model: GPT_MODEL,
+      setBusy: (value) => {
+        busyTrail.push(value);
+      },
+      setMsg: (message) => {
+        msgs.push(message);
+      },
+      onSaved: () => {
+        saved.push(1);
+      },
+    });
+    expect(saved).toStrictEqual([1]);
+    expect(busyTrail).toStrictEqual([true, false]);
+    expect(msgs).toStrictEqual([null, tZh("chatGptSaved")]);
+
+    // 拒绝回执（判别位 status）：只进消息，不重读。
+    await runChatGptSwitch({
+      reader: stubReader({
+        chatGpt: async () => ({ ok: false, status: 400, error: REFUSE_REASON }),
+      }),
+      t: tZh,
+      model: GPT_MODEL,
+      setBusy: (value) => {
+        busyTrail.push(value);
+      },
+      setMsg: (message) => {
+        msgs.push(message);
+      },
+      onSaved: () => {
+        saved.push(1);
+      },
+    });
+    expect(saved).toStrictEqual([1]);
+    expect(msgs.at(-1)).toContain(REFUSE_REASON);
+
+    // 传输失败：同上，busy 照样回收。
+    await runChatGptSwitch({
+      reader: stubReader({
+        chatGpt: async () => {
+          throw new Error(CARRIER_DOWN);
+        },
+      }),
+      t: tZh,
+      model: GPT_MODEL,
+      setBusy: (value) => {
+        busyTrail.push(value);
+      },
+      setMsg: (message) => {
+        msgs.push(message);
+      },
+      onSaved: () => {
+        saved.push(1);
+      },
+    });
+    expect(saved).toStrictEqual([1]);
+    expect(busyTrail).toStrictEqual([true, false, true, false, true, false]);
+    expect(msgs.at(-1)).toContain(CARRIER_DOWN);
+  });
+});
+
+describe("runMcpSave：没读成功不写盘；写成功回读盘上现值", () => {
+  it('没读成功 ⇒ 不发保存请求（编辑器里的 "{}" 不是真实配置）', async () => {
+    const saves: { json: string; revision: string | undefined }[] = [];
+    const reloads: number[] = [];
+    const msgs: (string | null)[] = [];
+    await runMcpSave({
+      reader: stubReader({
+        saveMcp: async (json, revision) => {
+          saves.push({ json, revision });
+          return { ok: true, count: 2, revision: "rev-2" };
+        },
+      }),
+      t: tZh,
+      json: "{}",
+      revision: undefined,
+      loaded: false,
+      setBusy: () => {
+        /* 本用例不看 busy */
+      },
+      setMsg: (message) => {
+        msgs.push(message);
+      },
+      clearDirty: () => {
+        /* 本用例不看 dirty */
+      },
+      setRevision: () => {
+        /* 同上 */
+      },
+      reload: () => {
+        reloads.push(1);
+      },
+    });
+    expect(saves).toStrictEqual([]);
+    expect(reloads).toStrictEqual([]);
+    expect(msgs).toStrictEqual([tZh("mcpNotLoaded")]);
+  });
+
+  it("成功 ⇒ 回读触发、dirty 清零、新基线写回、busy 两态回收", async () => {
+    const saves: { json: string; revision: string | undefined }[] = [];
+    const reloads: number[] = [];
+    const dirtyCleared: number[] = [];
+    const revisions: string[] = [];
+    const busyTrail: boolean[] = [];
+    const msgs: (string | null)[] = [];
+    await runMcpSave({
+      reader: stubReader({
+        saveMcp: async (json, revision) => {
+          saves.push({ json, revision });
+          return { ok: true, count: 2, revision: "rev-2" };
+        },
+        mcp: async () => ({ ok: true, json: '{"normalized":true}', revision: "rev-read" }),
+      }),
+      t: tZh,
+      json: MCP_JSON_DRAFT,
+      revision: "rev-1",
+      loaded: true,
+      setBusy: (value) => {
+        busyTrail.push(value);
+      },
+      setMsg: (message) => {
+        msgs.push(message);
+      },
+      clearDirty: () => {
+        dirtyCleared.push(1);
+      },
+      setRevision: (revision) => {
+        revisions.push(revision);
+      },
+      reload: () => {
+        reloads.push(1);
+      },
+    });
+    expect(saves).toStrictEqual([{ json: MCP_JSON_DRAFT, revision: "rev-1" }]);
+    expect(reloads).toStrictEqual([1]);
+    expect(dirtyCleared).toStrictEqual([1]);
+    expect(revisions).toStrictEqual(["rev-2"]);
+    expect(busyTrail).toStrictEqual([true, false]);
+    expect(msgs[1]).toContain(tZh("mcpSaved"));
+  });
+
+  it("拒绝回执与传输失败 ⇒ 不回读、不新基线；拒绝时 dirty 也不清", async () => {
+    const reloads: number[] = [];
+    const dirtyCleared: number[] = [];
+    const busyTrail: boolean[] = [];
+    const msgs: (string | null)[] = [];
+    const refused = runMcpSave({
+      reader: stubReader({
+        saveMcp: async () => ({ ok: false, status: 400, error: "baseline drift" }),
+      }),
+      t: tZh,
+      json: "{}",
+      revision: "rev-1",
+      loaded: true,
+      setBusy: (value) => {
+        busyTrail.push(value);
+      },
+      setMsg: (message) => {
+        msgs.push(message);
+      },
+      clearDirty: () => {
+        dirtyCleared.push(1);
+      },
+      setRevision: () => {
+        /* 本用例不看基线 */
+      },
+      reload: () => {
+        reloads.push(1);
+      },
+    });
+    const carrier = runMcpSave({
+      reader: stubReader({
+        saveMcp: async () => {
+          throw new Error(CARRIER_DOWN);
+        },
+      }),
+      t: tZh,
+      json: "{}",
+      revision: "rev-1",
+      loaded: true,
+      setBusy: (value) => {
+        busyTrail.push(value);
+      },
+      setMsg: (message) => {
+        msgs.push(message);
+      },
+      clearDirty: () => {
+        dirtyCleared.push(1);
+      },
+      setRevision: () => {
+        /* 本用例不看基线 */
+      },
+      reload: () => {
+        reloads.push(1);
+      },
+    });
+    await refused;
+    await carrier;
+    expect(reloads).toStrictEqual([]);
+    expect(dirtyCleared).toStrictEqual([]);
+    expect(busyTrail).toStrictEqual([true, true, false, false]);
+    // 两条保存各自先置 null 提示：过滤后再按顺序断言拒因。
+    const texts = msgs.filter((message): message is string => message !== null);
+    expect(texts.at(0)).toContain("baseline drift");
+    expect(texts.at(1)).toContain(CARRIER_DOWN);
+  });
+});
+
+describe("configWritesBusy 与 settingsBusy 的禁用面", () => {
+  const adminBase = {
+    available: true,
+    mcpJson: MCP_JSON_DRAFT,
+    mcpReady: true,
+    mcpBusy: false,
+    mcpMsg: null,
+    authOutput: null,
+    authBusy: false,
+    authMsg: null,
+    authModel: GPT_MODEL,
+    loginCommand: AUTH_LOGIN_COMMAND,
+    onMcpChange: () => {
+      /* 本用例只看禁用位 */
+    },
+    onMcpSave: () => {
+      /* 同上 */
+    },
+    onAuthModelChange: () => {
+      /* 同上 */
+    },
+    onCheckAuth: () => {
+      /* 同上 */
+    },
+    onUseChatGpt: () => {
+      /* 同上 */
+    },
+  };
+
+  it("configWritesBusy：任一写入口在飞，其余入口的按钮与编辑器全部禁用", () => {
+    const admin = buildAdminSection({ ...adminBase, t: tZh, writable: true }, true);
+    expect(fieldProps(admin, "mcpJson")?.disabled).toBe(true);
+    expect(fieldProps(admin, "mcpSave")?.disabled).toBe(true);
+    expect(fieldProps(admin, "authCheck")?.disabled).toBe(true);
+    expect(fieldProps(admin, "chatGptModel")?.disabled).toBe(true);
+    expect(fieldProps(admin, "chatGptUse")?.disabled).toBe(true);
+    const provider = buildProviderSection(
+      depsWith(tZh, { data: READY_DATA, ready: true, configWritesBusy: true }),
+    );
+    expect(fieldProps(provider, "apply")?.disabled).toBe(true);
+    expect(fieldProps(provider, "test")?.disabled).toBe(true);
+    expect(fieldProps(provider, "migrate")?.disabled).toBe(true);
+    expect(fieldProps(provider, "ocrProvider")?.disabled).toBe(true);
+    expect(fieldProps(provider, "ocrModel")?.disabled).toBe(true);
+  });
+
+  it("busy 在飞 ⇒ 夹具的 configWritesBusy 同源推导为真（旧行为不漂移）", () => {
+    const probing = buildProviderSection(
+      depsWith(tZh, { data: READY_DATA, ready: true, busy: "probe" }),
+    );
+    expect(fieldProps(probing, "apply")?.disabled).toBe(true);
+  });
+
+  it("settingsBusy：设置与扫描字段在保存期间冻结；空闲与不可写的既有语义不变", () => {
+    const touchedFields: string[] = [];
+    const setField = (field: string): void => {
+      touchedFields.push(field);
+    };
+    const frozen = buildSettingsSection(depsWith(tZh, { settingsBusy: true }), true, setField);
+    expect(fieldProps(frozen, "maxComments")?.disabled).toBe(true);
+    expect(fieldProps(frozen, "timeoutMinutes")?.disabled).toBe(true);
+    expect(fieldProps(frozen, "ocrConfigPath")?.disabled).toBe(true);
+    const scan = buildScanSection(depsWith(tZh, { settingsBusy: true }), true, setField);
+    expect(fieldProps(scan, "scanMaxTokens")?.disabled).toBe(true);
+    expect(fieldProps(scan, "scanConcurrency")?.disabled).toBe(true);
+    const open = buildSettingsSection(depsWith(tZh, {}), true, setField);
+    expect(fieldProps(open, "maxComments")?.disabled).toBe(false);
+    // 不可写照旧禁用（与 settingsBusy 无关的那一支仍生效）。
+    const readOnlyCard = buildSettingsSection(depsWith(tZh, {}), false, setField);
+    expect(fieldProps(readOnlyCard, "maxComments")?.disabled).toBe(true);
+  });
+});
+
+describe("saveSettingsDraft 补充：onSaved 与保存窗口内的新编辑", () => {
+  it("全部受理 ⇒ onSaved 一次；已提交键摘除、窗口内的新编辑保留", async () => {
+    // touched 快照演的是「settle 时刻」的状态：maxComments 在保存窗口内被改成 24
+    // （未冻结控件/另一客户端），timeoutMinutes 没动；effort 是本轮提交之外的新编辑。
+    let touchedAfter: Record<string, unknown> = {
+      maxComments: 24,
+      timeoutMinutes: 30,
+      effort: "high",
+    };
+    let savedCalls = 0;
+    await saveSettingsDraft(
+      saveDeps(
+        { maxComments: true, timeoutMinutes: true },
+        { maxComments: 20, timeoutMinutes: 30 },
+        {
+          setTouched: (incoming) => {
+            touchedAfter = typeof incoming === "function" ? incoming(touchedAfter) : incoming;
+          },
+          setSaveError: () => {
+            /* 本用例不看错误位 */
+          },
+          setSettingsBusy: () => {
+            /* 本用例不看 busy */
+          },
+          onSaved: () => {
+            savedCalls += 1;
+          },
+        },
+      ),
+    );
+    // 提交值 20 已落盘摘除（显示回落快照）；窗口内改的 24 与提交之外的新键保住。
+    expect(touchedAfter).toStrictEqual({ maxComments: 24, effort: "high" });
+    expect(savedCalls).toBe(1);
+  });
+
+  it("部分被拒 ⇒ 被拒键按提交值保留（重试写当初那份）；窗口内的新编辑不丢", async () => {
+    let touchedAfter: Record<string, unknown> = { maxComments: 24, timeoutMinutes: 31 };
+    await saveSettingsDraft(
+      saveDeps(
+        { maxComments: true, timeoutMinutes: false },
+        { maxComments: 20, timeoutMinutes: 30 },
+        {
+          setTouched: (incoming) => {
+            touchedAfter = typeof incoming === "function" ? incoming(touchedAfter) : incoming;
+          },
+          setSaveError: () => {
+            /* 本用例不看错误位 */
+          },
+          setSettingsBusy: () => {
+            /* 本用例不看 busy */
+          },
+        },
+      ),
+    );
+    expect(touchedAfter).toStrictEqual({ timeoutMinutes: 30, maxComments: 24 });
   });
 });
 

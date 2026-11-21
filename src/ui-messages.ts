@@ -20,6 +20,8 @@ export interface UiMessages {
   readonly navLabel: string;
   /** 小节标题：「模型」「审查参数」；动作行的标签。 */
   readonly modelSection: string;
+  /// 表单小节标题旁的字段计数徽章（{count} 为字段数）。
+  readonly fieldCount: string;
   readonly reviewSection: string;
   readonly actionsLabel: string;
   /** 数字输入越界时的就地提示。 */
@@ -257,6 +259,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
   zh: {
     navLabel: "ocr 审查",
     modelSection: "模型",
+    fieldCount: "{count} 字段",
     reviewSection: "审查参数",
     actionsLabel: "动作",
     outOfRange: "超出允许范围，未保存",
@@ -371,6 +374,7 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
   en: {
     navLabel: "ocr review",
     modelSection: "Model",
+    fieldCount: "{count} fields",
     reviewSection: "Review parameters",
     actionsLabel: "Actions",
     outOfRange: "Out of the allowed range — not saved",

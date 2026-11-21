@@ -6,6 +6,28 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.21
+
+外部 `ocr` 契约抬到 `1.13.13`（`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`、两份 README、随包文档与 `THIRD_PARTY_NOTICES` 统一；`test/remote.test.ts` 的版本 fixture 改从契约常量派生，契约抬版时不再出现「契约已是 A、fixture 还在报 B」的假红）。flag 面与 1.13.10 的差异只有 `session list --branch` 一处新增与两条帮助文案（`--to`、`--max-tokens-budget`）。对外工具名单不变，`ocr_session` 多一位 `branch`。
+
+### Added
+
+- **`ocr_session` 的分支过滤**：list 透传 OCR 1.13.11 的 `--branch`（session_cmd.go：与会话记录的分支精确匹配、先过滤后 limit；`--json` 空结果回 `[]`）。show/comments 带 id 时拒绝（`branchOnlyForList`），缺 id 回退成 list 的两支照样生效；compare/export 与 limit/severity 同闸拒绝。
+
+### Changed
+
+- **Typert 读取器骨架收编 shared**：`src/remote.ts` 的 `RemoteHost` / `RemoteMounter` / `isRemoteMounter`（七仓逐字副本）改从 `@jayyuen66/dsh-plugin-shared/lib/typert-client` 取用；行为不变（输入全为 JSON 记录，守卫判据逐字同）。shared 经 catalog 抬到 `^0.2.12`，`pnpm-lock.yaml` 经 `pnpm install --lockfile-only` 重解到 registry 现量；devDependencies 补 `react-dom`（`^19.3.0`，与 react 相邻）——shared 0.2.12 的 card-ui 经 `createPortal` 引 `react-dom`，本仓客户端测试经 ESM 链解析到它（与 danger-guard / dir-prep / session-rescue 的既有供应同形）。
+- **非零退出不再丢 partial 结果（OCR 1.13.12 退出契约）**：上游 review_cmd.go 的 `reviewManifestRequiresNonZeroExit` 把「partial 带运营性失败（timeout/provider/config/panic/unknown 任一）」从退 0 改成退非零，结果照常发布。本包前台路径照旧会整份丢弃已审出的评论；现在 `foregroundSummaryOf` 收编这一收尾（`error` 入参）：有可用覆盖（解析 ok 且 coverage 的 completed+reused > 0）就交回摘要，hint 尾部标注「评审不完整」并附失败计数与明细；拿不出可用覆盖才走原错误路径（coverage.failed 明细附在失败详情上，行为不变）。`lib/parse.ts` 的退出码注释随新契约改写。
+- **branch 模式放开 from-only**：scopeFlags 不再要求 from+to 同给——OCR 1.13.10 起（shared_flags.go 的 `normalizeDiffTarget`）对只给 `--from` 的 review/delegate 把 `--to` 折成 HEAD。只给 `--to` 仍拒绝（`branchNeedsFrom`），与上游 `--from is required when --to is specified` 对齐。
+- **`withCoverageDetail` 补上 size 闸**：非零退出且 `--output` 超过 `OUT_FILE_MAX_BYTES` 时原样交回原错误，不再整份读进内存——护栏意图不分成败两条路。
+
+### Verification
+
+- `pnpm run check dsh-ocr-review` 全绿（typecheck、oxlint 0/0、两个 bundle 重建、`vitest run --coverage` 四项 100、oxfmt，噪点 0）。
+- 变异测试逐条命中：partial 判据去掉 coverage 计数闸 → 只「partial 标签但完成条目为零」那条红；scopeFlags 恢复强制 from+to → 只 from-only 用例红；摘掉 show 的 branch 拒绝 → 只 branch 用例红。
+- 真机（brew 装的 `open-code-review 1.13.13`）：分叉仓库 `review --from main --preview` 退 0 且只列 feature 侧文件；`session list --branch` 空结果回 `[]`；`review --to main`（缺 from）仍被 CLI 拒绝。
+- 根上 `verify:link` 9/9 与新鲜度绿。
+
 ## 0.1.20
 
 将 `@jayyuen66/dsh-plugin-shared` 抬到 `^0.2.10`。设置卡吸底保存条的旧固定 id 冲突与底色随 shared 修复；shared 的 `registerSkill` 在 effect 挂不上时立即撤销注册并回 `false`，本包 skill 不会再在卸载后留在目录里（`lib/skill.ts` 的入参类型随之收紧为 shared 的 `SkillRegistryContext`，让 `effect` 撤销权这条契约在类型上可见）。设置卡组件改回由 shared 供应：`cordis.patch.yml` 显式插入固定 id `dsh-plugin-shared` 的供应行（停用后卡片失去 shared 组件供应），`package.json` 的 `dsh.client.external` 声明 `@jayyuen66/dsh-plugin-shared/client`，client bundle 外置该行并开启 minify（实测 45,781 B，shared card-ui 的字节不再计入本产物；`verifyName` 的包名同源判据随之从产物文本计数改为读源码声明）。工具、Remote 方法与配置项不变。

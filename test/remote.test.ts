@@ -18,6 +18,7 @@ import plugin, {
 import type { Config, HostCtx, OcrAvailabilityProbe, OcrReviewRemoteDeps } from "../host.ts";
 import type { DshConfigGateway } from "../lib/provider-source.ts";
 import { MESSAGES } from "../lib/messages.ts";
+import { EXPECTED_OCR_CLI_VERSION } from "../lib/cli.ts";
 import { isRemoteRefused, OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
 import type { OcrProbeReply, OcrTestReply } from "../lib/remote-shape.ts";
 import { OCR_DESCRIPTORS, createOcrReader } from "../src/remote.ts";
@@ -309,7 +310,9 @@ describe("设置卡的 Remote（宿主的读取接口与客户端的消费侧）
       delete process.env["HOME"];
       try {
         const { deps } = depsOf({
-          scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.10 darwin/arm64" }],
+          scripts: [
+            { exitCode: 0, stdout: `open-code-review ${EXPECTED_OCR_CLI_VERSION} darwin/arm64` },
+          ],
         });
         const service = serviceOf(deps);
         const probed = await service.probe();
@@ -424,17 +427,21 @@ describe("设置卡的 Remote（宿主的读取接口与客户端的消费侧）
     });
 
     it("probe：一致 ⇒ consistent 真且不给换版命令；版本落进 versionSink", async () => {
+      // 假 CLI 报的版本从契约常量派生，不手写数字：契约抬版时这条场景自动跟上，
+      // 不会再出现「契约已是 A、fixture 还在报 B，consistent 恒假」的假红。
       const { deps, versionSink } = depsOf({
-        scripts: [{ exitCode: 0, stdout: "open-code-review 1.13.10 darwin/arm64" }],
+        scripts: [
+          { exitCode: 0, stdout: `open-code-review ${EXPECTED_OCR_CLI_VERSION} darwin/arm64` },
+        ],
       });
       const reply = await serviceOf(deps).probe();
       assert.equal(reply.ok, true);
       assert.equal("status" in reply, false, PROBE_NOT_REFUSED);
       if (!("status" in reply)) {
-        assert.equal(reply.version, "1.13.10");
+        assert.equal(reply.version, EXPECTED_OCR_CLI_VERSION);
         assert.equal(reply.consistent, true);
         assert.equal(reply.changeText, "");
-        assert.equal(versionSink.value, "1.13.10");
+        assert.equal(versionSink.value, EXPECTED_OCR_CLI_VERSION);
       }
     });
 

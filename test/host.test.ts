@@ -2257,6 +2257,169 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       ).rejects.toThrow(/^ocr 执行失败（exit=1）：boom$/u);
     });
 
+    it("非零退出但 --output 是有可用覆盖的 partial ⇒ 交回摘要而不是丢弃评论（1.13.12 退出契约）", async () => {
+      // OCR 1.13.12 起（review_cmd.go 的 reviewManifestRequiresNonZeroExit）partial 带运营性
+      // 失败（provider/timeout 等）也退非零，而结果照常发布。旧路径把这种情况整个抛错，
+      // 已审出文件的评论全部丢失——「1 of 2 failed」现在必须带着那条评论一起回。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "review incomplete: 1 of 2 selected item(s) failed",
+        output: JSON.stringify({
+          status: "partial",
+          session_id: "sess-p2",
+          comments: [{ path: "src/a.ts", content: "空指针风险", start_line: 42, end_line: 44 }],
+          manifest: {
+            coverage: {
+              selected: [{}, {}],
+              completed: [{}],
+              reused: [],
+              waived: [],
+              failed: [{ path: "src/d.ts", classification: "provider", reason: "provider 429" }],
+            },
+          },
+        }),
+      });
+      const view = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as { status: string; topComments: { location: string }[]; hint: string };
+      expect(view.status).toBe("partial");
+      expect(view.topComments).toHaveLength(1);
+      // partial 尾注带计数与失败明细；不走耗时句——runForeground 抛错退出，没有计时可交。
+      expect(view.hint).toContain("评审不完整");
+      expect(view.hint).toContain("1/2");
+      expect(view.hint).toContain("src/d.ts [provider] provider 429");
+      expect(view.hint).not.toContain("墙钟耗时");
+    });
+
+    it("ocr_scan 走同一条 partial 收尾路径（两处调用点各要一份回执）", async () => {
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "scan incomplete: 1 of 2 selected item(s) failed",
+        output: JSON.stringify({
+          status: "partial",
+          session_id: "sess-p3",
+          comments: [{ path: "src/a.ts", content: "空指针风险", start_line: 7, end_line: 9 }],
+          manifest: {
+            coverage: {
+              selected: [{}, {}],
+              completed: [{}],
+              reused: [],
+              waived: [],
+              failed: [{ path: "src/e.ts", classification: "timeout", reason: "deadline" }],
+            },
+          },
+        }),
+      });
+      const view = (await toolOf(host, "ocr_scan").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as { status: string; hint: string };
+      expect(view.status).toBe("partial");
+      expect(view.hint).toContain("评审不完整");
+      expect(view.hint).toContain("src/e.ts [timeout] deadline");
+    });
+
+    it("非零退出、有覆盖但零评论 ⇒ 仍交回摘要（完成的文件没有发现是合法结果）", async () => {
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "review incomplete: 1 of 2 selected item(s) failed",
+        output: JSON.stringify({
+          status: "partial",
+          session_id: "sess-p4",
+          comments: [],
+          manifest: {
+            coverage: {
+              selected: [{}, {}],
+              completed: [{}],
+              reused: [],
+              waived: [],
+              failed: [{ path: "src/d.ts", classification: "provider", reason: "provider 429" }],
+            },
+          },
+        }),
+      });
+      const view = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as { status: string; topComments: unknown[]; hint: string };
+      expect(view.status).toBe("partial");
+      expect(view.topComments).toHaveLength(0);
+      expect(view.hint).toContain("评审不完整");
+    });
+
+    it("非零退出、partial 但没有 manifest（coverage 缺席）⇒ 维持错误路径，不把无据的覆盖说成可用", async () => {
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "boom",
+        output: JSON.stringify({
+          status: "partial",
+          comments: [{ path: "src/a.ts", content: "x", start_line: 1, end_line: 1 }],
+        }),
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/^ocr 执行失败（exit=1）：boom$/u);
+    });
+
+    it("非零退出、partial 标签但完成条目为零 ⇒ 维持错误路径（可用覆盖看 coverage 计数，不看 status 标签）", async () => {
+      // 「可用覆盖」的判据与上游成功口径同源（completed+reused > 0）：全场失败那一场即便
+      // 标签写着 partial，也没有任何已审文件可交——按摘要回「0 条评论」会把全场失败
+      // 说成审完没发现，这层防护必须有自己这条用例。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "boom",
+        output: JSON.stringify({
+          status: "partial",
+          session_id: "sess-p5",
+          comments: [],
+          manifest: {
+            coverage: {
+              selected: [{}],
+              completed: [],
+              reused: [],
+              waived: [],
+              failed: [{ path: "src/f.ts", classification: "panic", reason: "agent panic" }],
+            },
+          },
+        }),
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/boom[\s\S]*src\/f\.ts \[panic\] agent panic/u);
+    });
+
+    it("非零退出、有覆盖但 failedItems 为空 ⇒ 失败明细位给「（无）」，不给空括号", async () => {
+      // statusNone 兜底分支：退出码与可用覆盖在、failedItems 却是空集（上游契约之外的
+      // 形态）——明细位必须是显式的「（无）」，不能让模型读到一个空槽位当没发生。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "boom",
+        output: JSON.stringify({
+          status: "partial",
+          session_id: "sess-p6",
+          comments: [{ path: "src/a.ts", content: "x", start_line: 1, end_line: 1 }],
+          manifest: {
+            coverage: {
+              selected: [{}],
+              completed: [{}],
+              reused: [],
+              waived: [],
+              failed: [],
+            },
+          },
+        }),
+      });
+      const view = (await toolOf(host, "ocr_review").execute(
+        { repo: "/repo", wait: true },
+        makeExec(),
+      )) as { status: string; hint: string };
+      expect(view.status).toBe("partial");
+      expect(view.hint).toContain("评审不完整");
+      expect(view.hint).toContain("0/1");
+      expect(view.hint).toContain("（无）");
+    });
+
     it("--output 超过读取上限 ⇒ 点名文件与上限，不整份读进内存", async () => {
       // 稀疏文件：truncate 立刻给出这个大小，而插件在 readFileSync 之前就该拒掉。
       // 512 MiB 刻意远大于任何合理上限：这条断言不绑定 OUT_FILE_MAX_BYTES 的具体取值。
@@ -2265,6 +2428,19 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       await expect(
         toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
       ).rejects.toThrow(/--output 文件过大/u);
+    });
+
+    it("非零退出且 --output 超过读取上限 ⇒ 原错误原样，失败详情路径同样不整份读", async () => {
+      // partial 收尾对超限文件的正确反应与「读不到」一致：维持原错误。withCoverageDetail
+      // 的 size 闸保证这一条，护栏意图（OUT_FILE_MAX_BYTES）不分成败两条路。
+      host.shell.scripts.push({
+        exitCode: 1,
+        stderrText: "boom",
+        sparseBytes: 512 * 1024 * 1024,
+      });
+      await expect(
+        toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec()),
+      ).rejects.toThrow(/^ocr 执行失败（exit=1）：boom$/u);
     });
 
     it("maxComments 0（不截断）与非法值（回退 12）都按条数兑现", async () => {

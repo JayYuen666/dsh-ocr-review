@@ -12,7 +12,7 @@
   <a href="https://github.com/JayYuen666/dsh-ocr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-ocr-review/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.2-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.5-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -70,7 +70,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 卸载用 `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`。包在公共 npm 上，安装不需要凭据。
 
 - **升级已装的那一份要「先 remove 再 add」。** profile 跑着 HMR（出厂那几个都跑）时，`add` 一个 profile 已经依赖着的包会在 pnpm 动手之前就被拒（`already-installed`）——先 `remove` 再 `add` 目标版本，新版不必重启就起跑。没跑 HMR 时同一个 `add` 照样走 pnpm，报 `restart-required`。
-- **要求 Node.js `>= 24.9`，宿主 dsh 在 `0.2.2-rc.2` 或更新的 `0.2.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.2-rc.2`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `>= 24.9`，宿主 dsh 在 `0.2.2-rc.5` 或更新的 `0.2.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.2-rc.5`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 用 `nodeLinker: hoisted` 与 `autoInstallPeers: false` 安装，宿主包进了那张表就会落成真实目录，与宿主进程已加载的那份并存。`@deepseek-ai/dsh-tools` 的调度器键是普通 `Symbol`（不是 `Symbol.for`），符号身份按实例计算——那个 profile 里**每一次原生工具调用都抛**，而本包的构建、类型检查与覆盖率门在此前一路绿。
 - **`host.js` 以值导入的五枚宿主包是非 optional 的 peer**：`@deepseek-ai/schemastery`（宿主 fork——`.volatile()` 的解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`（Remote 的 Service 基类）。五枚同时以同一钉版另列进 `devDependencies`，本仓自己的类型检查才解析得到；构建对 manifest 三张表一律外部化，产物里保持裸说明符。
 - **发布清单**（以 `package.json` 的 `files` 为准）：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`locale/*.json`、`docs/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepare` 重建两个 bundle，发出去的永远是当前源码的产物。
@@ -81,11 +81,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 外部 CLI
 
-本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.10** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
+本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.13** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
 
 ```sh
 brew install open-code-review                        # formula 只跟上游最新版
-npm i -g @alibaba-group/open-code-review@1.13.10      # 钉在本包核对的那一版
+npm i -g @alibaba-group/open-code-review@1.13.13      # 钉在本包核对的那一版
 ```
 
 - **brew 钉不住版本。** `homebrew/core` 里只有一份 stable formula、没有版本化变体，`brew install` / `brew upgrade` 拿到的永远是上游最新。带得上核对版本的只有 npm 那条。
@@ -122,11 +122,11 @@ npm i -g @alibaba-group/open-code-review@1.13.10      # 钉在本包核对的那
 
 | 工具 | 入参与约束 |
 | --- | --- |
-| `ocr_review` | repo（绝对路径，缺省=当前会话工作区）、scope workspace/commit/branch（branch 需同时给 from+to，且与 commit 互斥）、effort、background、exclude、provider/model/resume——workspace/commit/branch 三种都支持 resume（OCR 1.13.10 起）；能不能恢复由 OCR 自己按 identity 判，被拒时插件把英文原文转成中文提示。preview（只做文件选择）、noFilter、maxGitProcs、rule/backgroundFile（仅 repo 根内文件）、wait |
+| `ocr_review` | repo（绝对路径，缺省=当前会话工作区）、scope workspace/commit/branch（branch 必须给 from；to 可省略——OCR 1.13.10 起只给 from 时默认以 HEAD 收尾——且与 commit 互斥）、effort、background、exclude、provider/model/resume——workspace/commit/branch 三种都支持 resume（OCR 1.13.10 起）；能不能恢复由 OCR 自己按 identity 判，被拒时插件把英文原文转成中文提示。preview（只做文件选择）、noFilter、maxGitProcs、rule/backgroundFile（仅 repo 根内文件）、wait |
 | 数值参数组（review 与 scan） | concurrency / timeoutMinutes / maxTools / maxTokens / maxTokensBudget，落 `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`。取值忠实透传；下限 concurrency 为 1、其余为 0，非整数或低于下限直接报错，不钳制 |
 | `ocr_scan` | repo、path、exclude、batch none/by-language/by-directory、provider/model（CLI 原生共享旗标）、同一组数值参数、maxTools（只升不降：低于模板默认 60 完全无效）、maxTokens（模板默认 58888 会撞 80% 提示词闸门）、preview、noPlan/noDedup/noSummary、resume、maxGitProcs、rule（repo 根内文件）、wait。扫描深度这几个旋钮缺省会取设置卡里的值（scanMaxTokens / scanConcurrency / scanMaxTools / scanNoPlan / scanNoDedup），模型显式传参优先。repo 规范到 git 顶层（path/exclude 从原目录重基，扫描范围不变），这样子目录发起的扫描会话也能被 `ocr_session` 查到。整仓扫描，无需 git diff |
 | `ocr_delegate_preview` / `ocr_delegate_rule` | preview：repo、scope/commit/from/to、exclude、background、backgroundFile/rule/maxGitProcs；返回完整文件清单与 totalFiles/reviewableCount/excludedCount（不截断）。rule：repo 加 paths——必填、最多 200 条、经 `--` 分隔作位置参数、逐条转义——外加 rule。OCR 端零 LLM 消耗：只回文件清单与规则分组 |
-| `ocr_session` | repo、action list/show/comments/compare/export、id、before/after（compare）、severity/category（comments 过滤）、limit——缺省 10；显式给出必须是 1–100 的整数，越界报错而不是钳制。compare 返回四桶，export 返回 HTML 路径（旧导出目录按 TTL 由后续导出自动清理） |
+| `ocr_session` | repo、action list/show/comments/compare/export、id、before/after（compare）、severity/category（comments 过滤）、branch（list 过滤；精确匹配、先过滤后 limit——show/comments 带 id 时拒绝）、limit——缺省 10；显式给出必须是 1–100 的整数，越界报错而不是钳制。compare 返回四桶，export 返回 HTML 路径（旧导出目录按 TTL 由后续导出自动清理） |
 | `ocr_rules_check` | repo、path（必填）、rule（repo 根内文件）：打印命中的规则层、glob 与正文；不调 LLM |
 | `ocr_llm` | action providers/models：只读查询 LLM 清单；不评审、不测连通性 |
 | 清单上限 | exclude 和 path 各收 2000 条；超过上限直接拒绝整次调用。条目绝不静默丢掉——「比清单少审了几份」不许报成成功 |
@@ -220,7 +220,7 @@ npm i -g @alibaba-group/open-code-review@1.13.10      # 钉在本包核对的那
 - **版本对不上从不当硬失败。** 新版 CLI 通常照样能用；两个数字并列显示、徽标改口、摘要 `hint` 加一句。本包从不执行安装动作。
 - **读版本要起一次进程**，页面渲染绝不触发；卡片只显示最近一次测量或什么都不显示——渲染一页装不了、更不了、也探不了任何东西。
 - **原子写的锁超时以英文出现。** 争用超过官方等待上限时抛的是官方件自己的超时文本——这是本包唯一一条绕过双语消息表的用户可见错误。
-- **`partial` 是终态里的成功档。** 部分文件失败但覆盖仍成立、评论仍有效；既不被抬成成功，也不被折进失败。
+- **`partial` 是终态里的成功档。** 部分文件失败但覆盖仍成立、评论仍有效；既不被抬成成功，也不被折进失败。OCR 1.13.12 起含运营性失败（超时、provider 错误等）的 partial 以非零码退出、结果照常发布——本包前台路径读到有可用覆盖的 partial 时交回摘要并在 `hint` 标注「评审不完整」，拿不出可用覆盖才按错误抛。
 - **无主的后台作业对所有会话可见**（见「后台运行与官方作业」）。解析不到活 Agent 的调用会起这种作业；有主作业则被围栏在自己的会话里。
 
 ## <img src="https://api.iconify.design/lucide/circle-help.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 常见问题

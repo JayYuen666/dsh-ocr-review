@@ -64,7 +64,7 @@ import type { Context, Fiber, Volatile } from "@deepseek-ai/cordis";
 // 工厂，二者都没有 type-only 的造法，故落 peerDependencies（`dependencies` 是禁区，由
 // test/publish-manifest.test.ts 钉着），产物里保持裸说明符（build-host.mjs 的外部化
 // 名单读 dependencies ∪ peerDependencies。
-import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 // 类型侧绑定官方声明：describe() 的字段名（ns/value）与凭据读的返回形状一旦在上游
 // 改动，typecheck 立刻报错，而不是运行时静默读不到 provider。
 import type { SettingsDescriptor, SettingsForms } from "@deepseek-ai/dsh-settings";
@@ -96,12 +96,7 @@ import type {
 // section 的 PromptSection、result() 的 ShellRunResult）由官方
 // 给出，上游改名/换形状就是本包编译错误，而不是运行时静默读不到。
 // 仍是 type-only：产物里不得出现这些说明符（锁见 test/build-host.test.ts）。
-import type {
-  ShellExecution,
-  ShellExecutor,
-  ShellProcessStatus,
-  ShellRunResult,
-} from "@deepseek-ai/dsh-shell";
+import type { ShellExecution, ShellExecutor, ShellProcessStatus } from "@deepseek-ai/dsh-shell";
 // 沙箱策略按调用携带（官方 `SandboxExecutionPolicy` 定义在 dsh-sandbox，dsh-shell 自己
 // 只内部 import、并不再导出，所以取类型必须直引）。同样是 type-only，产物里不得出现这条
 // 说明符（锁见 test/build-host.test.ts）；包本身已在 devDependencies 声明，不需要进运行时。
@@ -131,10 +126,10 @@ import {
 // 代理对安全的定长截断（截去前半已交官方 output-retention，截去后半仍在本仓；
 // 语义与官方件的实测差异见 shared/lib/text.ts 头注释）：
 // 进会话日志的自制切点一律走这里，裸 slice 会在切点留下孤立高/低代理。
-import { truncateEnd, truncateStart } from "@jayyuen66/dsh-plugin-shared/lib/text";
+import { truncateEnd } from "@jayyuen66/dsh-plugin-shared/lib/text";
 import { MESSAGES, format } from "./lib/messages.ts";
 import { foregroundSummaryOf, RAW_ECHO_LIMIT } from "./lib/foreground-summary.ts";
-import { echoRaw, readOutFile, withCoverageDetail } from "./lib/output-file.ts";
+import { echoRaw, failureDetail, readOutFile } from "./lib/output-file.ts";
 import { containedProbe } from "./lib/probe-guard.ts";
 import { OCR_TOOL_ERROR_CODES, OcrToolError } from "./lib/tool-error.ts";
 import type { OcrReviewMessages } from "./lib/messages.ts";
@@ -236,6 +231,7 @@ import { errorText } from "@jayyuen66/dsh-plugin-shared/lib/errors";
 // 双路径装载的自保：market 热挂子树与 bundle 层会各跑一次 apply，注册面在第二遍撞名即抛。
 // 本模块已收进 shared，各插件仓不再各留一份副本；判据与取舍见它的头注释。
 import { claimInstance } from "@jayyuen66/dsh-plugin-shared/lib/instance-lock";
+import { markRemote } from "@jayyuen66/dsh-plugin-shared/lib/remote-marker";
 import type { InstanceLockContext } from "@jayyuen66/dsh-plugin-shared/lib/instance-lock";
 
 // 官方给生产者的 kind 扩展点（installed dsh-jobs/lib/types/view.d.ts 的 JobKindMap，
@@ -761,30 +757,8 @@ function textBlock(value: unknown): RenderedContent {
 
 // ── shell 执行与错误映射 ────────────────────────────────────────────────────
 
-/** OCR 的 resume 拒绝文案都以此开头（`internal/session/resume_identity.go` 的
- *  十几条 `resume rejected: …` 与 `resume session %q …`）。只认这一族前缀，
- *  其余英文错误原样带回——把不认识的失败也翻译掉，等于让模型读不到真正的原因。 */
-const RESUME_REJECTED = /^resume (?:rejected:|session )/mu;
-
-/** 失败详情：stderr 优先、空则退 stdout；先脱敏再截断（明文 key 绝不进工具错误
- *  ——错误文本会被持久化进会话日志）。省略标记是文案，故脱敏与截断的位置不变，
- *  只把中间的连接标记换成当前语言的那一份。两半各用一个函数，因为它们是两种缺陷：
- *  前切点会留下孤立**高**代理（`truncateEnd` 丢掉它），后切点会留下孤立**低**代理
- *  （`truncateStart` 丢掉它）。把两个函数对调同样不留孤立代理，只是头尾内容掉头
- *  ——所以 test/host.test.ts 里另有一组哨兵断言钉住这个顺序。 */
-function failureDetail(result: ShellRunResult, messages: OcrReviewMessages): string {
-  const raw = result.stderr.text === "" ? result.stdout.text : result.stderr.text;
-  const detail = redactKeyMaterial(raw);
-  // 恢复被拒是**唯一**需要本地化的一条：workspace 恢复自 1.13.10 起由 OCR 自己按
-  // identity 判（HEAD 或未提交改动变了就拒），它回的是英文长句且带 `start a new
-  // review instead of resuming` 尾巴。翻译只做这一族，原文一并附在后面供排障。
-  if (RESUME_REJECTED.test(detail.trim())) {
-    return `${messages.resumeRejected}${messages.detailSeparator}${detail.trim()}`;
-  }
-  return detail.length <= 800
-    ? detail
-    : `${truncateEnd(detail, 400)}${messages.middleEllipsis}${truncateStart(detail, 400)}`;
-}
+// failureDetail（stderr/stdout 取舍、脱敏截断、resume 拒绝的本地化）住在
+// lib/output-file.ts——与本仓其余「失败详情拼接」同一处口径。
 
 /** 一次 shell 执行的两个部署级时长/上限（>5 参数会撞 max-params，收成对象，
  *  与下面 BackgroundJob 同一取舍）。timeoutMs 由调用方算好：前台取
@@ -2233,29 +2207,6 @@ export class OcrReviewRemoteService extends TypertRemoteService {
   }
 }
 
-/**
- * 标准装饰器的**程序化调用**：`@Remote` 的全部作用就是往类原型写一枚描述符，而标准装饰器
- * 语法需要一条 tsc 降级流水线（本仓的测试/构建解析器都不降级它）。这里直接按 TC39 的
- * `ClassMethodDecoratorContext` 形状调同一个 decorator 函数，把标记落到真正的原型上。
- */
-function markRemote(prototype: OcrReviewRemoteService, methodName: string): void {
-  // 官方 `Remote` 的运行时只读 name/private/static 与 addInitializer（TC39 的 access/metadata
-  // 它一概不读），故这里只给这四位；`Reflect.apply` 让装饰器工厂保持未类型化的调用签名。
-  const context = {
-    kind: "method",
-    name: methodName,
-    static: false,
-    private: false,
-    addInitializer: (initializer: (this: unknown) => void): void => {
-      // 初始器只做 `Object.getPrototypeOf(this)` 后落标记；用原型造一枚替身实例即可。
-      Reflect.apply(initializer, Object.create(prototype), []);
-    },
-  };
-  // oxlint-disable-next-line eslint/new-cap -- `Remote(…)` 是装饰器工厂，不是大写开头的构造调用
-  const decorate = Remote(methodName);
-  Reflect.apply(decorate, undefined, [Reflect.get(prototype, methodName), context]);
-}
-
 markRemote(OcrReviewRemoteService.prototype, "providers");
 markRemote(OcrReviewRemoteService.prototype, "select");
 markRemote(OcrReviewRemoteService.prototype, "migrate");
@@ -2537,21 +2488,24 @@ function registerReviewTool(
             ledger,
           );
         }
-        let foreground: ForegroundRun;
-        try {
-          foreground = await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
-        } catch (error) {
-          // 非零退出时 CLI 仍会写出 --output：那里面才有「哪些文件没审成」。
-          throw withCoverageDetail(error, outPath, runMsgs);
-        }
-        return foregroundSummaryOf({
+        // 前台收尾的公共入参：成功与非零退出同一份基础，差异只有 elapsedMs / error。
+        // catch 路径拿不到 runForeground 的计时，elapsedMs 只在成功分支补。
+        const summaryInput = {
           outPath,
-          elapsedMs: foreground.elapsedMs,
           toolName: "ocr",
           measuredVersion: versionSink.value,
           maxComments: readMaxComments(config),
           messages: runMsgs,
-        });
+        };
+        let foreground: ForegroundRun;
+        try {
+          foreground = await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+        } catch (error) {
+          // 非零退出：partial 有可用覆盖就交回摘要，否则原错误带 coverage 明细抛出
+          //（OCR 1.13.12 退出契约；判据在 lib/foreground-summary.ts 的 foregroundSummaryOf）。
+          return foregroundSummaryOf({ ...summaryInput, error });
+        }
+        return foregroundSummaryOf({ ...summaryInput, elapsedMs: foreground.elapsedMs });
       } finally {
         if (tmp !== undefined) {
           rmSync(tmp, { recursive: true, force: true });
@@ -2672,21 +2626,22 @@ function registerScanTool(
             ledger,
           );
         }
-        let foreground: ForegroundRun;
-        try {
-          foreground = await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
-        } catch (error) {
-          // 非零退出时 CLI 仍会写出 --output：那里面才有「哪些文件没审成」。
-          throw withCoverageDetail(error, outPath, runMsgs);
-        }
-        return foregroundSummaryOf({
+        // 同 ocr_review：成功与非零退出共用一份收尾入参，差异只有 elapsedMs / error。
+        const summaryInput = {
           outPath,
-          elapsedMs: foreground.elapsedMs,
           toolName: "ocr scan",
           measuredVersion: versionSink.value,
           maxComments: readMaxComments(config),
           messages: runMsgs,
-        });
+        };
+        let foreground: ForegroundRun;
+        try {
+          foreground = await runForeground(host, guarded, workdir, tuningOf(config), exec.signal);
+        } catch (error) {
+          // 同 ocr_review：partial 有可用覆盖就交回摘要，否则原错误带 coverage 明细抛出。
+          return foregroundSummaryOf({ ...summaryInput, error });
+        }
+        return foregroundSummaryOf({ ...summaryInput, elapsedMs: foreground.elapsedMs });
       } finally {
         if (tmp !== undefined) {
           rmSync(tmp, { recursive: true, force: true });
@@ -2876,6 +2831,7 @@ function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabili
           items: { type: "string" },
           description: msgs.paramSessionCategory,
         },
+        branch: { type: "string", description: msgs.paramSessionBranch },
         limit: { type: "integer", description: msgs.paramSessionLimit },
       },
     },

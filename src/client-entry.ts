@@ -50,8 +50,10 @@ import type {
 import { UI_MESSAGES } from "./ui-messages.ts";
 import type { LocaleNs, Translate } from "./ui-messages.ts";
 import {
+  Callout,
   CardForm,
   Field,
+  FieldTwoCol,
   NumberField,
   SaveBar,
   Section,
@@ -59,6 +61,7 @@ import {
   TextField,
   ToggleField,
   claimApply,
+  LogPanel,
   diffTouched,
   ensureCardUiCss,
   fieldOf,
@@ -262,19 +265,14 @@ function providersPayloadOf(json: unknown): ProvidersPayload {
 }
 
 /** 动作按钮行的类名（共享组件的行内按钮组；多处共用，见 sonarjs 的重复字面量门禁）。 */
-const ACTIONS_CLASS = "ocr-actions";
+const ACTIONS_CLASS = "dsu-actions";
 
 /** 小节标题的类名（详情页区块共用；sonarjs 的重复字面量门禁）。 */
 const CARD_NAME_CLASS = "ocr-card-name";
 
 const CARD_CSS = [
   ".ocr-card-name{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:600;line-height:1.4}",
-  ".ocr-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f99);line-height:1.5}",
-  ".ocr-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}",
-  ".ocr-status{font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;margin:8px 0 0}",
-  ".ocr-err{color:var(--dsw-alias-state-error-primary)}",
-  ".ocr-ok{color:var(--dsw-alias-label-primary,inherit)}",
-  ".ocr-muted{color:var(--dsw-alias-label-tertiary,#8a8f99)}",
+  // 管理区的大号 JSON 输入框：shared 的 textarea 高度不够放整段 servers 配置。
   ".ocr-adminTextarea{min-height:160px}",
   // 一级分区里没有插件页那层卡片外壳，自己给一点上下留白。
   ".ocr-page{padding:4px 0 8px}",
@@ -400,6 +398,9 @@ export interface OcrCardDeps {
    *  null = 空闲。按钮按「有没有动作在飞」禁用，但只有**自己**那条在飞时才改自己的文案——
    *  否则按下「检测版本」会让「应用」按钮读成「应用中…」，把没发生过的事报给用户。 */
   busy: CardActionKind | null;
+  /** OCR config 写入口的统一互斥（apply/test/migrate/probe/chatGpt/saveMcp 任一在飞即
+   *  true）：其余入口的按钮一起禁用。busy 仍只驱动「自己在飞才改文案」的标签。 */
+  configWritesBusy: boolean;
   actionMsg: { ok: boolean; text: string } | null;
   ready: boolean;
   writable: boolean;
@@ -521,20 +522,12 @@ export function cliInstallText(binary: OcrBinaryView | null): string {
   return binary.installHint ?? "";
 }
 
-/** 一条错误提示行的类名（多处在用；sonarjs 的重复字面量门禁要求收成常量）。 */
-const STATUS_ERROR_CLASS = "ocr-status ocr-err";
-
-/** 一条成功/失败回执行的类名（动作条、探测回执共用）。 */
-function statusClass(ok: boolean): string {
-  return `ocr-status ${ok ? "ocr-ok" : "ocr-err"}`;
-}
-
 /**
  * 外部 CLI 状态行：可得性 + 「检测」按钮 + 最近一次探测回执。
  *
  * 刻意画在 provider 表单**之外**（provider 源不可用时也要看得见）——「这台机器有没有
  * ocr」与「宿主能不能列出 provider」是两件事，混在一支里会让缺 CLI 的机器连原因都看不到。
- * 回执用 `.ocr-status`（`white-space:pre-wrap`）而不是输入框：那段文本里就有上游给的
+ * 回执与 ChatGPT 输出走 shared 的 Callout / LogPanel 而不是输入框：那段文本里就有上游给的
  * `npm i -g …` 命令，要能选中复制，而本包不提供剪贴板 API（非安全上下文会静默失败）。
  */
 export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
@@ -544,7 +537,7 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
     {
       className: "dsu-btn",
       type: "button",
-      disabled: deps.busy !== null,
+      disabled: deps.configWritesBusy,
       onClick: deps.onProbe,
       "data-field": "probe",
     },
@@ -564,8 +557,8 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
     hintText === "" ? null : createElement("p", { className: "dsu-hint" }, hintText);
   const probe = deps.probeMsg
     ? createElement(
-        "div",
-        { className: statusClass(deps.probeMsg.ok), "data-field": "probe-result" },
+        Callout,
+        { tone: deps.probeMsg.ok ? "ok" : "err", field: "probe-result" },
         deps.probeMsg.text,
       )
     : null;
@@ -617,7 +610,7 @@ export function isOwnSubject(subject: PluginsSubject): boolean {
 export function buildCliBadge(t: Translate, status: OcrBinaryView | null): ReactNode {
   return createElement(
     "span",
-    { className: "ocr-hint", "data-field": "cli-badge" },
+    { className: "dsu-hint", "data-field": "cli-badge" },
     cliBadgeText(t, status),
   );
 }
@@ -677,14 +670,14 @@ export function OcrCliBadge(props: CliStatusShare & PluginDetailProps): ReactNod
 /** 区块体：标题 + 完整状态那一行 + 版本核对那一行 + 装法（没装时）+ 指路那一句。 */
 export function buildCliSection(t: Translate, status: OcrBinaryView | null): ReactNode {
   const title = createElement("div", { className: CARD_NAME_CLASS }, t("binaryTitle"));
-  const body = createElement("div", { className: "ocr-hint" }, binaryStatusText(t, status));
+  const body = createElement("div", { className: "dsu-hint" }, binaryStatusText(t, status));
   const versionText = cliVersionText(t, status);
   const versionLine =
-    versionText === "" ? null : createElement("div", { className: "ocr-hint" }, versionText);
+    versionText === "" ? null : createElement("div", { className: "dsu-hint" }, versionText);
   const hintText = cliInstallText(status);
   const installLine =
-    hintText === "" ? null : createElement("div", { className: "ocr-hint" }, hintText);
-  const hint = createElement("div", { className: "ocr-hint" }, t("binaryProbeHint"));
+    hintText === "" ? null : createElement("div", { className: "dsu-hint" }, hintText);
+  const hint = createElement("div", { className: "dsu-hint" }, t("binaryProbeHint"));
   return createElement(
     "div",
     { style: { padding: "8px 0" }, "data-field": "cli-section" },
@@ -718,9 +711,9 @@ export function buildCliActivation(
   props: Pick<PluginActivationOwnerProps, "onOpenDetails" | "onDismiss">,
   install: string,
 ): ReactNode {
-  const text = createElement("div", { className: STATUS_ERROR_CLASS }, t("binaryNone"));
+  const text = createElement(Callout, { tone: "err" }, t("binaryNone"));
   const installLine =
-    install === "" ? null : createElement("div", { className: "ocr-hint" }, install);
+    install === "" ? null : createElement("div", { className: "dsu-hint" }, install);
   const details = createElement(
     "button",
     {
@@ -775,7 +768,7 @@ function buildActionField(deps: OcrCardDeps): ReactNode {
     {
       className: "dsu-btn dsu-btnPrimary",
       type: "button",
-      disabled: deps.busy !== null,
+      disabled: deps.configWritesBusy,
       onClick: deps.onApply,
       "data-field": "apply",
     },
@@ -786,7 +779,7 @@ function buildActionField(deps: OcrCardDeps): ReactNode {
     {
       className: "dsu-btn",
       type: "button",
-      disabled: deps.busy !== null,
+      disabled: deps.configWritesBusy,
       onClick: deps.onTest,
       "data-field": "test",
     },
@@ -797,7 +790,7 @@ function buildActionField(deps: OcrCardDeps): ReactNode {
     {
       className: "dsu-btn",
       type: "button",
-      disabled: deps.busy !== null,
+      disabled: deps.configWritesBusy,
       onClick: deps.onMigrate,
       "data-field": "migrate",
     },
@@ -853,7 +846,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     field: "ocrProvider",
     value: deps.effectiveProvider,
     options: providerOptions,
-    disabled: data.providers.length === 0,
+    disabled: data.providers.length === 0 || deps.configWritesBusy,
     onChange: deps.onPickProvider,
   });
   const modelField = createElement(SelectField, {
@@ -862,7 +855,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     field: "ocrModel",
     value: deps.effectiveModel,
     options: modelOptions,
-    disabled: !deps.chosenProvider || deps.modelOptions.length === 0,
+    disabled: !deps.chosenProvider || deps.modelOptions.length === 0 || deps.configWritesBusy,
     onChange: deps.onPickModel,
   });
   const effortField = createElement(SelectField, {
@@ -871,7 +864,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     field: "effort",
     value: deps.effortValue,
     options: effortOptions,
-    disabled: !deps.writable,
+    disabled: !deps.writable || deps.settingsBusy,
     onChange: (next: string): void => {
       deps.onField("effort", next);
     },
@@ -882,7 +875,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     field: "language",
     value: deps.languageValue,
     options: languageOptions,
-    disabled: !deps.writable,
+    disabled: !deps.writable || deps.settingsBusy,
     onChange: (next: string): void => {
       deps.onField("language", next);
     },
@@ -892,7 +885,7 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     ...splitHint(t("autoVerifyHint")),
     field: "autoVerify",
     checked: deps.autoVerifyValue,
-    disabled: !deps.writable,
+    disabled: !deps.writable || deps.settingsBusy,
     onChange: (next: boolean): void => {
       deps.onField("autoVerify", next);
     },
@@ -928,7 +921,14 @@ export function buildProviderSection(deps: OcrCardDeps): ReactNode {
     const reason = sourceMessage === "" ? t("noReason") : sourceMessage;
     body = createElement("p", { className: "dsu-error" }, t("readProvidersFailed", { reason }));
   }
-  return createElement(Section, { title: t("modelSection") }, body);
+  // 计数徽章只在就绪态成立：读不到 providers 时这一节只有一段错误说明，徽章会撒谎。
+  const modelCount =
+    deps.data?.source.status === "ready" ? t("fieldCount", { count: "5" }) : undefined;
+  return createElement(
+    Section,
+    { title: t("modelSection"), ...(modelCount === undefined ? {} : { count: modelCount }) },
+    body,
+  );
 }
 
 interface SelectionResult {
@@ -1017,7 +1017,7 @@ export function buildSettingsSection(
     ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
     step: 1,
     invalidHint: t("outOfRange"),
-    disabled: !writable,
+    disabled: !writable || deps.settingsBusy,
     resetToken: deps.resetToken,
     onInvalidChange: (invalid: boolean): void => {
       deps.reportInvalid("maxComments", invalid);
@@ -1034,7 +1034,7 @@ export function buildSettingsSection(
     ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
     step: 1,
     invalidHint: t("outOfRange"),
-    disabled: !writable,
+    disabled: !writable || deps.settingsBusy,
     resetToken: deps.resetToken,
     onInvalidChange: (invalid: boolean): void => {
       deps.reportInvalid("timeoutMinutes", invalid);
@@ -1051,7 +1051,7 @@ export function buildSettingsSection(
     placeholder: "~/.opencodereview/config.json",
     monospace: true,
     wide: true,
-    disabled: !writable,
+    disabled: !writable || deps.settingsBusy,
     onChange: (next: string): void => {
       setField("ocrConfigPath", next.trim());
     },
@@ -1077,10 +1077,9 @@ export function buildSettingsSection(
       : null;
   return createElement(
     Section,
-    { title: t("reviewSection") },
+    { title: t("reviewSection"), count: t("fieldCount", { count: "3" }) },
     statusHintNode,
-    maxCommentsRow,
-    timeoutRow,
+    createElement(FieldTwoCol, null, maxCommentsRow, timeoutRow),
     configPathRow,
     saveRow,
   );
@@ -1113,7 +1112,8 @@ export interface AdminSectionProps {
  *
  *  为什么要单独一节而不是塞进「审查参数」：那一节里的 effort/timeoutMinutes 作用在
  *  ocr_review 上，混在一起读会让人以为 maxTokens 也管评审。 */
-function buildScanSection(
+/** 导出仅供单测（保存期间的字段冻结断言要走这里的渲染产物）。 */
+export function buildScanSection(
   deps: OcrCardDeps,
   writable: boolean,
   setField: (field: string, value: unknown) => void,
@@ -1127,7 +1127,7 @@ function buildScanSection(
     ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
     step: 1,
     invalidHint: t("outOfRange"),
-    disabled: !writable,
+    disabled: !writable || deps.settingsBusy,
     resetToken: deps.resetToken,
     onInvalidChange: (invalid: boolean): void => {
       deps.reportInvalid("scanMaxTokens", invalid);
@@ -1144,7 +1144,7 @@ function buildScanSection(
     ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
     step: 1,
     invalidHint: t("outOfRange"),
-    disabled: !writable,
+    disabled: !writable || deps.settingsBusy,
     resetToken: deps.resetToken,
     onInvalidChange: (invalid: boolean): void => {
       deps.reportInvalid("scanConcurrency", invalid);
@@ -1153,15 +1153,23 @@ function buildScanSection(
       setField("scanConcurrency", next);
     },
   });
-  return createElement(Section, { title: t("scanSection") }, tokensRow, concurrencyRow);
+  // 两枚缺省值按设计稿双列成对；计数徽章随字段增减维护。
+  return createElement(
+    Section,
+    { title: t("scanSection"), count: t("fieldCount", { count: "2" }) },
+    createElement(FieldTwoCol, null, tokensRow, concurrencyRow),
+  );
 }
 
-function buildMcpAdmin(props: AdminSectionProps): ReactNode {
+/** configWritesBusy 独立于 props 传参：adminState 组装时它还没算出来（要等 adminState
+ *  自己的 busy 位），塞进 AdminSectionProps 会形成循环依赖。 */
+function buildMcpAdmin(props: AdminSectionProps, configWritesBusy: boolean): ReactNode {
   const { t } = props;
   const textarea = createElement("textarea", {
     "data-field": "mcpJson",
     value: props.mcpJson,
-    disabled: !props.writable || props.mcpBusy || !props.available || !props.mcpReady,
+    disabled:
+      !props.writable || props.mcpBusy || configWritesBusy || !props.available || !props.mcpReady,
     "aria-label": t("mcpTitle"),
     className: "dsu-input dsu-textarea dsu-mono ocr-adminTextarea",
     onChange: (event: { target: { value: string } }) => {
@@ -1174,7 +1182,8 @@ function buildMcpAdmin(props: AdminSectionProps): ReactNode {
       type: "button",
       className: "dsu-btn",
       "data-field": "mcpSave",
-      disabled: !props.writable || props.mcpBusy || !props.available || !props.mcpReady,
+      disabled:
+        !props.writable || props.mcpBusy || configWritesBusy || !props.available || !props.mcpReady,
       onClick: props.onMcpSave,
     },
     props.mcpBusy ? t("mcpSaving") : t("mcpSave"),
@@ -1192,7 +1201,7 @@ function buildMcpAdmin(props: AdminSectionProps): ReactNode {
   );
 }
 
-function buildAuthAdmin(props: AdminSectionProps): ReactNode {
+function buildAuthAdmin(props: AdminSectionProps, configWritesBusy: boolean): ReactNode {
   const { t } = props;
   const check = createElement(
     "button",
@@ -1200,7 +1209,7 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
       type: "button",
       className: "dsu-btn",
       "data-field": "authCheck",
-      disabled: props.authBusy || !props.available,
+      disabled: props.authBusy || configWritesBusy || !props.available,
       onClick: props.onCheckAuth,
     },
     props.authBusy ? t("chatGptChecking") : t("chatGptCheck"),
@@ -1208,7 +1217,7 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
   const model = createElement("input", {
     "data-field": "chatGptModel",
     value: props.authModel,
-    disabled: !props.writable || props.authBusy || !props.available,
+    disabled: !props.writable || props.authBusy || configWritesBusy || !props.available,
     "aria-label": t("chatGptModelLabel"),
     className: "dsu-input",
     onChange: (event: { target: { value: string } }) => {
@@ -1221,15 +1230,12 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
       type: "button",
       className: "dsu-btn",
       "data-field": "chatGptUse",
-      disabled: !props.writable || props.authBusy || !props.available,
+      disabled: !props.writable || props.authBusy || configWritesBusy || !props.available,
       onClick: props.onUseChatGpt,
     },
     props.authBusy ? t("chatGptUsing") : t("chatGptUse"),
   );
-  const output =
-    props.authOutput === null
-      ? null
-      : createElement("pre", { className: "ocr-status dsu-mono" }, props.authOutput);
+  const output = props.authOutput === null ? null : createElement(LogPanel, null, props.authOutput);
   const message =
     props.authMsg === null ? null : createElement("p", { className: "dsu-hint" }, props.authMsg);
   return createElement(
@@ -1246,8 +1252,13 @@ function buildAuthAdmin(props: AdminSectionProps): ReactNode {
 }
 
 /** MCP 配置 + ChatGPT 登录态/切换：都写 OCR 自己的配置，放在设置卡下方。 */
-export function buildAdminSection(props: AdminSectionProps): ReactNode {
-  return createElement("div", null, buildMcpAdmin(props), buildAuthAdmin(props));
+export function buildAdminSection(props: AdminSectionProps, configWritesBusy: boolean): ReactNode {
+  return createElement(
+    "div",
+    null,
+    buildMcpAdmin(props, configWritesBusy),
+    buildAuthAdmin(props, configWritesBusy),
+  );
 }
 
 /** providers 读取结果的两个返回位置（打包成一个对象，以受 max-params 约束）。 */
@@ -1499,10 +1510,31 @@ export interface SaveDraftDeps {
   touched: Record<string, unknown>;
   /** 有字段越界：越界草稿没进 touched，这次提交会把它静默丢掉 —— 直接不提交。 */
   blocked: boolean;
-  setTouched: (next: Record<string, unknown>) => void;
+  setTouched: (
+    next: Record<string, unknown> | ((prev: Record<string, unknown>) => Record<string, unknown>),
+  ) => void;
   setSettingsBusy: (busy: boolean) => void;
   setSaveError: (message: string | null) => void;
   set: (field: string, value: unknown) => boolean | Promise<boolean>;
+  /** 全部差异字段落盘成功后触发一次：调用方借此重读受本次保存影响的远端读取面
+   *  （providers 载荷与 MCP 编辑器读的都是 ocrConfigPath 指向的那份文件）。 */
+  onSaved?: () => void;
+}
+
+/** 保存窗口内的新编辑要保住：本轮提交过的键且值未再变 → 摘除（已落盘，显示回落快照）；
+ *  其余键原样保留。按全等比较即可——touched 草稿是原地存放的值，保存窗口内的再编辑
+ *  产生新引用或新原始值，与提交值必然不等。 */
+function keepNewerEdits(
+  prev: Record<string, unknown>,
+  submitted: Record<string, unknown>,
+): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+  for (const [field, draft] of Object.entries(prev)) {
+    if (!(field in submitted) || submitted[field] !== draft) {
+      kept[field] = draft;
+    }
+  }
+  return kept;
 }
 
 /** 只写差异字段：touched 值为 undefined → 写 null（= 清回 schema 默认）。
@@ -1517,6 +1549,12 @@ export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
   }
   deps.setSettingsBusy(true);
   deps.setSaveError(null);
+  // 本轮提交值的快照：成功/被拒两条路都只摘除「已落盘且窗口内没再改」的键，
+  // 保存窗口内的新编辑保住，不跟着整块清空静默丢失。
+  const submitted: Record<string, unknown> = {};
+  for (const field of keys) {
+    submitted[field] = touched[field];
+  }
   const ops = keys.map(async (field: string): Promise<boolean> => {
     const draft = touched[field];
     return deps.set(field, draft === undefined ? null : draft);
@@ -1545,12 +1583,13 @@ export async function saveSettingsDraft(deps: SaveDraftDeps): Promise<void> {
     for (const field of refused) {
       kept[field] = touched[field];
     }
-    deps.setTouched(kept);
+    deps.setTouched((prev) => ({ ...keepNewerEdits(prev, submitted), ...kept }));
     const reason = failures.length > 0 ? `（${errorSummary(failures[0])}）` : "";
     deps.setSaveError(`${t("saveRefused", { fields: refused.join(", ") })}${reason}`);
     return;
   }
-  deps.setTouched({});
+  deps.setTouched((prev) => keepNewerEdits(prev, submitted));
+  deps.onSaved?.();
 }
 
 /** 设置行的渲染值（touched 优先、快照兜底，再按各行自己的类型统一处理）。 */
@@ -1616,21 +1655,93 @@ function buildProviderPanel(deps: OcrCardDeps): ReactNode[] {
   const { actionMsg } = deps;
   const providerSection = buildProviderSection(deps);
   const actionMsgNode = actionMsg
-    ? createElement("p", { className: statusClass(actionMsg.ok) }, actionMsg.text)
+    ? createElement(Callout, { tone: actionMsg.ok ? "ok" : "err" }, actionMsg.text)
     : null;
   return [providerSection, actionMsgNode];
 }
 
-type AdminState = Omit<AdminSectionProps, "t" | "writable">;
+/** 管理区组装态 = AdminSectionProps 的注入位 + reloadMcp（设置保存后父层触发重读）。 */
+type AdminState = Omit<AdminSectionProps, "t" | "writable"> & { reloadMcp: () => void };
 
-/** MCP 配置编辑器的状态与动作：读、写，以及「没读成功就不许写」这条限制。 */
+/** ChatGPT 切换的写盘体（导出仅供单测）：写成功才触发 onSaved（父层借它重读 providers）。
+ *  拒绝回执（带 status）与传输失败都只进消息，不触发重读。 */
+export async function runChatGptSwitch(unit: {
+  reader: OcrReader;
+  t: Translate;
+  model: string;
+  setBusy: (busy: boolean) => void;
+  setMsg: (message: string | null) => void;
+  onSaved: () => void;
+}): Promise<void> {
+  unit.setBusy(true);
+  unit.setMsg(null);
+  try {
+    const reply = await unit.reader.chatGpt(unit.model);
+    if ("status" in reply) {
+      unit.setMsg(reply.error);
+      return;
+    }
+    unit.setMsg(unit.t("chatGptSaved"));
+    // 写盘成功即重读 providers：当前配置行与 provider/model 预选都来自这份载荷。
+    unit.onSaved();
+  } catch (error) {
+    unit.setMsg(String(error));
+  } finally {
+    unit.setBusy(false);
+  }
+}
+
+/** MCP 保存的落盘体（导出仅供单测）：没读成功不许写——编辑器里只有初始 "{}"，保存会把
+ *  真实配置整个覆盖掉。写成功后回读盘上现值：host 写盘前会归一化（键序/缩进/字段清洗），
+ *  编辑器保持用户原文会与盘上内容漂移到重挂载为止；保存窗口内的用户编辑由调用方的
+ *  dirty 守卫挡住回读覆盖。 */
+export async function runMcpSave(unit: {
+  reader: OcrReader;
+  t: Translate;
+  json: string;
+  revision: string | undefined;
+  loaded: boolean;
+  setBusy: (busy: boolean) => void;
+  setMsg: (message: string | null) => void;
+  clearDirty: () => void;
+  setRevision: (revision: string) => void;
+  reload: () => void;
+}): Promise<void> {
+  if (!unit.loaded) {
+    unit.setMsg(unit.t("mcpNotLoaded"));
+    return;
+  }
+  unit.setBusy(true);
+  unit.setMsg(null);
+  try {
+    const reply = await unit.reader.saveMcp(unit.json, unit.revision);
+    if ("status" in reply) {
+      unit.setMsg(reply.error);
+      return;
+    }
+    unit.clearDirty();
+    unit.setRevision(reply.revision);
+    // 保存成功但 host 给了非阻断警告（如 header 的 $VAR 当前为空）：一起显示，
+    // 不要把“保存成功”当成“连接一定成功”。
+    const warnings = reply.warnings ?? [];
+    unit.setMsg([unit.t("mcpSaved"), ...warnings].join("\n"));
+    unit.reload();
+  } catch (error) {
+    unit.setMsg(String(error));
+  } finally {
+    unit.setBusy(false);
+  }
+}
+
+/** MCP 配置编辑器的状态与动作：读、写，以及「没读成功就不许写」这条限制。
+ *  reloadMcp 供父层在设置保存后重读（ocrConfigPath 改了，MCP 编辑器要跟着换文件）。 */
 function useMcpPanel(
   reader: OcrReader | undefined,
   t: Translate,
 ): Pick<
   AdminSectionProps,
   "mcpJson" | "mcpReady" | "mcpBusy" | "mcpMsg" | "onMcpChange" | "onMcpSave"
-> {
+> & { reloadMcp: () => void } {
   const [mcpJson, setMcpJson] = useState("{}");
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpMsg, setMcpMsg] = useState<string | null>(null);
@@ -1676,30 +1787,24 @@ function useMcpPanel(
       setMcpMsg(t("adminUnavailable"));
       return;
     }
-    // 没读到当前配置时编辑器里只有初始的 "{}"，保存会把真实配置整个覆盖掉。
-    if (!mcpReady) {
-      setMcpMsg(t("mcpNotLoaded"));
-      return;
-    }
-    setMcpBusy(true);
-    setMcpMsg(null);
-    try {
-      const reply = await reader.saveMcp(mcpJson, mcpRevisionRef.current);
-      if ("status" in reply) {
-        setMcpMsg(reply.error);
-      } else {
+    await runMcpSave({
+      reader,
+      t,
+      json: mcpJson,
+      revision: mcpRevisionRef.current,
+      loaded: mcpReady,
+      setBusy: setMcpBusy,
+      setMsg: setMcpMsg,
+      clearDirty: () => {
         mcpDirtyRef.current = false;
-        mcpRevisionRef.current = reply.revision;
-        // 保存成功但 host 给了非阻断警告（如 header 的 $VAR 当前为空）：一起显示，
-        // 不要把“保存成功”当成“连接一定成功”。
-        const warnings = reply.warnings ?? [];
-        setMcpMsg([t("mcpSaved"), ...warnings].join("\n"));
-      }
-    } catch (error) {
-      setMcpMsg(String(error));
-    } finally {
-      setMcpBusy(false);
-    }
+      },
+      setRevision: (revision) => {
+        mcpRevisionRef.current = revision;
+      },
+      reload: () => {
+        void loadMcp();
+      },
+    });
   }
 
   return {
@@ -1707,6 +1812,9 @@ function useMcpPanel(
     mcpReady,
     mcpBusy,
     mcpMsg,
+    reloadMcp: (): void => {
+      void loadMcp();
+    },
     onMcpChange: (value: string) => {
       mcpDirtyRef.current = true;
       setMcpJson(value);
@@ -1717,10 +1825,14 @@ function useMcpPanel(
   };
 }
 
-/** 设置草稿那一段的全部状态与落态口（`OcrCard` 只负责把它们摆进 deps）。 */
+/** 设置草稿那一段的全部状态与落态口（`OcrCard` 只负责把它们摆进 deps）。
+ *  `setTouched` 是 React 的 setState：对象整体替换与函数式更新两种形态都收——
+ *  保存往返期间的新编辑不覆盖，靠的就是函数式那一支。 */
 interface SettingsDrafts {
   touched: Record<string, unknown>;
-  setTouched: (next: Record<string, unknown>) => void;
+  setTouched: (
+    next: Record<string, unknown> | ((prev: Record<string, unknown>) => Record<string, unknown>),
+  ) => void;
   settingsBusy: boolean;
   setSettingsBusy: (busy: boolean) => void;
   saveError: string | null;
@@ -1779,7 +1891,14 @@ function useSettingsDrafts(value: Record<string, unknown>): SettingsDrafts {
 }
 
 /** 管理区的状态与动作（MCP 配置 + ChatGPT 登录态/切换）；OcrCard 只负责摆位置。 */
-function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState {
+/** 管理区的状态与动作（MCP 配置 + ChatGPT 登录态/切换）；OcrCard 只负责摆位置。
+ *  refresh：providers 载荷的重读口——写盘动作成功后必须重读，否则「当前配置」行与
+ *  provider/model 预选继续显示旧值。 */
+function useAdminPanel(
+  reader: OcrReader | undefined,
+  t: Translate,
+  refresh: () => Promise<ProvidersPayload | null>,
+): AdminState {
   const mcp = useMcpPanel(reader, t);
   const [authOutput, setAuthOutput] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
@@ -1815,16 +1934,16 @@ function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState 
       setAuthMsg(t("adminUnavailable"));
       return;
     }
-    setAuthBusy(true);
-    setAuthMsg(null);
-    try {
-      const reply = await reader.chatGpt(authModel);
-      setAuthMsg("status" in reply ? reply.error : t("chatGptSaved"));
-    } catch (error) {
-      setAuthMsg(String(error));
-    } finally {
-      setAuthBusy(false);
-    }
+    await runChatGptSwitch({
+      reader,
+      t,
+      model: authModel,
+      setBusy: setAuthBusy,
+      setMsg: setAuthMsg,
+      onSaved: () => {
+        void refresh();
+      },
+    });
   }
   return {
     available: reader !== undefined,
@@ -1844,27 +1963,25 @@ function useAdminPanel(reader: OcrReader | undefined, t: Translate): AdminState 
   };
 }
 
-function OcrCard(props: CardSlotProps): ReactNode {
-  const { t } = props;
-  const snap = props.useCard((state) => state);
-  const { value } = snap;
-  const ready = snap.status === "ready";
-  const writable = snap.writable && ready;
-  const adminState = useAdminPanel(props.reader, t);
-
-  // Provider 数据（走官方 Remote 的读取接口，没有 key 的明文）。
+/** providers 载荷的读取面（走官方 Remote 的读取接口，没有 key 的明文）：
+ *  data/fetchError 状态、并发序号与挂载时的首次拉取。并发刷新只认最后一次——
+ *  初始 refresh 与 apply/migrate/chatGpt 之后的 refresh 可能并行，早发的旧载荷
+ *  晚到时会覆盖新数据。 */
+function useProvidersPayload(
+  reader: OcrReader | undefined,
+  t: Translate,
+): {
+  data: ProvidersPayload | null;
+  fetchError: string | null;
+  refresh: () => Promise<ProvidersPayload | null>;
+} {
   const [data, setData] = useState<ProvidersPayload | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<CardActionKind | null>(null);
-  const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const [probeMsg, setProbeMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  // 并发刷新只认最后一次：初始 refresh 与 apply/migrate 之后的 refresh 可能并行，
-  // 早发的旧载荷晚到时会覆盖新数据。
   const refreshSeq = useRef(0);
   const refresh = useCallback(async (): Promise<ProvidersPayload | null> => {
     refreshSeq.current += 1;
     const seq = refreshSeq.current;
-    return refreshProviders(props.reader, t, {
+    return refreshProviders(reader, t, {
       setData: (payload) => {
         if (seq === refreshSeq.current) {
           setData(payload);
@@ -1876,10 +1993,26 @@ function OcrCard(props: CardSlotProps): ReactNode {
         }
       },
     });
-  }, [props.reader, t]);
+  }, [reader, t]);
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  return { data, fetchError, refresh };
+}
+
+function OcrCard(props: CardSlotProps): ReactNode {
+  const { t } = props;
+  const snap = props.useCard((state) => state);
+  const { value } = snap;
+  const ready = snap.status === "ready";
+  const writable = snap.writable && ready;
+  const { data, fetchError, refresh } = useProvidersPayload(props.reader, t);
+  const [busy, setBusy] = useState<CardActionKind | null>(null);
+  const [actionMsg, setActionMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [probeMsg, setProbeMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // 管理区在 refresh 之后挂：useAdminPanel 的写盘动作成功时要触发 refresh。
+  const adminState = useAdminPanel(props.reader, t, refresh);
 
   const post = readerPost(props.reader, t);
 
@@ -1912,11 +2045,17 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const { touched, settingsBusy, saveError, dirty, blocked, resetToken, reportInvalid } = drafts;
   const { setField, discard } = drafts;
 
+  // 同一份 OCR config 的写入口（apply/test/migrate、ChatGPT 切换、MCP 保存）任一在飞，
+  // 其余入口一起锁：不锁不会损坏数据（宿主文件锁挡得住），但「两笔都成功、盘上只体现
+  // 后写者」会让回执与用户意图对不上。设置保存写的是 settings 命名空间，不参与本旗标。
+  const configWritesBusy = busy !== null || adminState.authBusy || adminState.mcpBusy;
+
   const deps: OcrCardDeps = {
     t,
     data,
     fetchError,
     busy,
+    configWritesBusy,
     actionMsg,
     ready,
     writable,
@@ -1950,8 +2089,18 @@ function OcrCard(props: CardSlotProps): ReactNode {
     },
     onField: setField,
     // 草稿那一整套落态口直接摊进去：`saveSettingsDraft` 只取它声明的几位，多给的键不参与。
+    // onSaved：全部字段落盘后重读受影响的远端面（providers 与 MCP 都吃 ocrConfigPath 那份文件）。
     onSave: () => {
-      void saveSettingsDraft({ t, value, ...drafts, set: props.set });
+      void saveSettingsDraft({
+        t,
+        value,
+        ...drafts,
+        set: props.set,
+        onSaved: () => {
+          void refresh();
+          adminState.reloadMcp();
+        },
+      });
     },
     onDiscard: discard,
   };
@@ -1959,7 +2108,7 @@ function OcrCard(props: CardSlotProps): ReactNode {
   const cliStatus = buildCliStatusRow(deps);
   const settingsSection = buildSettingsSection(deps, writable, setField);
   const scanSection = buildScanSection(deps, writable, setField);
-  const adminSection = buildAdminSection({ ...adminState, t, writable });
+  const adminSection = buildAdminSection({ ...adminState, t, writable }, configWritesBusy);
   return createElement(
     CardForm,
     null,

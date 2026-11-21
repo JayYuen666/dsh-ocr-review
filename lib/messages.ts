@@ -133,8 +133,8 @@ export interface OcrReviewMessages {
   readonly formatNotJson: string;
   /** branch 与 commit 同时给出。 */
   readonly scopeBranchCommitExclusive: string;
-  /** branch 模式缺 from 或 to。 */
-  readonly branchNeedsFromAndTo: string;
+  /** branch 模式缺 from（to 可省略——CLI 对只给 from 的默认以 HEAD 收尾）。 */
+  readonly branchNeedsFrom: string;
   /** commit 模式缺 commit 值。 */
   readonly commitNeedsValue: string;
   /** scope 白名单外。 */
@@ -217,6 +217,14 @@ export interface OcrReviewMessages {
   readonly compareNeedsBoth: string;
   /** compare 不接受 id/limit。 */
   readonly compareRejectsArgs: string;
+  /** session list 的分支过滤（OCR 1.13.11 起）。 */
+  readonly paramSessionBranch: string;
+  /** branch 用在带 id 的 show/comments 上（只有 list 与缺 id 的回退接受它）。 */
+  readonly branchOnlyForList: string;
+  /** 前台非零退出但 --output 有可用覆盖：partial 摘要的 hint 尾注（coverage 在场）。 */
+  readonly partialResultNote: string;
+  /** 同上，coverage 缺席的兜底措辞。 */
+  readonly partialResultNoCoverage: string;
   /** export 不接受 before/after/limit/severity/category。 */
   readonly exportRejectsArgs: string;
   /** export 必须由宿主给出输出路径。 */
@@ -471,7 +479,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "本包只支持 --format json（收到 {format}）：text/sarif 没有解析层，" +
       "交下去只会把参数错报成「OCR 输出解析失败」",
     scopeBranchCommitExclusive: "scope=branch/from/to 与 commit 互斥（一次只能选一种审查范围）",
-    branchNeedsFromAndTo: "scope=branch 需要同时提供 from 与 to",
+    branchNeedsFrom:
+      "branch 模式必须提供 from；to 可省略（OCR 对只给 from 的默认以 HEAD 收尾），只给 to 不给 from 不合法",
     commitNeedsValue: "scope=commit 需要 commit 参数",
     unknownScope: "未知 scope：{scope}（workspace/commit/branch）",
     scopeMismatch:
@@ -507,6 +516,12 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "warnings 与 status=partial）和 budgetExceeded（true = token 预算花完提前收工，status 里只写 " +
       "partial，看不出这一层）。toolCalls.failure 大于 0 说明当前模型的工具调用没跑通，换模型比重试同一个更省 token。" +
       "切勿把「本摘要无 critical」当作「代码干净」。",
+    partialResultNote:
+      "评审不完整：CLI 以非零码退出，{failed}/{selected} 个条目未审成（{items}）。" +
+      "以下评论只覆盖已完成的文件；完整会话用 ocr_session(action=show/comments, id=<session_id>) 查看。",
+    partialResultNoCoverage:
+      "评审不完整：CLI 以非零码退出，回执没有 coverage 明细，评论可能只覆盖部分文件；" +
+      "完整会话用 ocr_session(action=show/comments, id=<session_id>) 查看。",
     lineZeroNote: "(line 0: 定位失败，按 existing_code 手动定位)",
     pathUnknown: "(路径未知)",
     parseFailedWithReason:
@@ -533,8 +548,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     chatGptProvidersInvalid:
       "config.json 里的 providers 或 providers.chatgpt 不是对象，无法安全写入（先手工修正再保存）",
     compareNeedsBoth: "action=compare 需要同时给出 before 与 after 两个会话 id",
-    compareRejectsArgs: "action=compare 不接受 id/limit/severity/category",
-    exportRejectsArgs: "action=export 不接受 before/after/limit/severity/category",
+    compareRejectsArgs: "action=compare 不接受 id/limit/severity/category/branch",
+    exportRejectsArgs: "action=export 不接受 before/after/limit/severity/category/branch",
     exportOutputRequired: "action=export 需要宿主给出输出路径",
     beforeAfterOnlyForCompare: "before/after 只适用于 action=compare",
     filtersOnlyForComments: "severity/category 过滤只适用于 action=comments",
@@ -665,6 +680,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramSessionAfter: "action=compare 时必填：较晚的会话 id",
     paramSessionSeverity: "action=comments 时按严重度过滤（critical/high/medium/low）",
     paramSessionCategory: "action=comments 时按类别过滤（如 bug/security）",
+    paramSessionBranch: "action=list 时按分支过滤（与会话记录的分支精确匹配；先过滤后 limit）",
+    branchOnlyForList: "branch 只适用于 action=list（show/comments 给了 id 时也不接受）",
     paramSessionLimit: "list 上限 1-100（缺省 10）",
     paramRulesPath: "待查询的文件路径（仓库相对或绝对；仅用于规则匹配）",
     paramLlmAction: "providers：内置 provider 列表 / models：ChatGPT 账号模型列表",
@@ -882,7 +899,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "so passing them through reports a bad parameter as an OCR output failure",
     scopeBranchCommitExclusive:
       "scope=branch/from/to and commit are mutually exclusive (only one review scope at a time)",
-    branchNeedsFromAndTo: "scope=branch requires both from and to",
+    branchNeedsFrom:
+      "branch mode requires from; to is optional (OCR defaults it to HEAD when only from is given); to without from is invalid",
     commitNeedsValue: "scope=commit requires the commit parameter",
     unknownScope: "unknown scope: {scope} (workspace/commit/branch)",
     scopeMismatch:
@@ -922,6 +940,13 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "coverage is null) and by budgetExceeded (true = the token budget stopped the run early — status still " +
       "only says partial). A toolCalls.failure above 0 means the current model's tool calls did not work: switch " +
       'models instead of retrying the same one. Never treat "no critical in this summary" as "the code is clean".',
+    partialResultNote:
+      "Review incomplete: the CLI exited non-zero; {failed}/{selected} selected item(s) failed ({items}). " +
+      "Comments below cover completed files only; use ocr_session(action=show/comments, id=<session_id>) " +
+      "for the full session.",
+    partialResultNoCoverage:
+      "Review incomplete: the CLI exited non-zero and the receipt has no coverage details, so comments may " +
+      "cover only part of the input; use ocr_session(action=show/comments, id=<session_id>) for the full session.",
     lineZeroNote: "(line 0: not anchored, locate it via existing_code)",
     pathUnknown: "(path unknown)",
     parseFailedWithReason:
@@ -950,8 +975,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     chatGptProvidersInvalid:
       "providers or providers.chatgpt in config.json is not an object; fix it by hand before saving",
     compareNeedsBoth: "action=compare requires both before and after session ids",
-    compareRejectsArgs: "action=compare does not take id/limit/severity/category",
-    exportRejectsArgs: "action=export does not take before/after/limit/severity/category",
+    compareRejectsArgs: "action=compare does not take id/limit/severity/category/branch",
+    exportRejectsArgs: "action=export does not take before/after/limit/severity/category/branch",
     exportOutputRequired: "action=export requires an output path from the host",
     beforeAfterOnlyForCompare: "before/after only apply to action=compare",
     filtersOnlyForComments: "severity/category filters only apply to action=comments",
@@ -1128,6 +1153,10 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramSessionAfter: "Required for action=compare: the newer session id",
     paramSessionSeverity: "action=comments severity filter (critical/high/medium/low)",
     paramSessionCategory: "action=comments category filter (e.g. bug/security)",
+    paramSessionBranch:
+      "filter list by branch (exact match against the session branch; filtering applies before limit)",
+    branchOnlyForList:
+      "branch applies to action=list only (show/comments with an id reject it too)",
     paramSessionLimit: "list cap 1-100 (default 10)",
     paramRulesPath: "File path to look up (repo-relative or absolute; used only for rule matching)",
     paramLlmAction: "providers: built-in provider list / models: ChatGPT account model list",

@@ -14,7 +14,9 @@
 //
 // 依据的对外契约（open-codereview.ai/docs，逐条以 CLI 侧源码核对）：核对所依据的那一版写在
 // EXPECTED_OCR_CLI_VERSION，本注释不重述数字，以免两处各自漂移。
-//   - ocr review：workspace（默认）/ commit（-c）/ range（--from/--to）三模式互斥。
+//   - ocr review：workspace（默认）/ commit（-c）/ range（--from 必给；--to 可省略，
+//     1.13.10 起 shared_flags.go 的 normalizeDiffTarget 对只给 --from 的折成 HEAD）
+//     三模式互斥。
 //   - ocr scan：--path 逗号分隔；二者都接受 --format/--output/--audience/--exclude。
 //   - ocr delegate preview / rule：--format json 机器可读，reviewable_files
 //     / groups 结构见 docs。delegate 无 LLM 消耗，秒级返回。
@@ -80,7 +82,7 @@ const BACKGROUND_FLAG = "--background";
  * test/readme-parity.test.ts 再断言两侧 README 写的也是它。三处只有一处是人写的、
  * 靠门禁钉住另两处，就不会出现「README 教用户装 A、代码按 B 校验」这种两边各自自洽的错误。
  */
-export const EXPECTED_OCR_CLI_VERSION = "1.13.10";
+export const EXPECTED_OCR_CLI_VERSION = "1.13.13";
 
 /** 报错用的值形态（永不调用可能被劫持的 toJSON/toString）。host.ts 的入参闸
  *  （effort、wait）复用同一种做法，所以导出。 */
@@ -369,10 +371,13 @@ function scopeFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[
     throw new Error(messages.scopeBranchCommitExclusive);
   }
   if (wantsBranch) {
-    if (from === "" || to === "") {
-      throw new Error(messages.branchNeedsFromAndTo);
+    if (from === "") {
+      throw new Error(messages.branchNeedsFrom);
     }
-    return ["--from", shq(from), "--to", shq(to)];
+    // to 可省略：OCR 1.13.10 起（shared_flags.go 的 normalizeDiffTarget）对只给 --from
+    // 的 review/delegate 把 --to 折成 HEAD。这里只透传 from、不自己补 HEAD：基准点
+    // 的默认语义归 CLI，插件写死一个 HEAD 会在上游改默认时各说一套。
+    return to === "" ? ["--from", shq(from)] : ["--from", shq(from), "--to", shq(to)];
   }
   if (wantsCommit) {
     if (scope === "commit" && commit === "") {
@@ -1022,6 +1027,9 @@ export interface SessionArgs {
   after?: unknown;
   severity?: unknown;
   category?: unknown;
+  /** list 的分支过滤（OCR 1.13.11 起 session_cmd.go 的 sessionListBranch：与会话记录
+   *  的分支精确匹配，先过滤后 limit）。仅 list 接受；show/comments 带 id 时拒绝。 */
+  branch?: unknown;
   /** export 的 HTML 写到磁盘路径（宿主注入，不是模型参数）。 */
   output?: unknown;
   /** 输出 comments 子命令结构（comments/show/compare/export）。 */
@@ -1070,6 +1078,8 @@ interface SessionContext {
   after: string;
   severities: string[];
   categories: string[];
+  /** 分支过滤：仅 list（含 show/comments 缺 id 的回退）接受。 */
+  branch: string;
   hasFilters: boolean;
   limit: unknown;
   output: string;
@@ -1086,7 +1096,7 @@ function sessionListParts(ctx: SessionContext): string[] {
   if (ctx.hasFilters) {
     throw new Error(ctx.messages.filtersOnlyForComments);
   }
-  return [
+  const parts = [
     ocrCommand(),
     "session",
     "list",
@@ -1096,13 +1106,23 @@ function sessionListParts(ctx: SessionContext): string[] {
     "--limit",
     String(sessionLimit(ctx.limit, ctx.messages)),
   ];
+  // 过滤在 CLI 侧先于 limit 生效（session_cmd.go：branch 过滤后才截断），透传即可。
+  if (ctx.branch !== "") {
+    parts.push("--branch", shq(ctx.branch));
+  }
+  return parts;
 }
 
 function sessionCompareParts(ctx: SessionContext): string[] {
   if (ctx.before === "" || ctx.after === "") {
     throw new Error(ctx.messages.compareNeedsBoth);
   }
-  if (ctx.id !== "" || (ctx.limit !== undefined && ctx.limit !== null) || ctx.hasFilters) {
+  if (
+    ctx.id !== "" ||
+    ctx.branch !== "" ||
+    (ctx.limit !== undefined && ctx.limit !== null) ||
+    ctx.hasFilters
+  ) {
     throw new Error(ctx.messages.compareRejectsArgs);
   }
   // 两个 id 都是位置参数；`--` 挡住以 '-' 开头的选项注入。
@@ -1120,7 +1140,12 @@ function sessionCompareParts(ctx: SessionContext): string[] {
 }
 
 function sessionExportParts(ctx: SessionContext): string[] {
-  if (ctx.before !== "" || ctx.after !== "" || (ctx.limit !== undefined && ctx.limit !== null)) {
+  if (
+    ctx.before !== "" ||
+    ctx.after !== "" ||
+    ctx.branch !== "" ||
+    (ctx.limit !== undefined && ctx.limit !== null)
+  ) {
     throw new Error(ctx.messages.exportRejectsArgs);
   }
   if (ctx.hasFilters) {
@@ -1147,6 +1172,10 @@ function sessionCommentsParts(ctx: SessionContext): string[] {
     // 与旧行为一致：没有 id 就退回 list，绝不输出空 id 的 comments。
     return sessionListParts({ ...ctx, hasFilters: false });
   }
+  // 走到这里 id 非空：branch 只对 list 生效（含上面的回退），带 id 的 comments 拒绝。
+  if (ctx.branch !== "") {
+    throw new Error(ctx.messages.branchOnlyForList);
+  }
   const parts = [ocrCommand(), "session", "comments", "--json", "--repo", shq(ctx.repo)];
   if (ctx.severities.length > 0) {
     parts.push("--severity", shq(ctx.severities.join(",")));
@@ -1167,6 +1196,10 @@ function sessionShowParts(ctx: SessionContext): string[] {
   }
   if (ctx.id === "") {
     return sessionListParts({ ...ctx, hasFilters: false });
+  }
+  // 同 comments：带 id 的 show 不按分支过滤，branch 只在回退成 list 的那支生效。
+  if (ctx.branch !== "") {
+    throw new Error(ctx.messages.branchOnlyForList);
   }
   return [ocrCommand(), "session", "show", "--json", "--repo", shq(ctx.repo), "--", shq(ctx.id)];
 }
@@ -1213,6 +1246,7 @@ export function buildSessionCommand(args: SessionArgs, messages: OcrReviewMessag
     after: idValue(args.after, "after", messages),
     severities: severityFilter(args.severity, messages),
     categories: commaList(args.category, "category", SESSION_FILTER_LIST_LIMIT, messages),
+    branch: idValue(args.branch, "branch", messages),
     hasFilters: false,
     limit: args.limit,
     output: idValue(args.output, "output", messages),

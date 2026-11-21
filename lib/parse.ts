@@ -17,8 +17,10 @@
 //     发现”），partial 表示部分文件未完成但整体有覆盖（评论仍有效），failed 表示
 //     整体失败（解析层判 ok=false，不会进摘要）。白名单外（含缺失、`{"error":…}`
 //     型错误对象）一律 ok=false：exit 0 不等于评审成功。
-//   - 退出码 0 = 完成（可能有 warning）；1 = 致命错误。致命错误由调用方根据
-//     stderr 抛错，不走到本解析。
+//   - 退出码 0 = 完成（含 budget-only 的 partial）；非零 = 运营性失败或全场失败
+//     （OCR 1.13.12 起，review_cmd.go 的 reviewManifestRequiresNonZeroExit），但 --output
+//     照常写出。前台调用方先按「有可用覆盖的 partial」收尾（lib/foreground-summary.ts 的
+//     foregroundSummaryOfPartial），拿不出可用覆盖才按错误抛。
 //   - delegate preview: {schema_version,mode,repository,total_files,
 //     reviewable_count,excluded_count,total_insertions,total_deletions,
 //     reviewable_files[{path,status,insertions,deletions}],excluded_files[]}。
@@ -52,9 +54,10 @@ const DECIMAL_INTEGER = /^\d+$/u;
  * ② 认了不等于成功——万一它带着 exit 0 回来，把它当 ok:true 就会把一份全场失败的回执
  * 摘要成「0 条评论」，那正是本段开头要避免的假阳性。
  *
- * partial 是 manifest 终态之一：部分文件失败但整体有覆盖、以及 token 预算截断后仍有
- * 覆盖，都以 exit 0 + status "partial" 输出。此前白名单漏了它，整场已花费 token 的
- * 评审被误报成「status 非法」并丢弃全部评论。
+ * partial 是 manifest 终态之一：部分文件失败但整体有覆盖。token 预算截断后仍有覆盖的
+ * partial 以 exit 0 输出；含运营性失败（timeout/provider/config/panic/unknown 任一，
+ * review_cmd.go 的 reviewManifestRequiresNonZeroExit）的 partial 以非零码输出、结果照常
+ * 发布。此前白名单漏了它，整场已花费 token 的评审被误报成「status 非法」并丢弃全部评论。
  *
  * 有 manifest 时 status 就是它的终态（complete/partial/skipped），success 与
  * completed_with_warnings/completed_with_errors 只在没有 manifest 的产出上出现——

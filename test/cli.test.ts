@@ -577,15 +577,21 @@ describe("buildReviewCommand", () => {
     expect(() => reviewCmd({ repo: "/r", scope: "commit" }, "/o")).toThrow(/需要 commit/u);
   });
 
-  it("branch 模式 require from/to", () => {
+  it("branch 模式 require from；to 可省略（OCR 对只给 from 的默认以 HEAD 收尾）", () => {
     const { command } = reviewCmd(
       { repo: "/r", scope: "branch", from: "main", to: "feature", effort: "high" },
       "/o",
     );
     expect(command).toContain("--from 'main' --to 'feature'");
     expect(command).toContain("--effort high");
-    expect(() => reviewCmd({ repo: "/r", scope: "branch", from: "main" }, "/o")).toThrow(
-      /from 与 to/u,
+    // from 单给：透传 --from，不自己补 --to——基准点的默认语义归 CLI
+    //（shared_flags.go 的 normalizeDiffTarget），插件写死会在上游改默认时各说一套。
+    const fromOnly = reviewCmd({ repo: "/r", scope: "branch", from: "main" }, "/o");
+    expect(fromOnly.command).toContain("--from 'main'");
+    expect(fromOnly.command).not.toContain("--to");
+    // to 单给仍非法：上游 validateDiffMode 的「--from is required when --to is specified」。
+    expect(() => reviewCmd({ repo: "/r", scope: "branch", to: "feature" }, "/o")).toThrow(
+      /必须提供 from/u,
     );
   });
 
@@ -731,6 +737,27 @@ describe("buildSessionCommand", () => {
   it("action=list 与 id 同给 ⇒ 抛错（不再静默改写成 show）", () => {
     expect(() => sessionCmd({ repo: "/r", action: "list", id: "abc" })).toThrow(
       /action=list 不接受 id/u,
+    );
+  });
+
+  it("branch 透传 --branch（list）；带 id 的 show/comments、compare、export 拒绝", () => {
+    // OCR 1.13.11 起 session list 注册 --branch（session_cmd.go）：精确匹配、先过滤后 limit。
+    expect(sessionCmd({ repo: "/r", branch: "feature/x" }).command).toContain(
+      "--branch 'feature/x'",
+    );
+    // comments/show 缺 id 回退成 list：branch 在回退后依然生效（同一支 list 逻辑）。
+    expect(sessionCmd({ repo: "/r", action: "comments", branch: "b" }).command).toContain(
+      "--branch 'b'",
+    );
+    expect(() => sessionCmd({ repo: "/r", id: "abc", branch: "b" })).toThrow(/branch 只适用于/u);
+    expect(() => sessionCmd({ repo: "/r", action: "comments", id: "abc", branch: "b" })).toThrow(
+      /branch 只适用于/u,
+    );
+    expect(() =>
+      sessionCmd({ repo: "/r", action: "compare", before: "a", after: "b", branch: "b" }),
+    ).toThrow(/不接受.*branch/u);
+    expect(() => sessionCmd({ repo: "/r", action: "export", branch: "b" })).toThrow(
+      /不接受.*branch/u,
     );
   });
 });
@@ -1151,8 +1178,10 @@ describe("拒绝理由双语（注入 en 那份）", () => {
     expect(() => reviewCmd(mixed, "/o", en)).toThrow(
       "scope=branch/from/to and commit are mutually exclusive",
     );
-    expect(() => reviewCmd({ repo: "/r", scope: "branch", from: "main" }, "/o", en)).toThrow(
-      "scope=branch requires both from and to",
+    // from 单给如今合法（OCR 把 --to 折成 HEAD）；to 单给仍拒绝，双语断言换到这一侧。
+    expect(() => reviewCmd({ repo: "/r", scope: "branch", to: "main" }, "/o", en)).toThrow(
+      "branch mode requires from; to is optional (OCR defaults it to HEAD when only from is given); " +
+        "to without from is invalid",
     );
     expect(() => reviewCmd({ repo: "/r", scope: "commit" }, "/o", en)).toThrow(
       "scope=commit requires the commit parameter",

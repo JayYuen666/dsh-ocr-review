@@ -22,6 +22,10 @@ import type {
   TypertCodec,
 } from "@deepseek-ai/dsh-typert-protocol";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/client";
+import { isRemoteMounter } from "@jayyuen66/dsh-plugin-shared/lib/typert-client";
+import type { RemoteHost, RemoteMounter } from "@jayyuen66/dsh-plugin-shared/lib/typert-client";
+/** 客户端上下文里本模块用到的那一位：**显式读取**一个可选服务（见文件头为什么不用
+ *  inject）。正主在 shared `./lib/typert-client`（含 isRemoteMounter，七份逐字副本收编）。 */
 import { z } from "zod";
 
 import { OCR_BUNDLE_PACKAGE, OCR_REMOTE_NAMESPACE } from "../lib/remote-shape.ts";
@@ -39,6 +43,10 @@ import type {
   OcrTestReply,
 } from "../lib/remote-shape.ts";
 
+/** 客户端上下文里本模块用到的那一位：**显式读取**一个可选服务（见文件头为什么不用
+ *  inject）。正主在 shared `./lib/typert-client`（含 isRemoteMounter，七份逐字副本收编）。
+ *  再导出放在 import 块之后：夹在中间会让后续 import 被判「不在文件顶部」。 */
+export type { RemoteHost } from "@jayyuen66/dsh-plugin-shared/lib/typert-client";
 /** 网关给命名空间注册的**服务键**：`remote.<namespace>`。它在 `$mount` 完成之后才存在，
  *  所以只能在挂载后按这个键去读，而不是提前 inject。 */
 const OCR_SERVICE_KEY = `remote.${OCR_REMOTE_NAMESPACE}`;
@@ -200,19 +208,6 @@ export const OCR_DESCRIPTORS: readonly InvocationDescriptor[] = [
   },
 ];
 
-/** 客户端上下文里本模块用到的那一位：**显式读取**一个可选服务（见文件头为什么不用 inject）。 */
-export interface RemoteHost {
-  get?: (name: string, strict?: boolean) => unknown;
-}
-
-/** 官方网关的客户端接口：这张卡只用 `$mount` 这一个（挂载一个手写的贡献）。 */
-interface RemoteMounter {
-  $mount: (contribution: {
-    package: string;
-    descriptors: readonly InvocationDescriptor[];
-  }) => Promise<unknown>;
-}
-
 /** 挂载之后由网关提供的命名空间接口（方法名 = descriptor.method，按位置传参）。 */
 interface OcrNamespace {
   providers: () => Promise<RemoteResult<Record<string, unknown>>>;
@@ -241,10 +236,6 @@ export interface OcrReader {
   auth: () => Promise<OcrAuthReply>;
   chatGpt: (model: string) => Promise<OcrChatGptReply>;
 }
-
-/** 这个值能当远程通道用吗（只核我们要调的那一位；服务来自别的实现或版本时保守当作没有）。 */
-const isRemoteMounter = (value: unknown): value is RemoteMounter =>
-  isRecord(value) && typeof value["$mount"] === "function";
 
 /** 同上：命名空间服务（挂载之后才有，缺它说明网关没认这枚贡献）。 */
 const isOcrNamespace = (value: unknown): value is OcrNamespace =>
