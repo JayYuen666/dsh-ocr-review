@@ -11,8 +11,8 @@
   <a href="https://www.npmjs.com/package/@jayyuen66/dsh-ocr-review"><img src="https://img.shields.io/npm/d18m/@jayyuen66/dsh-ocr-review?style=flat-square" alt="npm downloads (total)" /></a>
   <a href="https://github.com/JayYuen666/dsh-ocr-review/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JayYuen666/dsh-ocr-review/ci.yml?branch=main&style=flat-square&label=ci" alt="ci" /></a>
   <img src="https://img.shields.io/badge/license-MIT-4c1?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/node-%3E%3D24.9-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
-  <img src="https://img.shields.io/badge/dsh-%5E0.2.2--rc.5-658EFF?style=flat-square" alt="dsh" />
+  <img src="https://img.shields.io/badge/node-%5E24.22.3%7C%7C%3E%3D26.13.1-4c1?style=flat-square&logo=nodedotjs&logoColor=white" alt="node" />
+  <img src="https://img.shields.io/badge/dsh-%5E0.2.3--alpha.2-658EFF?style=flat-square" alt="dsh" />
   <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/powered_by_dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" alt="powered by dsh" /></a>
 </p>
 
@@ -70,7 +70,7 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 卸载用 `dsh plugin --profile web remove @jayyuen66/dsh-ocr-review`。包在公共 npm 上，安装不需要凭据。
 
 - **升级已装的那一份要「先 remove 再 add」。** profile 跑着 HMR（出厂那几个都跑）时，`add` 一个 profile 已经依赖着的包会在 pnpm 动手之前就被拒（`already-installed`）——先 `remove` 再 `add` 目标版本，新版不必重启就起跑。没跑 HMR 时同一个 `add` 照样走 pnpm，报 `restart-required`。
-- **要求 Node.js `>= 24.9`，宿主 dsh 在 `0.2.2-rc.5` 或更新的 `0.2.2` 线上。** 宿主只读 `engines.dsh`（`^0.2.2-rc.5`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
+- **要求 Node.js `^24.22.3 || >=26.13.1`，宿主 dsh 在 `0.2.3-alpha.2` 这条宿主线上。** 宿主只读 `engines.dsh`（`^0.2.3-alpha.2`）并独立裁决，预发布号参与比较。不合的宿主要显式登记风险豁免：`dsh plugin --profile <p> allow-version @jayyuen66/dsh-ocr-review@<版本> --dsh-version <确切运行版本> --accept-risk`。支持窗口是滚动的：本包在发布时把窗口内的每个已发布宿主版本逐版取证，窗口滚动后重新取证，不把这一句里的版本号当长期承诺。
 - **`dependencies` 里不放任何 `@deepseek-ai/*`，这是契约**（`test/publish-manifest.test.ts` 钉着）。消费方 profile 用 `nodeLinker: hoisted` 与 `autoInstallPeers: false` 安装，宿主包进了那张表就会落成真实目录，与宿主进程已加载的那份并存。`@deepseek-ai/dsh-tools` 的调度器键是普通 `Symbol`（不是 `Symbol.for`），符号身份按实例计算——那个 profile 里**每一次原生工具调用都抛**，而本包的构建、类型检查与覆盖率门在此前一路绿。
 - **`host.js` 以值导入的五枚宿主包是非 optional 的 peer**：`@deepseek-ai/schemastery`（宿主 fork——`.volatile()` 的解析只在它有实现）、`@deepseek-ai/dsh-credentials`、`@deepseek-ai/dsh-home-paths`、`@deepseek-ai/dsh-atomic-write` 与 `@deepseek-ai/dsh-typert-protocol`（Remote 的 Service 基类）。五枚同时以同一钉版另列进 `devDependencies`，本仓自己的类型检查才解析得到；构建对 manifest 三张表一律外部化，产物里保持裸说明符。
 - **发布清单**（以 `package.json` 的 `files` 为准）：`host.js`、`client.js`、`cordis.patch.yml`、`scripts/`、`locale/*.json`、`docs/`、`icon.svg`、`CHANGELOG.md` 与 `THIRD_PARTY_NOTICES.md`。`prepare` 重建两个 bundle，发出去的永远是当前源码的产物。
@@ -81,11 +81,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 外部 CLI
 
-本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.13.13** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
+本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.14.2** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
 
 ```sh
 brew install open-code-review                        # formula 只跟上游最新版
-npm i -g @alibaba-group/open-code-review@1.13.13      # 钉在本包核对的那一版
+npm i -g @alibaba-group/open-code-review@1.14.2      # 钉在本包核对的那一版
 ```
 
 - **brew 钉不住版本。** `homebrew/core` 里只有一份 stable formula、没有版本化变体，`brew install` / `brew upgrade` 拿到的永远是上游最新。带得上核对版本的只有 npm 那条。
@@ -122,7 +122,7 @@ npm i -g @alibaba-group/open-code-review@1.13.13      # 钉在本包核对的那
 
 | 工具 | 入参与约束 |
 | --- | --- |
-| `ocr_review` | repo（绝对路径，缺省=当前会话工作区）、scope workspace/commit/branch（branch 必须给 from；to 可省略——OCR 1.13.10 起只给 from 时默认以 HEAD 收尾——且与 commit 互斥）、effort、background、exclude、provider/model/resume——workspace/commit/branch 三种都支持 resume（OCR 1.13.10 起）；能不能恢复由 OCR 自己按 identity 判，被拒时插件把英文原文转成中文提示。preview（只做文件选择）、noFilter、maxGitProcs、rule/backgroundFile（仅 repo 根内文件）、wait |
+| `ocr_review` | repo（绝对路径，缺省=当前会话工作区）、scope workspace/commit/branch（branch 必须给 from；to 可省略——OCR 1.13.10 起只给 from 时默认以 HEAD 收尾——且与 commit 互斥）、effort、background、exclude、provider/model/resume——workspace/commit/branch 三种都支持 resume（OCR 1.13.10 起）；能不能恢复由 OCR 自己按 identity 判，被拒时插件把英文原文转成中文提示。analysis / analysisMaxTokensBudget（OCR 1.14 的行为/影响分析；仅 commit 或 branch，不能与 preview/resume 同用；wait=true 时报告以 `analysis` 返回，后台模式的结果在会话的 `analysis/` 目录；分析失败不改变 review 结果）。preview（只做文件选择）、noFilter、maxGitProcs、rule/backgroundFile（仅 repo 根内文件）、wait |
 | 数值参数组（review 与 scan） | concurrency / timeoutMinutes / maxTools / maxTokens / maxTokensBudget，落 `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`。取值忠实透传；下限 concurrency 为 1、其余为 0，非整数或低于下限直接报错，不钳制 |
 | `ocr_scan` | repo、path、exclude、batch none/by-language/by-directory、provider/model（CLI 原生共享旗标）、同一组数值参数、maxTools（只升不降：低于模板默认 60 完全无效）、maxTokens（模板默认 58888 会撞 80% 提示词闸门）、preview、noPlan/noDedup/noSummary、resume、maxGitProcs、rule（repo 根内文件）、wait。扫描深度这几个旋钮缺省会取设置卡里的值（scanMaxTokens / scanConcurrency / scanMaxTools / scanNoPlan / scanNoDedup），模型显式传参优先。repo 规范到 git 顶层（path/exclude 从原目录重基，扫描范围不变），这样子目录发起的扫描会话也能被 `ocr_session` 查到。整仓扫描，无需 git diff |
 | `ocr_delegate_preview` / `ocr_delegate_rule` | preview：repo、scope/commit/from/to、exclude、background、backgroundFile/rule/maxGitProcs；返回完整文件清单与 totalFiles/reviewableCount/excludedCount（不截断）。rule：repo 加 paths——必填、最多 200 条、经 `--` 分隔作位置参数、逐条转义——外加 rule。OCR 端零 LLM 消耗：只回文件清单与规则分组 |
@@ -243,7 +243,7 @@ pnpm run check   # typecheck（两侧）→ lint → client 构建 → host 构�
 - 覆盖率阈值**四项 100%**，统计范围是 `vitest.config.ts` 里 `coverageInclude` 选定的那部分（`host.ts` 加 `lib/**`）；有两块刻意不在统计范围里：客户端那一半（`src/**`）由 bundle 和设置卡的用例覆盖，`scripts/get-cred.mjs` 由进程级用例另起一个进程去驱动（v8 覆盖率看不到子进程），对它的行为门禁在 `test/get-cred.test.ts`。
 - 往 profile 加本包的**本地目录**（`pnpm add <路径>`）需要 pnpm ≥ 12.3.0：更早的 pnpm 12 把无别名的本地路径当 registry 包名解析（上游 #14437，12.3.0 修复）。从 registry 装不受影响。
 - 产物是否最新由 `test/build-host.test.ts` 固定着：`host.js` / `client.js` 落后于源码就红。发布物不手改；`prepare` 重建。
-- 插件源码是 TypeScript，由宿主的 cordis Loader 直接加载（Node ≥ 22.18 类型剥离）；bundle 只为 npm 发布清单存在。从本地目录安装（`pnpm add <路径>`）读的是源码，因此需要 Node ≥ 22.18，而本包自己声明的下限是 `engines.node`（`>=24.9.0`）。
+- 插件源码是 TypeScript，由宿主的 cordis Loader 直接加载（Node ≥ 22.18 类型剥离）；bundle 只为 npm 发布清单存在。从本地目录安装（`pnpm add <路径>`）读的是源码，因此需要 Node ≥ 22.18，而本包自己声明的下限是 `engines.node`（`^24.22.3 || >=26.13.1`）。
 
 ## 反馈
 

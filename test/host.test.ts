@@ -1707,6 +1707,32 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(ocrRepo({ repo: "  " }, makeExec("/session"), zh)).toBe("/session");
     });
 
+    it("活目录优先于 header 快照；活值非法时回落快照", () => {
+      const { signal } = new AbortController();
+      const snapshot = { session: { header: { cwd: "/snapshot" } } };
+      const live = fakeExec(signal, {
+        ...snapshot,
+        ctx: { get: () => ({ get: () => "/live" }) },
+      });
+      expect(ocrRepo({}, live, zh)).toBe("/live");
+      const empty = fakeExec(signal, {
+        ...snapshot,
+        ctx: { get: () => ({ get: () => "" }) },
+      });
+      expect(ocrRepo({}, empty, zh)).toBe("/snapshot");
+      const nonString = fakeExec(signal, {
+        ...snapshot,
+        ctx: { get: () => ({ get: () => 42 }) },
+      });
+      expect(ocrRepo({}, nonString, zh)).toBe("/snapshot");
+      // 服务只递来空壳（get 缺席）也是合法形状，但给不出活值 ⇒ 回落 header。
+      const shapeOnly = fakeExec(signal, {
+        ...snapshot,
+        ctx: { get: () => ({}) },
+      });
+      expect(ocrRepo({}, shapeOnly, zh)).toBe("/snapshot");
+    });
+
     it("无显式值且会话缺位/非字符串/非绝对 ⇒ 抛错要求显式传入", () => {
       expect(() => ocrRepo({}, makeExec(), zh)).toThrow(/repo 必填/u);
       expect(() => ocrRepo({}, makeExec("relative/path"), zh)).toThrow(/绝对路径/u);

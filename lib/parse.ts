@@ -153,12 +153,49 @@ export interface CoverageView {
   failedItems: string[];
 }
 
+/**
+ * OCR 1.14 的 `analysis` / `analysis_meta`（Behavior/Impact 分析）。
+ *
+ * 它是**与 Review 并行的一趟独立分析**：`execution_status` 是 Analysis 自己的结局
+ * （completed/partial/failed/skipped），`submission_accepted` 只说明分析报告有没有被
+ * 接受，都不是 Review 的 status；CLI 明确「分析失败或跳过不改变 Review 退出码」，
+ * 所以这里既不参与 `ok`，也不改写 Review 的 status。缺省（没传 `--analysis`）回 null。
+ */
+export interface AnalysisView {
+  /** `analysis_meta.execution_status`；没有 meta 时为 `unknown`。 */
+  status: string;
+  /** `analysis_meta.submission_accepted`：模型是否交出了被接受的报告。 */
+  completed: boolean;
+  /** 模型自报的完成度（`unknown` / `complete` / `partial` …）。 */
+  declaredCompletion: string;
+  /** `analysis_meta.stop_reason`：为什么停（none / budget / rounds …）。 */
+  stopReason: string;
+  /** 人读的分析报告（`analysis` 字段；已去掉内部 observation 标记）。 */
+  markdown: string;
+  /** 报告超过 {@link ANALYSIS_MARKDOWN_LIMIT} 时为 true。 */
+  markdownTruncated: boolean;
+  /** `analysis_meta.scope` 的文件数。 */
+  scopeFiles: number;
+  /** 分析引用的观测条数。 */
+  citedObservations: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+  /** `analysis_meta.errors`：分析自己的失败原因（截到 DIAGNOSTIC_DETAIL_LIMIT）。 */
+  errors: string[];
+  /** `analysis_meta.warnings`：分析自己的告警（截到 DIAGNOSTIC_DETAIL_LIMIT）。 */
+  warnings: string[];
+}
+
 export interface ParsedReview {
   ok: boolean;
   status: ParsedReviewStatus;
   message: string;
   skipped: boolean;
   summary: ReviewSummary | null;
+  /** `analysis` / `analysis_meta`；没传 `--analysis` 时为 null。 */
+  analysis: AnalysisView | null;
   /** `summary.budget_exceeded`：被 token 预算截断过（status 仍是 partial，看不出这一层）。 */
   budgetExceeded: boolean;
   /** 1.13.3 的 `review_limit_reached` / scan 的 `token_budget_reached`：限流截断过。 */
@@ -249,6 +286,10 @@ const LIMIT_WARNING_TYPES: ReadonlySet<string> = new Set([
 
 /** 把 project_summary 截到摘要预算内；截断事实单独带出，别让模型把半截当全文。 */
 const PROJECT_SUMMARY_LIMIT = 4000;
+
+/** Analysis 报告是 Markdown 长文（可能含表格/清单）；截到摘要预算内，全文由 artifact_dir
+ *  或会话目录承载。截断事实单独带出，避免模型把半截当结论。 */
+const ANALYSIS_MARKDOWN_LIMIT = 6000;
 
 /** `llm` 身份：两个字段都读不出时回 null，而不是造一个空模型。 */
 function llmOf(raw: unknown): LlmIdentity | null {
@@ -486,6 +527,7 @@ function reviewFailure(status: "unparseable" | "invalid", message: string): Pars
     message,
     skipped: false,
     summary: null,
+    analysis: null,
     budgetExceeded: false,
     limitReached: false,
     llm: null,
@@ -581,6 +623,75 @@ function diagnosticsOf(
  * 输出文件内容。解析失败（非 JSON）或 status 不在白名单（含缺失，例如
  * `{"error":"..."}` 这类 exit 0 的错误对象）返回 ok=false，由调用方报错。
  */
+/**
+ * `analysis` / `analysis_meta`：OCR 1.14 的行为与影响分析。
+ *
+ * 两个字段都不是 Review 的必填面（`--analysis` 才产出），所以「一个都没有」与
+ * 「有分析但失败」必须分开：前者回 null，后者回一个 status=failed、errors 带原因的
+ * 视图——把失败的分析静默当成「没请求过」会让模型以为报告不存在，而不是分析没跑完。
+ *
+ * `analysis_meta` 是 Report 结构（workflow/report.go）：`execution_status` 是 Analysis
+ * 自己的结局，`submission_accepted` 只说明报告有没有被接受；两者都不参与 Review 的
+ * ok/status。`analysis` 是已去掉 observation 标记的人读 Markdown，`analysis_raw` 是带
+ * 标记的原文，后者不进摘要（同一份内容再塞一遍只会翻倍 token）。
+ */
+/** `analysis_meta` 的字段读取：meta 缺席与字段缺席都按「空」处理，调用方不用重复判。 */
+function metaValue(meta: Record<string, unknown> | undefined, key: string): unknown {
+  return meta === undefined ? undefined : meta[key];
+}
+
+function metaArray(meta: Record<string, unknown> | undefined, key: string): unknown[] {
+  const value = metaValue(meta, key);
+  return Array.isArray(value) ? value : [];
+}
+
+function metaText(meta: Record<string, unknown> | undefined, key: string): string {
+  return str(metaValue(meta, key));
+}
+
+function metaCount(usage: Record<string, unknown> | undefined, key: string): number {
+  return usage === undefined ? 0 : num(usage[key]);
+}
+
+function analysisViewOf(
+  meta: Record<string, unknown> | undefined,
+  markdown: string,
+  messages: OcrReviewMessages,
+): AnalysisView {
+  const usageRaw = metaValue(meta, "usage");
+  const usage = isRecord(usageRaw) ? usageRaw : undefined;
+  const errors = metaArray(meta, "errors")
+    .map((entry) => str(entry).trim())
+    .filter((entry) => entry !== "");
+  const truncated = markdown.length > ANALYSIS_MARKDOWN_LIMIT;
+  return {
+    status: metaText(meta, "execution_status") || "unknown",
+    completed: boolOf(metaValue(meta, "submission_accepted")),
+    declaredCompletion: metaText(meta, "declared_completion"),
+    stopReason: metaText(meta, "stop_reason"),
+    markdown: truncated ? markdown.slice(0, ANALYSIS_MARKDOWN_LIMIT) : markdown,
+    markdownTruncated: truncated,
+    scopeFiles: metaArray(meta, "scope").length,
+    citedObservations: metaArray(meta, "cited_observation_ids").length,
+    totalTokens: metaCount(usage, "total_tokens"),
+    inputTokens: metaCount(usage, "input_tokens"),
+    outputTokens: metaCount(usage, "output_tokens"),
+    model: metaText(meta, "model"),
+    errors: capLines(errors.slice(0, DIAGNOSTIC_DETAIL_LIMIT), errors.length, messages),
+    warnings: warningLinesOf(metaArray(meta, "warnings"), messages).lines,
+  };
+}
+
+function analysisOf(
+  root: Record<string, unknown>,
+  messages: OcrReviewMessages,
+): AnalysisView | null {
+  const metaRaw = root["analysis_meta"];
+  const meta = isRecord(metaRaw) ? metaRaw : undefined;
+  const markdown = str(root["analysis"]);
+  return meta === undefined && markdown === "" ? null : analysisViewOf(meta, markdown, messages);
+}
+
 export function parseReviewOutput(text: string, messages: OcrReviewMessages): ParsedReview {
   let doc: unknown;
   try {
@@ -644,6 +755,7 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
           elapsed: str(sum["elapsed"]),
         }
       : null,
+    analysis: analysisOf(root, messages),
     budgetExceeded: sum === undefined ? false : boolOf(sum["budget_exceeded"]),
     limitReached: diagnostics.limitReached,
     llm: llmOf(root["llm"]),
@@ -711,6 +823,8 @@ export interface ReviewSummaryView {
   skipped: boolean;
   message: string | null;
   summary: ReviewSummary | null;
+  /** `--analysis` 的行为/影响分析；没请求或没产出时为 null。 */
+  analysis: AnalysisView | null;
   /** 被 token 预算截断过：status 只说 partial，说不出「为什么没审完」。 */
   budgetExceeded: boolean;
   /** 1.13.3 的 review_limit_reached / scan 的 token_budget_reached。 */
@@ -773,6 +887,7 @@ export function summarizeReview(
     skipped: parsed.skipped,
     message: parsed.message || null,
     summary: parsed.summary ?? null,
+    analysis: parsed.analysis ?? null,
     budgetExceeded: parsed.budgetExceeded,
     limitReached: parsed.limitReached,
     llm: parsed.llm,

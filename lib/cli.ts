@@ -82,7 +82,7 @@ const BACKGROUND_FLAG = "--background";
  * test/readme-parity.test.ts 再断言两侧 README 写的也是它。三处只有一处是人写的、
  * 靠门禁钉住另两处，就不会出现「README 教用户装 A、代码按 B 校验」这种两边各自自洽的错误。
  */
-export const EXPECTED_OCR_CLI_VERSION = "1.13.13";
+export const EXPECTED_OCR_CLI_VERSION = "1.14.2";
 
 /** 报错用的值形态（永不调用可能被劫持的 toJSON/toString）。host.ts 的入参闸
  *  （effort、wait）复用同一种做法，所以导出。 */
@@ -158,6 +158,10 @@ export interface ReviewScopeArgs {
   resume?: unknown;
   /** 只列文件清单、不调 LLM；与 resume/wait=false 互斥（由 host 前置拒绝）。 */
   preview?: unknown;
+  /** OCR 1.14 的可选行为/影响分析（`--analysis`）；只支持 commit/range，不能与 preview/resume 同用。 */
+  analysis?: unknown;
+  /** Analysis 自己的 input+output token 预算（`--analysis-max-tokens-budget`，0=不限）。 */
+  analysisMaxTokensBudget?: unknown;
   noFilter?: unknown;
   maxGitProcs?: unknown;
   rule?: unknown;
@@ -387,6 +391,41 @@ function scopeFlags(args: ReviewScopeArgs, messages: OcrReviewMessages): string[
   }
   // scope 已在入口处过白名单，走到这里只剩 workspace。
   return [];
+}
+
+/**
+ * `--analysis` 的开关与预算闸。
+ *
+ * 预算旗标单独给出时上游 CLI 会静默忽略（validateAnalysisOptions 先 `if !opts.analysis` 直接
+ * return），所以桥接层必须先拒绝「只给预算」——否则模型以为设了预算，实际没有 Analysis。
+ */
+function analysisFlagOf(args: ReviewScopeArgs, messages: OcrReviewMessages): boolean {
+  const analysis = boolFlag(args.analysis, "analysis", messages);
+  const budgetGiven =
+    args.analysisMaxTokensBudget !== undefined && args.analysisMaxTokensBudget !== null;
+  if (budgetGiven && !analysis) {
+    throw new Error(messages.analysisBudgetNeedsAnalysis);
+  }
+  return analysis;
+}
+
+/** `--analysis` 的组合/范围闸：只允许 commit/range、不能与 preview/resume 同用。 */
+function assertAnalysisCombination(
+  analysis: boolean,
+  preview: boolean,
+  resume: string,
+  committedScope: boolean,
+  messages: OcrReviewMessages,
+): void {
+  if (!analysis) {
+    return;
+  }
+  if (preview || resume !== "") {
+    throw new Error(messages.analysisRejectsPreviewResume);
+  }
+  if (!committedScope) {
+    throw new Error(messages.analysisNeedsCommittedScope);
+  }
 }
 
 /** 可选文本 flag：值缺省/空串则省略，错类型抛错（静默丢弃等于悄悄改变语义）。 */
@@ -803,13 +842,16 @@ export function buildReviewCommand(
   const repo = assertAbsoluteRoot(args.repo, messages);
   const outputFormat = jsonOnlyFormat(args.format, messages);
   const preview = boolFlag(args.preview, "preview", messages);
+  const analysis = analysisFlagOf(args, messages);
   const parts: string[] = [ocrCommand(), "review", "--audience", "agent", "--format", outputFormat];
   const resume = idValue(args.resume, "resume", messages);
+  const scopeParts = scopeFlags(args, messages);
+  assertAnalysisCombination(analysis, preview, resume, scopeParts.length > 0, messages);
   if (preview) {
     if (resume !== "") {
       throw new Error(messages.previewRejectsResume);
     }
-    parts.push("--preview", ...scopeFlags(args, messages), ...selectionFlags(args, repo, messages));
+    parts.push("--preview", ...scopeParts, ...selectionFlags(args, repo, messages));
     // preview 的选项里有 MaxTokens：`agent.Preview` 用模板的每文件 prompt 上限把超限
     // 文件标成不审，不转发就会让预览与同参数的实跑给出两份不同的清单。其余调优项
     // （effort/provider/model/background*/noFilter/并发/超时/工具次数/预算）只作用于
@@ -830,7 +872,6 @@ export function buildReviewCommand(
   pushIntFlag(parts, "--max-tools", args.maxTools, 0, messages);
   pushIntFlag(parts, "--max-tokens", args.maxTokens, 0, messages);
   pushIntFlag(parts, "--max-tokens-budget", args.maxTokensBudget, 0, messages);
-  const scopeParts = scopeFlags(args, messages);
   // 选择性参数（exclude、rule、max-git-procs）只经 selectionFlags 一处拼装；参数说明另有
   // backgroundFlags。这两个 helper 各自的判断不会被第三份手写的副本绕过。
   parts.push(
@@ -838,6 +879,10 @@ export function buildReviewCommand(
     ...selectionFlags(args, repo, messages),
     ...backgroundFlags(args, messages),
   );
+  if (analysis) {
+    parts.push("--analysis");
+    pushIntFlag(parts, "--analysis-max-tokens-budget", args.analysisMaxTokensBudget, 0, messages);
+  }
   pushBoolFlag(parts, "--no-filter", args.noFilter, "noFilter", messages);
   const backgroundFile = repoFileOf(
     args.backgroundFile,

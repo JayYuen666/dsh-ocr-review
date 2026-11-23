@@ -59,9 +59,11 @@ import {
   Section,
   SelectField,
   TextField,
-  ToggleField,
+  SectionToggle,
   claimApply,
   LogPanel,
+  Badge,
+  StatusDot,
   diffTouched,
   ensureCardUiCss,
   fieldOf,
@@ -69,7 +71,7 @@ import {
   splitHint,
   useInvalidFields,
 } from "@jayyuen66/dsh-plugin-shared/client";
-import type { SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
+import type { BadgeTone, DotTone, SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
 import { OCR_BUNDLE_PACKAGE } from "../lib/remote-shape.ts";
 import { OCR_LOGO_DATA_URI } from "./ocr-icon.ts";
 import { createOcrReader } from "./remote.ts";
@@ -530,6 +532,57 @@ export function cliInstallText(binary: OcrBinaryView | null): string {
  * 回执与 ChatGPT 输出走 shared 的 Callout / LogPanel 而不是输入框：那段文本里就有上游给的
  * `npm i -g …` 命令，要能选中复制，而本包不提供剪贴板 API（非安全上下文会静默失败）。
  */
+/** 探测回执：成功是带复制的原始输出面板，失败是 err Callout。 */
+function probeResultNode(t: Translate, msg: { ok: boolean; text: string } | null): ReactNode {
+  if (msg === null) {
+    return null;
+  }
+  return msg.ok
+    ? createElement(
+        "div",
+        { "data-field": "probe-result" },
+        createElement(
+          LogPanel,
+          {
+            label: t("probeReceipt"),
+            tone: "ok",
+            semanticLines: true,
+            copyText: msg.text,
+            copyLabel: t("copy"),
+            copiedLabel: t("copied"),
+          },
+          msg.text,
+        ),
+      )
+    : createElement(Callout, { tone: "err", field: "probe-result" }, msg.text);
+}
+
+/** 状态行的状态点色调：未报 mute、版本偏离 warn、未找到 err、随包/PATH ok。 */
+export function cliStatusTone(binary: OcrBinaryView | null): DotTone {
+  if (binary === null) {
+    return "mute";
+  }
+  const diverged =
+    binary.expectedVersion !== undefined &&
+    binary.measuredVersion !== null &&
+    binary.measuredVersion !== binary.expectedVersion;
+  if (diverged) {
+    return "warn";
+  }
+  return binary.source === "none" ? "err" : "ok";
+}
+
+/** 状态行：状态点 + 完整说明。第三方 CLI 的「检查结果」在所有出现位置都必须有这颗点；
+ *  点与文字取自同一次判定，避免徽标说一套、状态行说另一套。 */
+export function cliStatusLine(t: Translate, binary: OcrBinaryView | null): ReactNode {
+  return createElement(
+    "div",
+    { className: "dsu-inlineRow", "data-field": "cli-state" },
+    createElement(StatusDot, { tone: cliStatusTone(binary) }),
+    createElement("p", { className: "dsu-hint" }, binaryStatusText(t, binary)),
+  );
+}
+
 export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
   const { t } = deps;
   const button = createElement(
@@ -548,20 +601,25 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
     { className: ACTIONS_CLASS, "data-field": "cli-status" },
     button,
   );
-  const status = createElement("p", { className: "dsu-hint" }, binaryStatusText(t, deps.binary));
+  const status = cliStatusLine(t, deps.binary);
   const versionText = cliVersionText(t, deps.binary);
   const versionLine =
     versionText === "" ? null : createElement("p", { className: "dsu-hint" }, versionText);
   const hintText = cliInstallText(deps.binary);
   const installLine =
-    hintText === "" ? null : createElement("p", { className: "dsu-hint" }, hintText);
-  const probe = deps.probeMsg
-    ? createElement(
-        Callout,
-        { tone: deps.probeMsg.ok ? "ok" : "err", field: "probe-result" },
-        deps.probeMsg.text,
-      )
-    : null;
+    hintText === ""
+      ? null
+      : createElement(
+          LogPanel,
+          {
+            label: t("binaryInstallTitle"),
+            copyText: hintText,
+            copyLabel: t("copy"),
+            copiedLabel: t("copied"),
+          },
+          hintText,
+        );
+  const probe = probeResultNode(t, deps.probeMsg);
   return createElement(
     Section,
     { title: t("binaryTitle"), hint: t("binaryProbeHint") },
@@ -573,6 +631,35 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
   );
 }
 
+/** 徽标的文字 + 语气 + 可选状态点。文字与色调从同一个状态判定出来，避免「文案说偏离、
+ *  底色说就绪」这种两处各算一份的分叉。 */
+export interface CliBadgeView {
+  readonly text: string;
+  readonly tone: BadgeTone;
+  readonly dot?: DotTone | undefined;
+}
+
+/** 判定四档来源与版本偏离，供文案与 Badge 共用。 */
+export function cliBadgeView(t: Translate, binary: OcrBinaryView | null): CliBadgeView {
+  if (binary === null) {
+    return { text: t("badgeUnknown"), tone: "neutral" };
+  }
+  const diverged =
+    binary.expectedVersion !== undefined &&
+    binary.measuredVersion !== null &&
+    binary.measuredVersion !== binary.expectedVersion;
+  if (diverged) {
+    return { text: t("badgeDiverged"), tone: "warn", dot: "warn" };
+  }
+  if (binary.source === "bundled") {
+    return { text: t("badgeBundled"), tone: "business" };
+  }
+  if (binary.source === "path") {
+    return { text: t("badgePath"), tone: "ok", dot: "ok" };
+  }
+  return { text: t("badgeNone"), tone: "err", dot: "err" };
+}
+
 /**
  * 徽标用的短文案（标题旁边那个标签放不下整句安装方式）。和 `binaryStatusText` 用同一条判断、
  * 不同长度：两处各算一份「哪一档」就会漂，所以入参仍是 host 送的那份 `OcrBinaryView`。
@@ -581,23 +668,7 @@ export function buildCliStatusRow(deps: OcrCardDeps): ReactNode {
  * 与本插件不同版本」，来源在哪一行里已经写了。没实测过就不压——那时不一致与否无从谈起。
  */
 export function cliBadgeText(t: Translate, binary: OcrBinaryView | null): string {
-  if (binary === null) {
-    return t("badgeUnknown");
-  }
-  const diverged =
-    binary.expectedVersion !== undefined &&
-    binary.measuredVersion !== null &&
-    binary.measuredVersion !== binary.expectedVersion;
-  if (diverged) {
-    return t("badgeDiverged");
-  }
-  if (binary.source === "bundled") {
-    return t("badgeBundled");
-  }
-  if (binary.source === "path") {
-    return t("badgePath");
-  }
-  return t("badgeNone");
+  return cliBadgeView(t, binary).text;
 }
 
 /** 这页说的是不是本包（bundle 页与它的行页都算；官方插件页 `item` 没有包名可比）。
@@ -606,12 +677,19 @@ export function isOwnSubject(subject: PluginsSubject): boolean {
   return subject.kind !== "item" && subject.pkg.name === BUNDLE_PKG;
 }
 
-/** 徽标那枚元素（状态已到才画；取状态与 subject 过滤留给组件，用例才不必起渲染器）。 */
+/** 徽标那枚元素（状态已到才画；取状态与 subject 过滤留给组件，用例才不必起渲染器）。
+ *  统一走 shared 的 Badge：设计稿的四档 CLI 徽标是同一枚胶囊，只有语气与状态点随档位变；
+ *  这里不再画 `dsu-hint` 裸文本。 */
 export function buildCliBadge(t: Translate, status: OcrBinaryView | null): ReactNode {
+  const view = cliBadgeView(t, status);
   return createElement(
-    "span",
-    { className: "dsu-hint", "data-field": "cli-badge" },
-    cliBadgeText(t, status),
+    Badge,
+    {
+      tone: view.tone,
+      ...(view.dot === undefined ? {} : { dot: view.dot }),
+      field: "cli-badge",
+    },
+    view.text,
   );
 }
 
@@ -670,13 +748,24 @@ export function OcrCliBadge(props: CliStatusShare & PluginDetailProps): ReactNod
 /** 区块体：标题 + 完整状态那一行 + 版本核对那一行 + 装法（没装时）+ 指路那一句。 */
 export function buildCliSection(t: Translate, status: OcrBinaryView | null): ReactNode {
   const title = createElement("div", { className: CARD_NAME_CLASS }, t("binaryTitle"));
-  const body = createElement("div", { className: "dsu-hint" }, binaryStatusText(t, status));
+  const body = cliStatusLine(t, status);
   const versionText = cliVersionText(t, status);
   const versionLine =
     versionText === "" ? null : createElement("div", { className: "dsu-hint" }, versionText);
   const hintText = cliInstallText(status);
   const installLine =
-    hintText === "" ? null : createElement("div", { className: "dsu-hint" }, hintText);
+    hintText === ""
+      ? null
+      : createElement(
+          LogPanel,
+          {
+            label: t("binaryInstallTitle"),
+            copyText: hintText,
+            copyLabel: t("copy"),
+            copiedLabel: t("copied"),
+          },
+          hintText,
+        );
   const hint = createElement("div", { className: "dsu-hint" }, t("binaryProbeHint"));
   return createElement(
     "div",
@@ -689,11 +778,18 @@ export function buildCliSection(t: Translate, status: OcrBinaryView | null): Rea
   );
 }
 
-/** 详情页下方的区块：完整状态 + 「版本号要在配置卡片里点检测」的指路。 */
+/** 详情页下方的区块只在**行页**出现：bundle 页已经渲染同一张设置卡（`plugins.bundle.config`），
+ *  再放一份完整状态+装法就是把同一段话贴两遍。行页没有那张卡，这里才有承接作用；bundle 页
+ *  保留标题旁那枚短徽标即可。 */
+export function isCliDetailSubject(subject: PluginsSubject): boolean {
+  return isOwnSubject(subject) && subject.kind === "row";
+}
+
+/** 详情页下方的区块：只给没有设置卡的行页补完整状态与「检测在配置卡片」的指路。 */
 export function OcrCliSection(props: CliStatusShare & PluginDetailProps): ReactNode {
-  const mine = isOwnSubject(props.subject);
-  const status = useCliStatus(mine, props.loadCliStatus);
-  if (!mine || status === undefined) {
+  const active = isCliDetailSubject(props.subject);
+  const status = useCliStatus(active, props.loadCliStatus);
+  if (!active || status === undefined) {
     return null;
   }
   return buildCliSection(props.t, status);
@@ -713,11 +809,22 @@ export function buildCliActivation(
 ): ReactNode {
   const text = createElement(Callout, { tone: "err" }, t("binaryNone"));
   const installLine =
-    install === "" ? null : createElement("div", { className: "dsu-hint" }, install);
+    install === ""
+      ? null
+      : createElement(
+          LogPanel,
+          {
+            label: t("binaryInstallTitle"),
+            copyText: install,
+            copyLabel: t("copy"),
+            copiedLabel: t("copied"),
+          },
+          install,
+        );
   const details = createElement(
     "button",
     {
-      className: "ocr-btn",
+      className: "dsu-btn dsu-btnSm dsu-btnPrimary",
       type: "button",
       onClick: props.onOpenDetails,
       "data-field": "guide-details",
@@ -727,7 +834,7 @@ export function buildCliActivation(
   const dismiss = createElement(
     "button",
     {
-      className: "ocr-btn",
+      className: "dsu-btn dsu-btnSm dsu-btnGhost",
       type: "button",
       onClick: props.onDismiss,
       "data-field": "guide-dismiss",
@@ -736,11 +843,10 @@ export function buildCliActivation(
   );
   return createElement(
     "div",
-    { style: { padding: "8px 0", display: "flex", gap: 8 }, "data-field": "cli-activation" },
+    { className: "dsu-stack", style: { padding: "8px 0" }, "data-field": "cli-activation" },
     text,
     installLine,
-    details,
-    dismiss,
+    createElement("div", { className: "dsu-actions" }, details, dismiss),
   );
 }
 
@@ -880,22 +986,11 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
       deps.onField("language", next);
     },
   });
-  const verifyField = createElement(ToggleField, {
-    label: t("autoVerifyLabel"),
-    ...splitHint(t("autoVerifyHint")),
-    field: "autoVerify",
-    checked: deps.autoVerifyValue,
-    disabled: !deps.writable || deps.settingsBusy,
-    onChange: (next: boolean): void => {
-      deps.onField("autoVerify", next);
-    },
-  });
   return [
     providerField,
     modelField,
     effortField,
     languageField,
-    verifyField,
     buildActionField(deps),
     ...buildProviderInfo(deps, data),
   ];
@@ -924,9 +1019,25 @@ export function buildProviderSection(deps: OcrCardDeps): ReactNode {
   // 计数徽章只在就绪态成立：读不到 providers 时这一节只有一段错误说明，徽章会撒谎。
   const modelCount =
     deps.data?.source.status === "ready" ? t("fieldCount", { count: "5" }) : undefined;
+  const autoVerifyToggle =
+    deps.data?.source.status === "ready"
+      ? createElement(SectionToggle, {
+          field: "autoVerify",
+          label: t("autoVerifyLabel"),
+          checked: deps.autoVerifyValue,
+          disabled: !deps.writable || deps.settingsBusy,
+          onChange: (next: boolean): void => {
+            deps.onField("autoVerify", next);
+          },
+        })
+      : undefined;
   return createElement(
     Section,
-    { title: t("modelSection"), ...(modelCount === undefined ? {} : { count: modelCount }) },
+    {
+      title: t("modelSection"),
+      ...(modelCount === undefined ? {} : { count: modelCount }),
+      ...(autoVerifyToggle === undefined ? {} : { toggle: autoVerifyToggle }),
+    },
     body,
   );
 }

@@ -24,9 +24,12 @@ const BUDGETS: readonly (readonly [string, number])[] = [
   // 1.13.3 工具清单扩展（preview/compare/export/rules/llm/摘要字段与双语文案）后的正常演进。
   // 本轮新增：scan 会话根规范化与 path/exclude 重基、export 临时目录 TTL 清理、
   // preview 的 ignoredParams、delegate preview 计数与 MCP URL 严格语法校验。
-  ["host.js", 368_000],
+  // 0.1.22 再增 OCR 1.14 的 analysis 入参、analysis_meta 摘要字段与双语文案（构建后实测
+  // 369,937 B）；按本文件头部「实测 + 约 15%、向上取整到 500」的定预算口径取 425,000
+  //（约 +14.9%，同一档余量）。
+  ["host.js", 425_000],
   // MCP/ChatGPT 管理区（编辑框、状态与双语按钮）后的正常演进。
-  // shared 客户端行改为 external 并开启 minify 后实测 45,781 B；shared card-ui 的字节
+  // shared 客户端行改为 external 并开启 minify 后实测 46,701 B；shared card-ui 的字节
   // 不再计入本产物，按实测 × 1.25 取整重定。
   ["client.js", 58_000],
 ];

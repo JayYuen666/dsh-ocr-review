@@ -108,6 +108,13 @@ describe.skipIf(realOcr === undefined)("真 ocr 二进制（免凭据子命令�
     );
   });
 
+  it("review --help：1.14 的 Analysis 两条旗标都在真二进制上", () => {
+    const result = run(["review", "--help"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /--analysis(?:[\s<,]|$)/u);
+    assert.match(result.stdout, /--analysis-max-tokens-budget/u);
+  });
+
   it("delegate rule --format json：真 JSON 经真解析链，groups 带 pattern 与 files", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "ocr-real-delegate-"));
     try {

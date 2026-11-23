@@ -33,6 +33,45 @@ const BACKGROUND_RECEIPT_SCHEMA = {
   },
 } satisfies JsonSchemaNode;
 
+/** summarizeReview(...) 里 `analysis` 的对象形状（lib/parse.ts 的 AnalysisView，逐字段对齐）。 */
+const ANALYSIS_VIEW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "status",
+    "completed",
+    "declaredCompletion",
+    "stopReason",
+    "markdown",
+    "markdownTruncated",
+    "scopeFiles",
+    "citedObservations",
+    "totalTokens",
+    "inputTokens",
+    "outputTokens",
+    "model",
+    "errors",
+    "warnings",
+  ],
+  properties: {
+    // execution_status：completed / partial / failed / skipped，未知值原样保留。
+    status: { type: "string" },
+    completed: { type: "boolean" },
+    declaredCompletion: { type: "string" },
+    stopReason: { type: "string" },
+    markdown: { type: "string" },
+    markdownTruncated: { type: "boolean" },
+    scopeFiles: { type: "integer" },
+    citedObservations: { type: "integer" },
+    totalTokens: { type: "number" },
+    inputTokens: { type: "number" },
+    outputTokens: { type: "number" },
+    model: { type: "string" },
+    errors: { type: "array", items: { type: "string" } },
+    warnings: { type: "array", items: { type: "string" } },
+  },
+} satisfies JsonSchemaNode;
+
 /** summarizeReview(...) 的对象形状（lib/parse.ts 的 ReviewSummaryView，逐字段对齐）。 */
 const REVIEW_SUMMARY_SCHEMA = {
   type: "object",
@@ -42,6 +81,7 @@ const REVIEW_SUMMARY_SCHEMA = {
     "skipped",
     "message",
     "summary",
+    "analysis",
     "budgetExceeded",
     "limitReached",
     "llm",
@@ -111,6 +151,9 @@ const REVIEW_SUMMARY_SCHEMA = {
         },
       ],
     },
+    // OCR 1.14 的行为/影响分析：没请求（没传 --analysis）或没产出时为 null；
+    // 分析失败仍是一个对象（status=failed + errors），不能与「没请求」混为一谈。
+    analysis: { oneOf: [{ type: "null" }, ANALYSIS_VIEW_SCHEMA] },
     // 被 token 预算截断过：status 只写 partial，说不出「是预算花完才收的工」。
     budgetExceeded: { type: "boolean" },
     // 1.13.3 的 review_limit_reached / scan 的 token_budget_reached：与 budgetExceeded

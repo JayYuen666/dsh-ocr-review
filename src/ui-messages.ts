@@ -209,6 +209,11 @@ export interface UiMessages {
   /** 启用后指引上的两个按钮。 */
   readonly binaryGuideDetails: string;
   readonly binaryGuideDismiss: string;
+  /** 启用指引里安装命令面板的头部与复制动作。 */
+  readonly binaryInstallTitle: string;
+  readonly probeReceipt: string;
+  readonly copy: string;
+  readonly copied: string;
 }
 
 /**
@@ -370,6 +375,10 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     binaryProbeHint: "版本号要在「配置」页点「检测版本」取——那要起一次 ocr 进程，不在本页顺手跑。",
     binaryGuideDetails: "打开插件详情",
     binaryGuideDismiss: "知道了",
+    binaryInstallTitle: "安装命令",
+    probeReceipt: "检测回执",
+    copy: "复制",
+    copied: "已复制",
   },
   en: {
     navLabel: "ocr review",
@@ -493,5 +502,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
       "the version comes from the Detect action on the configuration page — that spawns an ocr process, so it is not run here",
     binaryGuideDetails: "Open plugin details",
     binaryGuideDismiss: "Got it",
+    binaryInstallTitle: "Install command",
+    probeReceipt: "Probe output",
+    copy: "Copy",
+    copied: "Copied",
   },
 };

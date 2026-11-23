@@ -15,6 +15,8 @@ import {
 import { aggregateComments, classifySeverity, severityRank } from "../lib/severity.ts";
 import type { OcrComment, ParsedReview, ReviewSummaryView, SummaryPlan } from "../lib/parse.ts";
 import { MESSAGES, format } from "../lib/messages.ts";
+import { REVIEW_OUTPUT_SCHEMA } from "../lib/tool-schemas.ts";
+import { assertToolOutput } from "../lib/output.ts";
 
 const FIXTURES = path.join(import.meta.dirname, "fixtures");
 const read = (name: string): string => readFileSync(path.join(FIXTURES, name), "utf8");
@@ -1055,6 +1057,122 @@ describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume 
       JSON.stringify({ status: "complete", llm: { model: "m" }, comments: [] }),
     );
     expect(providerless.llm).toStrictEqual({ provider: null, model: "m" });
+  });
+
+  it("ocr 1.14 的 analysis / analysis_meta：报告、用量、范围与告警都进摘要", () => {
+    const parsed = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        analysis: "## Behavior\n读取配置后按目录分批。",
+        analysis_raw: "## Behavior [[obs-1]]\n读取配置后按目录分批。",
+        analysis_meta: {
+          schema_version: "ocr.review-analysis/v2",
+          execution_status: "completed",
+          submission_accepted: true,
+          declared_completion: "complete",
+          stop_reason: "none",
+          scope: [{ old_path: "a.ts", new_path: "a.ts" }],
+          cited_observation_ids: ["obs-1"],
+          usage: {
+            total_tokens: 1200,
+            input_tokens: 1000,
+            output_tokens: 200,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+          },
+          model: "m",
+          errors: [],
+          warnings: [{ file: "a.ts", message: "证据不完整" }],
+          artifact_dir: "/tmp/analysis",
+        },
+        comments: [],
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.status).toBe("complete");
+    const { analysis } = parsed;
+    expect(analysis).not.toBeNull();
+    expect(analysis?.status).toBe("completed");
+    expect(analysis?.completed).toBe(true);
+    expect(analysis?.declaredCompletion).toBe("complete");
+    expect(analysis?.stopReason).toBe("none");
+    expect(analysis?.markdown).toContain("Behavior");
+    // analysis_raw 带 observation 标记，重复塞进摘要只会翻倍 token——不进视图。
+    expect(analysis?.markdown).not.toContain("[[obs-1]]");
+    expect(analysis?.scopeFiles).toBe(1);
+    expect(analysis?.citedObservations).toBe(1);
+    expect(analysis?.totalTokens).toBe(1200);
+    expect(analysis?.inputTokens).toBe(1000);
+    expect(analysis?.outputTokens).toBe(200);
+    expect(analysis?.model).toBe("m");
+    expect(analysis?.errors).toStrictEqual([]);
+    expect(analysis?.warnings).toStrictEqual(["a.ts：证据不完整"]);
+    const view = summarizeView(parsed);
+    expect(view.analysis).toStrictEqual(analysis);
+    // 非 null 分支的出口契约：只测 null 分支会漏掉 ANALYSIS_VIEW_SCHEMA 的字段漂移。
+    expect(assertToolOutput(REVIEW_OUTPUT_SCHEMA, view, "ocr_review", zh)).toBe(view);
+  });
+
+  it("analysis 失败仍是对象（status=failed + errors），且不改写 Review 的 ok/status", () => {
+    const parsed = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        analysis: "",
+        analysis_meta: {
+          execution_status: "failed",
+          submission_accepted: false,
+          stop_reason: "preparation",
+          errors: ["analysis provider returned HTTP 402"],
+          usage: {},
+          warnings: [],
+        },
+        comments: [],
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    expect(parsed.status).toBe("complete");
+    expect(parsed.analysis).not.toBeNull();
+    expect(parsed.analysis?.status).toBe("failed");
+    expect(parsed.analysis?.completed).toBe(false);
+    expect(parsed.analysis?.markdown).toBe("");
+    expect(parsed.analysis?.errors[0]).toBe("analysis provider returned HTTP 402");
+    expect(summarizeView(parsed).analysis?.status).toBe("failed");
+  });
+
+  it("没传 --analysis：analysis 为 null；只有 analysis 而无 meta 时 status=unknown", () => {
+    expect(parseOcr('{"status":"complete","comments":[]}').analysis).toBeNull();
+    const onlyMarkdown = parseOcr(
+      JSON.stringify({ status: "complete", analysis: "## Report", comments: [] }),
+    );
+    expect(onlyMarkdown.analysis).toStrictEqual({
+      status: "unknown",
+      completed: false,
+      declaredCompletion: "",
+      stopReason: "",
+      markdown: "## Report",
+      markdownTruncated: false,
+      scopeFiles: 0,
+      citedObservations: 0,
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      model: "",
+      errors: [],
+      warnings: [],
+    });
+  });
+
+  it("analysis 报告超过 6000 字符即截断并置 markdownTruncated", () => {
+    const long = "x".repeat(6001);
+    const parsed = parseOcr(JSON.stringify({ status: "complete", analysis: long, comments: [] }));
+    expect(parsed.analysis?.markdown).toHaveLength(6000);
+    expect(parsed.analysis?.markdownTruncated).toBe(true);
+    // 边界的另一侧：恰好 6000 字符不截断。
+    const exact = parseOcr(
+      JSON.stringify({ status: "complete", analysis: "x".repeat(6000), comments: [] }),
+    );
+    expect(exact.analysis?.markdown).toHaveLength(6000);
+    expect(exact.analysis?.markdownTruncated).toBe(false);
   });
 
   it("retry_report 全零回 null；有一个非零计数就保留", () => {

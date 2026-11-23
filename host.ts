@@ -631,13 +631,34 @@ function ownerOf(host: HostCtx, exec: ToolExec): SessionIdFace | undefined {
   return owner;
 }
 
-/** 当前会话工作区（repo 缺省回退源）；非字符串视为缺。
- *  官方形状：`agent?: Agent` → `session: Session` → `header: SessionHeader` →
- *  `cwd?: string`。下面的逐层 `?.` 和 `typeof` 复核是跨进程数据交换的运行时闸：宿主只装配了一半
- *  递来的 agent 可能是 `null`、也可能没有 `session`/`header`（test/host.test.ts 钉住了
- *  这两条 fail-closed 路径），值一律经 `unknown` 读，绝不只信声明。 */
-function sessionHeaderCwd(exec: ToolExec): string | undefined {
-  const raw: unknown = exec.agent?.session?.header?.cwd;
+/** 官方工作目录服务的最小读取形状（`WorkingDirectoryService.get(session)` 同步、无 fs I/O）。 */
+interface WorkingDirectoryFace {
+  get?: (session: unknown) => unknown;
+}
+
+function isWorkingDirectory(value: unknown): value is WorkingDirectoryFace {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return value["get"] === undefined || typeof value["get"] === "function";
+}
+
+/** 当前会话工作区（repo 缺省回退源）：活目录优先（`ctx.workingDirectory.get(session)`），
+ *  服务缺席或给不出非空串时回落 `header.cwd`（创建期快照）。下面的逐层 `?.` 和 `typeof`
+ *  复核是跨进程数据交换的运行时闸：宿主只装配了一半递来的 agent 可能是 `null`、也可能没有
+ *  `session`/`header`（test/host.test.ts 钉住了这两条 fail-closed 路径），值一律经
+ *  `unknown` 读，绝不只信声明。 */
+function sessionWorkingDirectory(exec: ToolExec): string | undefined {
+  const session = exec.agent?.session;
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- 官方类型说 ctx 非空，但测试替身与旧宿主可能给出没有 ctx 的 agent；这一跳是防御式读，缺 ctx 时按服务缺席处理
+  const service: unknown = exec.agent?.ctx?.get("workingDirectory");
+  if (session !== undefined && isWorkingDirectory(service)) {
+    const live: unknown = service.get?.(session);
+    if (typeof live === "string" && live.length > 0) {
+      return live;
+    }
+  }
+  const raw: unknown = session?.header?.cwd;
   return typeof raw === "string" && raw.length > 0 ? raw : undefined;
 }
 
@@ -1325,6 +1346,17 @@ function tuningParams(
   };
 }
 
+/** OCR 1.14 的 Analysis 入参（只给 ocr_review；scan 上游没有 --analysis）。 */
+function analysisParams(messages: OcrReviewMessages): Record<string, unknown> {
+  return {
+    analysis: { type: "boolean", description: messages.paramAnalysis },
+    analysisMaxTokensBudget: {
+      type: "integer",
+      description: messages.paramAnalysisMaxTokensBudget,
+    },
+  };
+}
+
 /** 本包设置项（隐式注册）。行级 config 由 cordis 按导出的 `Config` schema
  *  校验并填默认后交进 apply，优先级：设置卡运行时值 > 行 config > schema 默认。
  *  命名空间不再是本包持有的字符串：宿主按 `.volatile()` 投影表单，ns = profile 条目
@@ -1815,7 +1847,7 @@ export function ocrRepo(
   exec: ToolExec,
   messages: OcrReviewMessages,
 ): string {
-  return resolveRoot(args["repo"], sessionHeaderCwd(exec), messages);
+  return resolveRoot(args["repo"], sessionWorkingDirectory(exec), messages);
 }
 
 /** git rev-parse 的墙钟上限：一条本地命令，失败即回退，不值得占用评审预算。 */
@@ -2421,6 +2453,7 @@ function registerReviewTool(
         model: { type: "string", description: msgs.paramModel },
         resume: { type: "string", description: msgs.paramResume },
         preview: { type: "boolean", description: msgs.paramPreview },
+        ...analysisParams(msgs),
         noFilter: { type: "boolean", description: msgs.paramNoFilter },
         maxGitProcs: { type: "integer", description: msgs.paramMaxGitProcs },
         rule: { type: "string", description: msgs.paramRule },

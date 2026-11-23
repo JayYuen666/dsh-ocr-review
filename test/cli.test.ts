@@ -610,6 +610,50 @@ describe("buildReviewCommand", () => {
     expect(command).toContain("--max-tokens-budget 200000");
   });
 
+  it("analysis 只透传到 commit/branch，且带自己的预算旗标", () => {
+    const commit = reviewCmd(
+      { repo: "/r", scope: "commit", commit: "abc", analysis: true },
+      "/o",
+    ).command;
+    expect(commit).toContain("--commit 'abc'");
+    expect(commit).toContain("--analysis");
+    expect(commit).not.toContain("--analysis-max-tokens-budget");
+
+    const branch = reviewCmd(
+      { repo: "/r", from: "main", to: "feature", analysis: true, analysisMaxTokensBudget: 0 },
+      "/o",
+    ).command;
+    expect(branch).toContain("--from 'main' --to 'feature'");
+    expect(branch).toContain("--analysis --analysis-max-tokens-budget 0");
+    const budget = reviewCmd(
+      { repo: "/r", commit: "abc", analysis: true, analysisMaxTokensBudget: 300_000 },
+      "/o",
+    ).command;
+    expect(budget).toContain("--analysis --analysis-max-tokens-budget 300000");
+  });
+
+  it("analysis 的范围/组合闸：workspace、preview、resume、单独给预算都当场拒绝", () => {
+    expect(() => reviewCmd({ repo: "/r", analysis: true }, "/o")).toThrow(
+      /--analysis 只支持 commit 或 branch/u,
+    );
+    expect(() =>
+      reviewCmd({ repo: "/r", commit: "abc", analysis: true, preview: true }, "/o"),
+    ).toThrow(/--analysis 不能与 preview 或 resume/u);
+    expect(() =>
+      reviewCmd({ repo: "/r", commit: "abc", analysis: true, resume: RESUME_ID }, "/o"),
+    ).toThrow(/--analysis 不能与 preview 或 resume/u);
+    expect(() => reviewCmd({ repo: "/r", analysisMaxTokensBudget: 1000 }, "/o")).toThrow(
+      /analysisMaxTokensBudget 必须与 analysis=true/u,
+    );
+    expect(() =>
+      reviewCmd({ repo: "/r", commit: "abc", analysis: true, analysisMaxTokensBudget: -1 }, "/o"),
+    ).toThrow(/--analysis-max-tokens-budget/u);
+    // 显式 false 与缺省一样不带旗标（布尔闸只认 true）。
+    expect(reviewCmd({ repo: "/r", commit: "abc", analysis: false }, "/o").command).not.toContain(
+      "--analysis",
+    );
+  });
+
   it("数值 flag 忠实透传、无钳制（0 语义：timeout 不限时 / 其余模板默认或不限）", () => {
     const { command } = reviewCmd(
       {

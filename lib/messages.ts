@@ -316,6 +316,11 @@ export interface OcrReviewMessages {
   readonly paramResume: string;
   readonly paramScanPath: string;
   readonly paramPreview: string;
+  readonly paramAnalysis: string;
+  readonly paramAnalysisMaxTokensBudget: string;
+  readonly analysisNeedsCommittedScope: string;
+  readonly analysisRejectsPreviewResume: string;
+  readonly analysisBudgetNeedsAnalysis: string;
   readonly paramNoFilter: string;
   readonly paramMaxGitProcs: string;
   readonly paramRule: string;
@@ -621,7 +626,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     providerModelRequired: "provider 与 model 必填",
     bodyParseFailed: "body 解析失败：{message}",
     reviewToolDescription:
-      "用 open-code-review（ocr）对 Git 变更做深度学习代码审查：OCR 调用其自身配置的 LLM（provider/model 在 ocr-review 设置卡选择）独立审查，返回按严重度/类别聚合的评论摘要。scope=workspace 审工作区变更（默认；staged+unstaged+untracked 都算，且不套 .gitignore——被忽略的跟踪文件同样计入）；scope=commit 审单个提交；scope=branch 用从/到分支对比（merge-base）。常用先 ocr_delegate_preview 看范围。effort 控制深度（low=1 轮/medium=2/high=3，越深越贵）。background 提供需求/业务上下文能显著提升质量。preview=true 只做文件选择（零 LLM、不建会话）；noFilter 保留全部评论；rule/backgroundFile 只收 repo 根内文件。首次审查前确保 ocr 已配置且 'ocr llm test' 通过。",
+      "用 open-code-review（ocr）对 Git 变更做深度学习代码审查：OCR 调用其自身配置的 LLM（provider/model 在 ocr-review 设置卡选择）独立审查，返回按严重度/类别聚合的评论摘要。scope=workspace 审工作区变更（默认；staged+unstaged+untracked 都算，且不套 .gitignore——被忽略的跟踪文件同样计入）；scope=commit 审单个提交；scope=branch 用从/到分支对比（merge-base）。常用先 ocr_delegate_preview 看范围。effort 控制深度（low=1 轮/medium=2/high=3，越深越贵）。analysis=true 额外跑一趟行为/影响分析（仅 commit/branch，不能与 preview/resume 同用；wait=true 时报告随摘要的 analysis 字段返回，后台模式的结果在会话的 analysis/ 目录）；分析失败不改变 review 结果。background 提供需求/业务上下文能显著提升质量。preview=true 只做文件选择（零 LLM、不建会话）；noFilter 保留全部评论；rule/backgroundFile 只收 repo 根内文件。首次审查前确保 ocr 已配置且 'ocr llm test' 通过。",
     scanToolDescription:
       "用 open-code-review（ocr）做全文件扫描审查（无需 Git 变更/无 diff，适合审计陌生代码库或指定目录）。--path 逗号分隔的仓库相对目录/文件（缺省整个仓库，路径不存在会报错）。与 ocr_review 一样由 OCR 自身 LLM 独立审查，返回聚合评论摘要。preview=true 只列扫描范围；noPlan/noDedup/noSummary 降本；resume 续扫；rule 只收 repo 根内文件。",
     previewToolDescription:
@@ -661,6 +666,19 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "仓库相对目录或文件（缺省整仓，可多值；上限 2000 条，超出会直接报错；路径不存在会报错而不是空扫描）",
     paramPreview:
       "true=只列文件清单与排除原因，不调用 LLM、不建会话（秒级返回）；与 resume/wait=false 互斥",
+    paramAnalysis:
+      "true=在 review 之外并行跑一趟行为/影响分析（OCR 1.14 的 --analysis；只支持 commit 或 branch 范围，" +
+      "不能与 preview/resume 同用）。wait=true 时报告随摘要的 analysis 字段返回；后台模式的结果在会话的 " +
+      "analysis/ 目录，ocr_session(action=show) 会显示路径；分析失败或跳过不改变 review 的结果",
+    paramAnalysisMaxTokensBudget:
+      "Analysis 自己的 input+output token 预算（OCR --analysis-max-tokens-budget；0=不限，缺省不传=0）；" +
+      "必须同时给 analysis=true",
+    analysisNeedsCommittedScope:
+      "--analysis 只支持 commit 或 branch 范围：workspace 审查没有可分析的历史区间，" +
+      "请改用 commit/from 重试，或去掉 analysis",
+    analysisRejectsPreviewResume: "--analysis 不能与 preview 或 resume 同用",
+    analysisBudgetNeedsAnalysis:
+      "analysisMaxTokensBudget 必须与 analysis=true 一起给；单独给不会生效（OCR 会静默忽略）",
     paramNoFilter: "true=跳过 OCR 的 LLM 评论后过滤，保留全部评论（召回优先，噪音更多）",
     paramMaxGitProcs: "git 子进程并发上限（OCR --max-git-procs；缺省不传=原生 16）",
     paramRule: "repo 根内的自定义规则 JSON 路径（OCR --rule；只允许仓库内普通文件）",
@@ -720,6 +738,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     routingText: `
 - 用户要求「审查代码/Review/检查我的改动/审这个 commit/PR」时，用 ocr 工具做代码审查：
   - ocr_review：OCR 用自己配置的 LLM 独立审查工作区/commit/分支变更（effort 控制深度，可给 background 上下文）。
+    需要行为/影响分析时加 analysis=true（仅 commit/分支，不能与 preview/resume 同用；wait=true 时报告随摘要的
+    analysis 字段返回，后台模式的结果在会话的 analysis/ 目录）；分析失败不改变 review 结果。
   - ocr_scan：对无 git 历史的目录或指定路径做全文件审查。
   - ocr_delegate_preview / ocr_delegate_rule：只取「文件清单 + 适配规则」的确定性脚手架（OCR 端零 LLM 消耗），
     配合 git diff 由你自己完成审查——适合复用本会话模型能力、或先确认审查范围再决定是否跑 ocr_review。
@@ -1064,8 +1084,12 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "(default; staged+unstaged+untracked all count, and .gitignore is not applied — ignored " +
       "tracked files count too); scope=commit reviews one commit; scope=branch compares from/to branches " +
       "(merge-base). Commonly start with ocr_delegate_preview to see the scope. effort controls depth " +
-      "(low=1 pass / medium=2 / high=3, deeper costs more). Passing requirements/business context via " +
-      "background markedly improves quality. preview=true selects files only (no LLM, no session); " +
+      "(low=1 pass / medium=2 / high=3, deeper costs more). " +
+      "analysis=true adds a separate behavior/impact analysis (commit/branch only, not with preview/resume); " +
+      "with wait=true its report is returned in the summary, and in background mode it lives under the session's " +
+      "analysis/ directory; a failed analysis does not change the review result. " +
+      "Passing requirements/business context via background markedly improves quality. preview=true selects " +
+      "files only (no LLM, no session); " +
       "noFilter keeps every comment; rule/backgroundFile accept repo-root files only. Before the first " +
       "review make sure ocr is configured and 'ocr llm test' passes.",
     scanToolDescription:
@@ -1134,6 +1158,20 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "Repo-relative directories or files (default: whole repo, multiple allowed; cap 2000 - exceeding it is an error; a nonexistent path errors instead of scanning nothing)",
     paramPreview:
       "true = list files and exclusion reasons only; no LLM call, no session, returns in seconds. Mutually exclusive with resume/wait=false",
+    paramAnalysis:
+      "true = run a separate behavior/impact analysis alongside the review (OCR 1.14 --analysis; commit or " +
+      "branch scope only, not compatible with preview/resume). With wait=true the report is returned in the " +
+      "summary's analysis field; in background mode it lives under the session's analysis/ directory and " +
+      "ocr_session(action=show) prints its path. A failed or skipped analysis does not change the review result",
+    paramAnalysisMaxTokensBudget:
+      "Analysis-only input+output token budget (OCR --analysis-max-tokens-budget; 0 = unlimited, unset = 0); " +
+      "requires analysis=true",
+    analysisNeedsCommittedScope:
+      "--analysis supports commit or branch scope only: a workspace review has no committed range to analyze. " +
+      "Use commit/from, or drop analysis",
+    analysisRejectsPreviewResume: "--analysis cannot be combined with preview or resume",
+    analysisBudgetNeedsAnalysis:
+      "analysisMaxTokensBudget requires analysis=true; on its own it is silently ignored by OCR",
     paramNoFilter: "true = skip OCR's LLM post-filter and keep every comment (recall over noise)",
     paramMaxGitProcs: "Concurrent git subprocess cap (OCR --max-git-procs; unset = native 16)",
     paramRule: "Path to a custom rule JSON inside the repo root (OCR --rule; regular files only)",
@@ -1199,6 +1237,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     routingText: `
 - When the user asks to "review the code / Review / check my changes / review this commit or PR", use the ocr tools:
   - ocr_review: OCR reviews workspace/commit/branch changes with its own configured LLM (effort controls depth, background carries context).
+    Add analysis=true for a separate behavior/impact analysis (commit/branch only, not with preview/resume; the report is
+    returned in the summary's analysis field and a failed analysis does not change the review result).
   - ocr_scan: whole-file review of directories without git history, or of given paths.
   - ocr_delegate_preview / ocr_delegate_rule: deterministic scaffolding that only returns "file list + fitting rules"
     (zero LLM cost on the OCR side); pair it with git diff and review yourself — good for reusing this session's model,

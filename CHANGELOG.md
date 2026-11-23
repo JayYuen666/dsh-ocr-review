@@ -6,6 +6,12 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.22
+
+`dsh-ocr-review` 补上 OCR 1.14 的行为/影响分析（`--analysis`）与它自己的预算（`--analysis-max-tokens-budget`）。`ocr_review` 新增 `analysis` / `analysisMaxTokensBudget` 两个参数；解析层把顶层 `analysis`（人读 Markdown）与 `analysis_meta`（`execution_status` / `submission_accepted` / `usage` / `errors` / `warnings` / 范围与引用计数）收成摘要里的 `analysis` 字段，报告截到 6000 字符并单列 `markdownTruncated`。`wait=true` 时报告随摘要返回；后台模式的结果落在会话自身的 `analysis/` 目录（`ocr_session(action=show)` 显示路径）。分析是 Review 之外的一趟独立任务：失败或跳过只体现在自己的 `analysis.status` 与 `errors`，不改写 Review 的 `ok`/`status`。`--analysis` 只支持 commit/range，不能与 preview/resume 同用；单独给预算而无 `analysis=true` 会在起进程前拒绝，而不是让 OCR 静默忽略。
+
+外部 `ocr` 契约抬到 `1.14.2`（`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`、两份 README、随包文档与 `THIRD_PARTY_NOTICES` 统一）。本机与 npm `@alibaba-group/open-code-review` 最新版均为 1.14.2；真二进制 e2e 逐条核对版本、`review --help` 的两条 Analysis 旗标、`delegate rule` 的 JSON 结构与 `session list` 空态。分析报告本身只用 fixture 验证解析链（未实跑一次带 `--analysis` 的评审，避免消耗模型额度）。
+
 ## 0.1.21
 
 外部 `ocr` 契约抬到 `1.13.13`（`package.json` 的 `ocrCliVersion`、`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`、两份 README、随包文档与 `THIRD_PARTY_NOTICES` 统一；`test/remote.test.ts` 的版本 fixture 改从契约常量派生，契约抬版时不再出现「契约已是 A、fixture 还在报 B」的假红）。flag 面与 1.13.10 的差异只有 `session list --branch` 一处新增与两条帮助文案（`--to`、`--max-tokens-budget`）。对外工具名单不变，`ocr_session` 多一位 `branch`。

@@ -31,8 +31,11 @@ import {
   binaryOf,
   binaryStatusText,
   cliBadgeText,
+  cliBadgeView,
+  cliStatusTone,
   cliInstallText,
   cliVersionText,
+  isCliDetailSubject,
   isOwnSubject,
   loadCliStatus,
   runProbe,
@@ -821,6 +824,7 @@ interface ElementProps {
   /** shared 的 Callout 走 `field`（组件内再写成 data-field），元素树里只能看这一位。 */
   field?: string;
   tone?: string;
+  dot?: string;
 }
 
 /** 元素树里按 data-field 找一位：文本断言看不出 class 与 disabled，属性得单独取。 */
@@ -1067,6 +1071,9 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     expect(text).toContain("本插件的契约按 ocr 1.13.3 逐条核对");
     expect(text).toContain("检测版本");
     expect(fieldProps(node, "probe")).not.toBeNull();
+    // 未找到时状态行左侧必须有状态点（色调由 cliStatusTone 单测钉住）：不能只靠一句灰字。
+    expect(fieldProps(node, "cli-state")?.className).toContain("dsu-inlineRow");
+    expect(cliStatusTone(viewOf({ source: "none", path: null }))).toBe("err");
   });
 
   it("进行中：按钮文案换成「检测中…」并禁用（防连点起两个 ocr 进程）", () => {
@@ -1108,7 +1115,10 @@ describe("外部 CLI 状态行：wire 形状、四档文本与检测回执", () 
     expect(failedProps?.tone).toBe("err");
     expect(textOf(failed)).toContain("未取到版本号：x");
     const passed = buildCliStatusRow(depsWith(tEn, { probeMsg: { ok: true, text: "v" } }));
-    expect(fieldProps(passed, PROBE_RESULT)?.tone).toBe("ok");
+    // 成功回执照设计稿走 LogPanel（原始回执可复制），失败仍走 err Callout。
+    expect(fieldProps(passed, PROBE_RESULT)).not.toBeNull();
+    expect(textOf(passed)).toContain("v");
+    expect(textOf(passed)).toContain(tEn("copy"));
   });
 
   it("loadCliStatus 只读 ocrBinary 那半，读不到（含没有远程通道）都归成 null", async () => {
@@ -1173,6 +1183,13 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
     expect(isOwnSubject(subjectOf({ name: "settings", kind: "item" }))).toBe(false);
   });
 
+  it("详情页区块只在行页出现：bundle 页已有设置卡，不再把同一段状态贴第二遍", () => {
+    expect(isCliDetailSubject(subjectOf({ name: OWN, kind: "row" }))).toBe(true);
+    expect(isCliDetailSubject(subjectOf({ name: OWN }))).toBe(false);
+    expect(isCliDetailSubject(subjectOf({ name: OWN, kind: "item" }))).toBe(false);
+    expect(isCliDetailSubject(subjectOf({ name: "other", kind: "row" }))).toBe(false);
+  });
+
   it("徽标短文案四档齐全，且英文那份不残留汉字", () => {
     expect(cliBadgeText(tZh, viewOf({ source: "bundled" }))).toBe("ocr 走随包兜底");
     expect(cliBadgeText(tZh, viewOf({ source: "path" }))).toBe(ZH_BADGE_PATH);
@@ -1200,12 +1217,22 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
     expect(cliBadgeText(tEn, viewOf({ measuredVersion: "1.12.13" }))).not.toMatch(HAN);
   });
 
-  it("buildCliBadge 落出徽标元素并带上短文案", () => {
+  it("buildCliBadge 走 shared Badge，并按档位给语气与状态点", () => {
     const node = buildCliBadge(tZh, viewOf({ source: "bundled" }));
-    expect(String(fieldProps(node, "cli-badge")?.className)).toContain("dsu-hint");
+    expect(fieldProps(node, "cli-badge")?.tone).toBe("business");
     // textOf 会把 className/data-field 一起拼进来，所以按「含短文案」断言而不是整串相等。
     expect(textOf(node)).toContain("ocr 走随包兜底");
     expect(textOf(buildCliBadge(tEn, null))).toContain("ocr status unavailable");
+    // PATH 是一份能用的外部 CLI：给 ok 语气与状态点，不再伪装成中性来源标签。
+    const path = buildCliBadge(tZh, viewOf({ source: "path" }));
+    expect(fieldProps(path, "cli-badge")?.tone).toBe("ok");
+    expect(fieldProps(path, "cli-badge")?.dot).toBe("ok");
+    expect(cliStatusTone(viewOf({ source: "path" }))).toBe("ok");
+    expect(cliStatusTone(viewOf({ source: "none", path: null }))).toBe("err");
+    expect(cliStatusTone(null)).toBe("mute");
+    const diverged = buildCliBadge(tZh, viewOf({ measuredVersion: "1.12.13" }));
+    expect(fieldProps(diverged, "cli-badge")?.tone).toBe("warn");
+    expect(cliBadgeView(tZh, viewOf({ measuredVersion: "1.12.13" })).dot).toBe("warn");
   });
 
   it("buildCliSection 画齐标题、状态、版本核对与「版本要去卡片点检测」的指路", () => {
@@ -1216,6 +1243,9 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
     expect(text).toContain(PATH_LAUNCHER);
     expect(text).toContain(ZH_VERSION_EXPECTED);
     expect(text).toContain("检测版本");
+    // 详情区同样有状态行：PATH 档是可用状态，状态行存在且色调映射为 ok。
+    expect(fieldProps(node, "cli-state")?.className).toContain("dsu-inlineRow");
+    expect(cliStatusTone(viewOf())).toBe("ok");
     // 没装时那一句装法要在区块里看得见（详情页是用户读文档之外的第二个入口）。
     const missingZh = textOf(buildCliSection(tZh, viewOf({ source: "none", path: null })));
     expect(missingZh).toContain(VIEW_INSTALL);
@@ -1247,6 +1277,8 @@ describe("三处对外贡献：subject 过滤 + 纯渲染", () => {
     expect(textOf(node)).toContain(VIEW_INSTALL);
     const details = fieldProps(node, "guide-details");
     const dismiss = fieldProps(node, "guide-dismiss");
+    expect(details?.className).toContain("dsu-btn");
+    expect(dismiss?.className).toContain("dsu-btn");
     expect(details?.onClick).toBeTypeOf("function");
     expect(dismiss?.onClick).toBeTypeOf("function");
     details?.onClick?.();
