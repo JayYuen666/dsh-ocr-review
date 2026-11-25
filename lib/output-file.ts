@@ -52,6 +52,31 @@ export function readOutFile(outPath: string, messages: OcrReviewMessages): strin
   }
 }
 
+/** 被宿主 `stdoutMaxBytes` 截断的前台结果里，本模块读回完整文本所需的三位。 */
+export interface CompleteOutput {
+  text: string;
+  truncated: boolean;
+  spillPath: string | undefined;
+}
+
+/**
+ * 前台 stdout 被宿主上限截断时，从 spillPath 读回完整文本。
+ *
+ * session comments 实测 828KB、delegate preview 实测 820KB，两者都超过 entry config
+ * 默认 400KB；只看展示用的 `text` 会把 JSON 截断成不可解析的半截。读回失败时保留截断
+ * 文本，调用方仍会走 raw 回显并带 spillPath 提示，不假装完整。
+ */
+export function completeOutputText(run: CompleteOutput, messages: OcrReviewMessages): string {
+  if (!run.truncated || run.spillPath === undefined) {
+    return run.text;
+  }
+  try {
+    return readOutFile(run.spillPath, messages);
+  } catch {
+    return run.text;
+  }
+}
+
 /** 静默读取 `--output`（前台非零退出的 partial 收尾专用）：读不到或超过 {@link OUT_FILE_MAX_BYTES}
  *  都返回 null，把「怎么收尾」的决定留给调用方——它兜不住时仍要落到 {@link withCoverageDetail}。
  *  刻意与 {@link readOutFile} 分开：那条路给「文件缺失/过大」抛错，而 partial 收尾对读不到

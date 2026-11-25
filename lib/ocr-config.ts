@@ -49,7 +49,12 @@ import { fieldOf, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 // 写 api_key_cmd 时把宿主侧解析出的数据目录作为 get-cred 的第一个显式参数——ocrConfigPath 重定向 HOME 后，
 // get-cred 自己的 homedir() 兜底会跟着跑偏，只有宿主侧此刻的解析值是准的。
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
-import { PI_AI_NAMESPACE, markKeyFlags, readProviders } from "./provider-source.ts";
+import {
+  keyReachableAtOcrRuntime,
+  markKeyFlags,
+  PI_AI_NAMESPACE,
+  readProviders,
+} from "./provider-source.ts";
 import type { DshConfigGateway, DshProviderWithKey, ProviderSource } from "./provider-source.ts";
 import type { DshProvider } from "./provider-projection.ts";
 import {
@@ -76,38 +81,6 @@ import type { OcrConfigCurrent, OcrPaths } from "./config-store.ts";
  */
 export const OCR_CONFIG_DIR = ".opencodereview";
 const OCR_CONFIG_FILE = "config.json";
-
-/**
- * 宿主起 shell 子进程时的**环境净化**模式（dsh-subprocess 的 SENSITIVE_ENV_PATTERN
- * `KEY|PASSWORD|SECRET|TOKEN` 大小写不敏感命中即剥，另加 `DSH_` 前缀全剥）。
- * 本包不传 `env`，OCR 子进程拿到的环境就是净化后的那一份——名字命中本模式的
- * 凭据 ref，OCR 及其孙进程（get-cred）在「继承环境」这一层永远读到空。
- */
-const HOST_SCRUBBED_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN|^DSH_/iu;
-
-/**
- * key 在 **OCR 运行时**是否真的取得到（get-cred 三层里有没有一层够得到它）。
- *
- * 宿主侧 resolve() 的 source 是「dsh 进程自己的取值层」，不等于「OCR 子进程够得到的
- * 层」——少了这道判断就是"select 成功 → OCR 401"这种漏报：
- *   - `file`（$DSH_HOME/.credentials.yaml）→ get-cred 第 1 层，可达；
- *   - `user-env`（$DSH_HOME/.env）→ get-cred 第 3 层，可达；
- *   - `env`（dsh 进程继承的环境）→ 只有 ref 名**不**命中宿主净化模式时才可达
- *     （API key 类 ref 几乎全含 KEY/TOKEN，实际常不可达）；
- *   - `project-env`（dsh 工作区 .env）→ get-cred 刻意不读被审查仓库的 .env，永不可达；
- *   - 未知层 / `undefined`（未配置）→ 一律按不可达，由调用方分别报「未配置」。
- * @param source credentials.resolve() 交出的层 id（gateway.credentialSource）。
- * @param ref 凭据 ref 名（get-cred/buildApiKeyCmd 用的那个大写名）。
- */
-export function keyReachableAtOcrRuntime(source: string | undefined, ref: string): boolean {
-  if (source === "file" || source === "user-env") {
-    return true;
-  }
-  if (source === "env") {
-    return !HOST_SCRUBBED_ENV_PATTERN.test(ref);
-  }
-  return false;
-}
 
 /** 无凭据可问时的一律 false（卡片据 source 显示原因，不显示假的「未配置 key」）。 */
 function withoutKeyFlags(providers: DshProvider[]): DshProviderWithKey[] {
@@ -609,3 +582,5 @@ export async function ensureKeyScriptPointer(
     return { repointed: [], checked: false };
   }
 }
+
+export { keyReachableAtOcrRuntime } from "./provider-source.ts";

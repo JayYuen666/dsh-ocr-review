@@ -121,10 +121,10 @@ export interface UiMessages {
   readonly maxCommentsLabel: string;
   /** maxComments 行说明。 */
   readonly maxCommentsHint: string;
-  /** timeoutMinutes 行标题。 */
-  readonly timeoutLabel: string;
-  /** timeoutMinutes 行说明。 */
-  readonly timeoutHint: string;
+  /** foregroundWaitMinutes 行标题。 */
+  readonly foregroundWaitLabel: string;
+  /** foregroundWaitMinutes 行说明。 */
+  readonly foregroundWaitHint: string;
   /** scan 深度小节标题。 */
   readonly scanSection: string;
   /** scanMaxTokens 行标题。 */
@@ -214,6 +214,32 @@ export interface UiMessages {
   readonly probeReceipt: string;
   readonly copy: string;
   readonly copied: string;
+  /** 模型工具行的标题（Web Client 的 tool.call.toolview 卡）。 */
+  /** 工具行摘要里的标签与状态。 */
+  readonly toolRepoLabel: string;
+  readonly toolPathsLabel: string;
+  readonly toolScopeLabel: string;
+  readonly toolSessionLabel: string;
+  readonly toolActionLabel: string;
+  readonly toolStatusLabel: string;
+  readonly toolRuleLabel: string;
+  /** toolview 的键值标签：只描述宿主结果里的字段。 */
+  readonly toolKindLabel: string;
+  readonly toolFilesLabel: string;
+  readonly toolReviewableLabel: string;
+  readonly toolExcludedLabel: string;
+  readonly toolDroppedLabel: string;
+  readonly toolSessionsLabel: string;
+  readonly toolItemsLabel: string;
+  readonly toolCommentsLabel: string;
+  readonly toolRulesLabel: string;
+  readonly toolCountsLabel: string;
+  readonly toolRunning: string;
+  readonly toolFailed: string;
+  readonly toolDone: string;
+  readonly toolEmpty: string;
+  readonly modelFreeHint: string;
+  readonly modelPlaceholder: string;
 }
 
 /**
@@ -318,9 +344,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     maxCommentsLabel: "摘要评论条数 (maxComments)",
     maxCommentsHint:
       "返回给模型的 top 评论条数；0 = 全部（含未锚定行，输出大）（默认见本行设置项的初值）",
-    timeoutLabel: "运行超时 (timeoutMinutes)",
-    timeoutHint:
-      "前台墙钟超时（分钟）；0 = 请求宿主上限（实际生效值由 shell 执行器自己的 maxTimeoutMs 设置项决定，可在 bash-local / pwsh-local 的设置行里改）；更长的评审用工具 wait=false 后台模式（不设宿主 deadline，兜底窗口看设置项 ocrBackgroundMaxMs，默认 0 = 不设窗口）（默认 0）",
+    foregroundWaitLabel: "前台等待上限 (foregroundWaitMinutes)",
+    foregroundWaitHint:
+      "只用于 wait=true：本插件等待 ocr 完成的宿主 shell 墙钟上限（分钟）；0 = 请求宿主上限（实际值由 shell 执行器的 maxTimeoutMs 决定，可在 bash-local / pwsh-local 设置行改）。这不是 OCR 的 --timeout；OCR 每任务超时是调用参数 timeoutMinutes（review/scan 时透传 --timeout）。更长评审用 wait=false 后台模式（兜底窗口看 ocrBackgroundMaxMs，默认 0 = 不设窗口）",
     scanSection: "扫描深度（ocr_scan 缺省值）",
     scanMaxTokensLabel: "单次请求 token 预算 (scanMaxTokens)",
     scanMaxTokensHint:
@@ -379,6 +405,29 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     probeReceipt: "检测回执",
     copy: "复制",
     copied: "已复制",
+    toolRepoLabel: "仓库",
+    toolPathsLabel: "路径",
+    toolScopeLabel: "范围",
+    toolSessionLabel: "会话",
+    toolActionLabel: "动作",
+    toolStatusLabel: "状态",
+    toolRuleLabel: "规则",
+    toolKindLabel: "类型",
+    toolFilesLabel: "文件",
+    toolReviewableLabel: "可评审",
+    toolExcludedLabel: "已排除",
+    toolDroppedLabel: "已省略",
+    toolSessionsLabel: "会话数",
+    toolItemsLabel: "条目",
+    toolCommentsLabel: "评论",
+    toolRulesLabel: "规则分组",
+    toolCountsLabel: "计数",
+    toolRunning: "运行中",
+    toolFailed: "失败",
+    toolDone: "完成",
+    toolEmpty: "无结果",
+    modelFreeHint: "该 provider 没有目录模型列表，可直接输入模型 ID。",
+    modelPlaceholder: "例如 gpt-4o",
   },
   en: {
     navLabel: "ocr review",
@@ -440,9 +489,9 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     maxCommentsLabel: "Summary comment cap (maxComments)",
     maxCommentsHint:
       "Top comments returned to the model; 0 = all (including unanchored lines, large output) (default: the row's initial value)",
-    timeoutLabel: "Run timeout (timeoutMinutes)",
-    timeoutHint:
-      "Foreground wall-clock timeout in minutes; 0 = ask for the host cap (the effective value comes from the maxTimeoutMs setting of the shell executor itself — edit it on the bash-local / pwsh-local settings row); for longer reviews use the tool's wait=false background mode (no host deadline; the backstop window is the ocrBackgroundMaxMs setting, default 0 = none) (default 0)",
+    foregroundWaitLabel: "Foreground wait cap (foregroundWaitMinutes)",
+    foregroundWaitHint:
+      "Only for wait=true: the host-shell wall-clock cap while this plugin waits for ocr (minutes); 0 = ask for the host cap (the effective value comes from the shell executor's maxTimeoutMs setting — edit it on the bash-local / pwsh-local row). This is not OCR's --timeout; the per-task OCR timeout is the timeoutMinutes call argument (passed through as --timeout by review/scan). For longer reviews use wait=false background mode (its backstop is ocrBackgroundMaxMs, default 0 = none)",
     scanSection: "Scan depth (ocr_scan defaults)",
     scanMaxTokensLabel: "Per-request token budget (scanMaxTokens)",
     scanMaxTokensHint:
@@ -506,5 +555,28 @@ export const UI_MESSAGES: MessagesCatalog<UiMessages> = {
     probeReceipt: "Probe output",
     copy: "Copy",
     copied: "Copied",
+    toolRepoLabel: "repo",
+    toolPathsLabel: "paths",
+    toolScopeLabel: "scope",
+    toolSessionLabel: "session",
+    toolActionLabel: "action",
+    toolStatusLabel: "status",
+    toolRuleLabel: "rule",
+    toolKindLabel: "kind",
+    toolFilesLabel: "files",
+    toolReviewableLabel: "reviewable",
+    toolExcludedLabel: "excluded",
+    toolDroppedLabel: "dropped",
+    toolSessionsLabel: "sessions",
+    toolItemsLabel: "items",
+    toolCommentsLabel: "comments",
+    toolRulesLabel: "rule groups",
+    toolCountsLabel: "counts",
+    toolRunning: "running",
+    toolFailed: "failed",
+    toolDone: "done",
+    toolEmpty: "no result",
+    modelFreeHint: "This provider has no catalog model list; enter the model ID directly.",
+    modelPlaceholder: "e.g. gpt-4o",
   },
 };

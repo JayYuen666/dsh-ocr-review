@@ -6,6 +6,43 @@
 之外的小节（如 `Docs`、`Verification`）。条目自 0.1.0 起；更早的
 1.0.0 / 0.6.x 是作用域迁移前的历史编号，npm 已永久记录，不在本文件重建。
 
+## 0.1.23
+
+本版把外部 `ocr` 契约抬到 `1.14.3`，并把审查中发现的「装得上但看不全 / 参数够不到」问题落成实现。`ocr_session` 不再把实测 764–828KB 的 comments JSON 截成 12KB 假完整：`runForeground` 的 spill 文件会被读回，list/show/comments 走结构化投影；comments 默认不返回 OCR 的 `thinking`（它占 707KB/828KB），新增 `commentLimit`（1-500，缺省 100）和 `includeThinking`（缺省 false）。`ocr_session` 的 list/show 摘要带出 `analysisDir`（由 `summary.file_path` 推导）、`run_manifest.terminal_state/run_failure/coverage` 与 `run_manifest` 计数；`action=export` 在 exit 0 后核对 HTML 是否存在。`analysis` 摘要补齐 `submission_status` / `artifact_dir` / cache tokens / `session_id` / `tool_failures` / `retry`，并把 Markdown 的截断改成代理对安全的 `truncateEnd`。
+
+`ocr_delegate_preview` 补上 `backgroundFile` / `rule` / `maxGitProcs` 三个已由 builder 支持的参数；实测 5000 文件仓库输出 820KB，现从 spill 读回完整 JSON，再按每个桶最多 1000 条交给模型，`reviewableDropped` / `excludedDropped` 如实报告省略条数，不再把截断写成「完整清单」。`ocr_delegate_rule` 补上 `rule`，与 repo 内文件校验接线。
+
+### Changed
+
+- **外部 OCR 契约 1.14.3**：`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`、`package.json` 的 `ocrCliVersion`、两份 README、随包文档与 `THIRD_PARTY_NOTICES` 同步；1.14.3 的 commit `f6379f7` 只改 code_search / tools.json / fixture / 文档，review/scan/session 的 flag 与 JSON 输出形状未变。
+- **`ocr_session` 投影**：新增 `lib/session-view.ts`；list/show 摘要只保留身份、范围、计数、终态与失败归因，`comments` 保留正文并默认丢弃 `thinking`；不认识的顶层形状仍回退到脱敏原文。
+- **`ocr_delegate_preview` 输出上限**：完整 JSON 先经 spill 读回，再按 `PREVIEW_FILE_LIMIT=1000` 分桶截断；`reviewableCount` / `excludedCount` / `insertions` / `deletions` 仍按完整清单计算。
+- **analysis 摘要**：`ANALYSIS_VIEW_SCHEMA` 与 `analysisViewOf` 同步新增字段；`projectSummary` 与 `analysis.markdown` 改用 shared 的 `truncateEnd`，切点不再留孤立代理。
+- **provider 面**：`lib/provider-source.ts` 同时读取 `llm-pi-ai` 与单 section 的 `llm-deepseek-api-key`（`deepseek-official`）；目录里的 `defaultBaseURL` 会补齐 settings 省略的端点，单 section profile 也能投影成可选 provider；`markKeyFlags` 改问 `credentialConfigured` + `credentialSource`，与 apply 的 `keyReachableAtOcrRuntime` 同一判据。`renderSelectedConfig` 对内置 provider 的空 baseURL 省略 `url`，交给 OCR preset 的默认端点。模型目录为空时卡片改用 `TextField` 自由输入模型 ID，不再画空下拉。
+- **Web Client 工具行**：新增 `src/toolview.ts`，七个 wire 名各注册一条 keyed `tool.call.toolview` 槽；行内用 shared 的 `ToolRow` / `ToolRowGrid` / `ToolRowItem` / `Badge`，只从 `ToolCallViewProps` 的 `phase`、`argsRaw`、`content`、`isError` 取摘要，不读会话状态、不发请求、不重放原始大输出。`ocr_session` 的 `sessionOutput` JSON 字串会被二次解开；`ocr_delegate_preview` 的 `reviewableDropped` / `excludedDropped` 非零才显示。样式由 shared 的 `ensureCardUiCss` 供应，本包只保留设置卡自己的 `CARD_CSS`。
+- **工具说明明确设置项边界**：`ocr_review` / `ocr_scan` 的中英文 description 都写明 `maxComments` 是设置卡里的全局设置项、不是调用参数；README 与随包 DETAIL 同步，避免模型把设置项当工具入参。同时写明 `timeoutMinutes` 是 OCR `--timeout` 的调用参数，不是设置卡里的 `foregroundWaitMinutes`。
+- **`timeoutMinutes` 设置项更名为 `foregroundWaitMinutes`**：设置卡只影响 `wait=true` 时宿主 shell 等 ocr 的墙钟，工具参数 `timeoutMinutes` 才透传 OCR `--timeout`；两者过去同名，造成“设置项是否等于 `--timeout`”的混淆。旧 profile 的 `timeoutMinutes` 值仍会在新字段缺席时被读取；把 `foregroundWaitMinutes` 改动并保存后写入新名，不动它时旧值继续生效；旧字段不再投影到设置卡。README / DETAIL 增加四个 timeout 字段的分层说明。
+
+### Fixed
+
+- **provider 目录读取失败不再连坐整张卡**：`configurableProviders` 是可选的附加目录，单独 try；它抛错时只按空目录继续投影，`descriptors()` 已给出的 pi-ai provider 仍会显示。
+- **DeepSeek profile 读不出可用行时不再假装 ready**：section 存在但每条 profile 都缺 baseURL/形状坏时，返回 `settings-failed` 并点名**实际命中**的 section（默认 `llm-deepseek-api-key`，目录改成 `renamed-deepseek` 时也一样），不再给空白选择器，也不再误导用户去查一个不存在的默认命名空间。
+- **目录行缺 `displayName` 不再打穿设置卡**：`providerFromProfile` 只在字符串上 trim，缺字段回退 provider 名；DeepSeek 目录缺席时的显示名移入 UI 文案表。
+- **自定义 provider 的空 baseURL 不再覆盖既有 `url`**：只有非空 baseURL 才写 `url`，与注释里「不写空串覆盖」一致。
+- **`analysis_meta.tool_failures` 的 total 与可见条目对齐**：坏形状条目不再让 `total` 比实际可渲染的失败行多。
+- **两处 spill 读回逻辑收进一处**：`lib/output-file.ts` 的 `completeOutputText` 由 host 与 session 工具共用，删掉逐字重复。
+- **会话空评论与投影脱敏**：`ocr_session(action=comments)` 的空数组现在投影成 `kind=comments,total=0`，不再被回成「暂无历史评审会话」；`sessionOutput` 的 JSON 投影统一过 `redactKeyMaterial`，评论正文/代码片段里的密钥形态不会因换结构化形状而绕过脱敏。
+- **工具行的 compare 与重复键**：`ocr_session(action=compare)` 的平铺 `counts` 现在能被工具行读到；`ToolRowItem` 的 key 加索引，避免 `ocr_delegate_rule` 的「规则」标签重复时 React 复用错行；规则分组标签改为「规则分组」。
+- **工具行评论数改用 `total`**：`ocr_session(action=comments)` 的 `comments` 数组是 `commentLimit` 截断后的展示面，工具行原先把数组长度当总数；现在优先读投影里的 `total`，缺失才回退数组长度，`commentLimit=1` 时不会把 87 条评论显示成 1 条。
+- **`toolTimeoutMs` 的默认说明收窄**：1 小时只兜 `wait=true` 的前台工具调用，默认 `wait=false` 的后台启动即返回、不经过它；文档不再把“1 小时”说成覆盖“几小时”的审查预算，几小时级长审查走后台或同步抬高 `foregroundWaitMinutes` 与 `toolTimeoutMs`。
+- 透传凭据的 `credentialConfigured` / `credentialSource` 两问并行发出，同一 provider 的 key 探测不再串行等待。
+
+### Verification
+
+- `./node_modules/.bin/vitest run`：30 个文件、828 条全通过（含新增 review 反馈、工具行 total、provider 改名坏 profile、设置名迁移与 timeout 工具说明的回归用例）；`npm run typecheck`、`npm run lint`、`npm run fmt:check` 通过；`npm run test` 的四项覆盖率均为 100%；`node build-host.mjs` 与 `node build-client.mjs` 已按最终源码重建（host.js 391,667 B、client.js 53,592 B），产物新鲜度门禁绿。
+- 真 CLI 版本核对：本机 `ocr 1.14.3` 与 `EXPECTED_OCR_CLI_VERSION` 相等。真 `ocr delegate preview --rule … --background-file … --max-git-procs 4 --format json` 对 5000 文件仓库退 0、输出 820,388 B；真 `ocr delegate rule --rule …` 退 0。`/tmp/sess-*.json` 真实会话经 `lib/session-view.ts` 投影：list 27,891→855 B、show 39,437→7,237 B、comments 764,154→48,413 B（87 条、thinking 全量省略）。
+- 真实宿主沙箱（`/Users/yuanjiang/.dsh/profiles/tmp`，dsh 0.2.3-alpha.2，link 安装）：`--dump-config` 命中 `@jayyuen66/dsh-ocr-review` 层；web 宿主在 127.0.0.1:4318 启动后，设置卡渲染实时 provider（ARK / deepseek-v4.1-flash，5 字段）、`共 2 个 · 2 运行中`，`/api/ocrReview/providers` 与 `/api/ocrReview/mcp` 均 200，控制台零消息；`检测版本` 回执 `ocr 版本：1.14.3`。会话里实际触发 `ocr_review` / `ocr_session(list/show/comments)`，工具行用 shared 的 `ToolRow` 渲染出状态、仓库、范围、会话数与评论数；OCR 自身因 provider `context canceled` 在 9/16 文件处中止（7 文件未审完，已产出 8 条评论、225 次工具调用），这不是本包工具失败，也未续跑。
+
 ## 0.1.22
 
 `dsh-ocr-review` 补上 OCR 1.14 的行为/影响分析（`--analysis`）与它自己的预算（`--analysis-max-tokens-budget`）。`ocr_review` 新增 `analysis` / `analysisMaxTokensBudget` 两个参数；解析层把顶层 `analysis`（人读 Markdown）与 `analysis_meta`（`execution_status` / `submission_accepted` / `usage` / `errors` / `warnings` / 范围与引用计数）收成摘要里的 `analysis` 字段，报告截到 6000 字符并单列 `markdownTruncated`。`wait=true` 时报告随摘要返回；后台模式的结果落在会话自身的 `analysis/` 目录（`ocr_session(action=show)` 显示路径）。分析是 Review 之外的一趟独立任务：失败或跳过只体现在自己的 `analysis.status` 与 `errors`，不改写 Review 的 `ok`/`status`。`--analysis` 只支持 commit/range，不能与 preview/resume 同用；单独给预算而无 `analysis=true` 会在起进程前拒绝，而不是让 OCR 静默忽略。

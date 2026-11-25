@@ -4,8 +4,8 @@ export default definePluginConfig({
   // node/no-sync 的例外按文件声明，两组各有唯一出处：
   // · lib/config-store.ts：.bak 备份按 0600 直接创建（writeFileSync）并先清旧备份
   //   （rmSync）；运行时正式写盘一律走 @deepseek-ai/dsh-atomic-write 的异步接口。
-  // · host.ts：mkdtempSync 造临时目录、rmSync 在 finally 里回收——review/scan 预览、
-  //   后台作业输出、session export 的写到磁盘目录，共六对调用点。这两枚是**生产**调用，
+  // · host.ts / lib/session-tool.ts：mkdtempSync 造临时目录、rmSync 在 finally 里回收——
+  //   review/scan 预览、后台作业输出、session export 的写到磁盘目录。这两枚是**生产**调用，
   //   不要去 test/ 里找它们（此前的注释这样写，等于让读者以为生产代码是干净的）。
   // 仅测试用：mkdirSync、writeFileSync、truncateSync 只出现在 test/ 的夹具准备里（建目录、
   // 写 fixture、截出稀疏文件）。名单按 files 生效，超出名单的路径由 lint 直接判红；
@@ -14,7 +14,7 @@ export default definePluginConfig({
   // SCRIPTS_OVERRIDES 把 node/no-sync 整条关掉，lint 在那里就不管这一条。
   syncIoScopes: [
     { files: ["lib/config-store.ts"], apis: ["rmSync", "writeFileSync"] },
-    { files: ["host.ts"], apis: ["mkdtempSync", "rmSync"] },
+    { files: ["host.ts", "lib/session-tool.ts"], apis: ["mkdtempSync", "rmSync"] },
     {
       files: ["test/**"],
       apis: ["mkdirSync", "mkdtempSync", "rmSync", "truncateSync", "writeFileSync"],

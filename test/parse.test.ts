@@ -13,13 +13,49 @@ import {
   parseDelegateRules,
 } from "../lib/parse.ts";
 import { aggregateComments, classifySeverity, severityRank } from "../lib/severity.ts";
-import type { OcrComment, ParsedReview, ReviewSummaryView, SummaryPlan } from "../lib/parse.ts";
+import type {
+  AnalysisView,
+  OcrComment,
+  ParsedReview,
+  ReviewSummaryView,
+  SummaryPlan,
+} from "../lib/parse.ts";
 import { MESSAGES, format } from "../lib/messages.ts";
 import { REVIEW_OUTPUT_SCHEMA } from "../lib/tool-schemas.ts";
 import { assertToolOutput } from "../lib/output.ts";
 
 const FIXTURES = path.join(import.meta.dirname, "fixtures");
 const read = (name: string): string => readFileSync(path.join(FIXTURES, name), "utf8");
+
+function expectAnalysisMetadata(analysis: AnalysisView | null): void {
+  expect(analysis).not.toBeNull();
+  expect(analysis?.status).toBe("completed");
+  expect(analysis?.completed).toBe(true);
+  expect(analysis?.declaredCompletion).toBe("complete");
+  expect(analysis?.stopReason).toBe("none");
+  expect(analysis?.scopeFiles).toBe(1);
+  expect(analysis?.citedObservations).toBe(1);
+  expect(analysis?.totalTokens).toBe(1200);
+  expect(analysis?.inputTokens).toBe(1000);
+  expect(analysis?.outputTokens).toBe(200);
+  expect(analysis?.cacheReadTokens).toBe(300);
+  expect(analysis?.cacheWriteTokens).toBe(40);
+  expect(analysis?.model).toBe("m");
+  expect(analysis?.submissionStatus).toBe("accepted");
+  expect(analysis?.sessionId).toBe("analysis-session");
+  expect(analysis?.artifactDir).toBe("/tmp/analysis");
+  expect(analysis?.toolFailures).toStrictEqual({
+    total: 1,
+    failures: ["read_file @ a.ts: EACCES"],
+  });
+  expect(analysis?.retry).toStrictEqual({
+    totalRetries: 1,
+    recoveredRequests: 1,
+    failedRequests: 0,
+  });
+  expect(analysis?.errors).toStrictEqual([]);
+  expect(analysis?.warnings).toStrictEqual(["a.ts：证据不完整"]);
+}
 
 // ── 文案注入助手 ─────────────────────────────────────────────────────────────
 // parse.ts 是人读文案的产地之一（解析失败原因、摘要 hint、0 行定位说明），
@@ -1071,18 +1107,22 @@ describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume 
           submission_accepted: true,
           declared_completion: "complete",
           stop_reason: "none",
+          submission_status: "accepted",
+          session_id: "analysis-session",
           scope: [{ old_path: "a.ts", new_path: "a.ts" }],
           cited_observation_ids: ["obs-1"],
           usage: {
             total_tokens: 1200,
             input_tokens: 1000,
             output_tokens: 200,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
+            cache_read_tokens: 300,
+            cache_write_tokens: 40,
           },
           model: "m",
           errors: [],
           warnings: [{ file: "a.ts", message: "证据不完整" }],
+          tool_failures: [{ tool_name: "read_file", file_path: "a.ts", error: "EACCES" }],
+          retry_report: { total_retries: 1, recovered_requests: 1, failed_requests: 0 },
           artifact_dir: "/tmp/analysis",
         },
         comments: [],
@@ -1092,21 +1132,10 @@ describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume 
     expect(parsed.status).toBe("complete");
     const { analysis } = parsed;
     expect(analysis).not.toBeNull();
-    expect(analysis?.status).toBe("completed");
-    expect(analysis?.completed).toBe(true);
-    expect(analysis?.declaredCompletion).toBe("complete");
-    expect(analysis?.stopReason).toBe("none");
+    expectAnalysisMetadata(analysis);
     expect(analysis?.markdown).toContain("Behavior");
     // analysis_raw 带 observation 标记，重复塞进摘要只会翻倍 token——不进视图。
     expect(analysis?.markdown).not.toContain("[[obs-1]]");
-    expect(analysis?.scopeFiles).toBe(1);
-    expect(analysis?.citedObservations).toBe(1);
-    expect(analysis?.totalTokens).toBe(1200);
-    expect(analysis?.inputTokens).toBe(1000);
-    expect(analysis?.outputTokens).toBe(200);
-    expect(analysis?.model).toBe("m");
-    expect(analysis?.errors).toStrictEqual([]);
-    expect(analysis?.warnings).toStrictEqual(["a.ts：证据不完整"]);
     const view = summarizeView(parsed);
     expect(view.analysis).toStrictEqual(analysis);
     // 非 null 分支的出口契约：只测 null 分支会漏掉 ANALYSIS_VIEW_SCHEMA 的字段漂移。
@@ -1149,14 +1178,21 @@ describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume 
       completed: false,
       declaredCompletion: "",
       stopReason: "",
+      submissionStatus: "",
       markdown: "## Report",
       markdownTruncated: false,
+      artifactDir: "",
       scopeFiles: 0,
       citedObservations: 0,
       totalTokens: 0,
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       model: "",
+      sessionId: "",
+      toolFailures: null,
+      retry: null,
       errors: [],
       warnings: [],
     });
@@ -1173,6 +1209,52 @@ describe("1.13.3 的摘要字段：limitReached / llm / projectSummary / resume 
     );
     expect(exact.analysis?.markdown).toHaveLength(6000);
     expect(exact.analysis?.markdownTruncated).toBe(false);
+  });
+
+  it("analysis 的 6000 码元切点落在代理对中间时丢掉孤立高代理", () => {
+    // 高代理在 5999、低代理在 6000：裸 slice(0, 6000) 会留下一个孤立高代理。
+    const highSurrogateStart = 55_296;
+    const highSurrogateEnd = 56_575;
+    const long = `${"x".repeat(5999)}😀tail`;
+    const parsed = parseOcr(JSON.stringify({ status: "complete", analysis: long, comments: [] }));
+    const markdown = parsed.analysis?.markdown ?? "";
+    expect(markdown).toHaveLength(5999);
+    expect(markdown.endsWith("x")).toBe(true);
+    const last = markdown.codePointAt(markdown.length - 1) ?? 0;
+    expect(last >= highSurrogateStart && last <= highSurrogateEnd).toBe(false);
+    expect(parsed.analysis?.markdownTruncated).toBe(true);
+  });
+
+  it("analysis_meta.tool_failures 不是数组时报可读缺口；空数组按没有失败", () => {
+    const broken = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        analysis_meta: { tool_failures: "not-an-array" },
+        comments: [],
+      }),
+    );
+    expect(broken.analysis?.toolFailures?.total).toBe(0);
+    expect(broken.analysis?.toolFailures?.failures[0]).toContain("tool_failures");
+    const sparse = parseOcr(
+      JSON.stringify({
+        status: "complete",
+        analysis_meta: {
+          tool_failures: [
+            { error: "no tool name" },
+            { tool_name: "grep", error: "x" },
+            "bad-shape",
+          ],
+        },
+        comments: [],
+      }),
+    );
+    expect(sparse.analysis?.toolFailures?.total).toBe(2);
+    expect(sparse.analysis?.toolFailures?.failures[0]).toContain("（无）");
+    expect(sparse.analysis?.toolFailures?.failures[1]).toBe("grep: x");
+    const empty = parseOcr(
+      JSON.stringify({ status: "complete", analysis_meta: { tool_failures: [] }, comments: [] }),
+    );
+    expect(empty.analysis?.toolFailures).toBeNull();
   });
 
   it("retry_report 全零回 null；有一个非零计数就保留", () => {

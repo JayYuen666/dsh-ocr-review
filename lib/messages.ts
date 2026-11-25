@@ -32,7 +32,7 @@ export interface OcrReviewMessages {
   readonly middleEllipsis: string;
   /** 前台超时（含实际生效分钟数）。 */
   readonly execTimedOut: string;
-  /** 显式 timeoutMinutes 到点：这条截止由本包自管，宿主的 maxTimeoutMs 不参与。 */
+  /** 显式 foregroundWaitMinutes 到点：这条截止由本包自管，宿主的 maxTimeoutMs 不参与。 */
   readonly execTimedOutExplicit: string;
   /** 调用被取消。 */
   readonly execAborted: string;
@@ -151,6 +151,8 @@ export interface OcrReviewMessages {
   readonly invalidAction: string;
   /** session limit 显式给出但不是 1-100 整数（不再静默钳制）。 */
   readonly sessionLimitRange: string;
+  /** comments 的 commentLimit 显式给出但不是 1-500 整数。 */
+  readonly sessionCommentLimitRange: string;
   /** action=list 与 id 同给（自相矛盾，不再静默改写成 show）。 */
   readonly listRejectsId: string;
   // ── 工具返回形态守卫（lib/output.ts 消费本表）───────────────────────────────
@@ -241,11 +243,16 @@ export interface OcrReviewMessages {
   readonly sessionCompareHint: string;
   /** 会话导出结果的 hint。 */
   readonly sessionExportHint: string;
+  /** action=export 退出 0 但预期 HTML 文件不存在。 */
+  readonly sessionExportMissing: string;
   // ── provider 配置通道（lib/ocr-config.ts 消费本表）─────────────────────────
   readonly sourceSettingsUnavailable: string;
   readonly sourceSettingsFailed: string;
   readonly sourceNamespaceUnavailable: string;
+  readonly sourceProfileInvalid: string;
   readonly sourceCredentialsUnavailable: string;
+  /** DeepSeek 单 section 没有目录行时的显示名（目录缺席的回退，不再写死英文）。 */
+  readonly providerDeepSeekFallbackName: string;
   readonly badEnvKey: string;
   readonly configNotJson: string;
   readonly configNotObject: string;
@@ -338,6 +345,8 @@ export interface OcrReviewMessages {
   readonly paramSessionSeverity: string;
   readonly paramSessionCategory: string;
   readonly paramSessionLimit: string;
+  readonly paramSessionCommentLimit: string;
+  readonly paramSessionIncludeThinking: string;
   readonly paramRulesPath: string;
   readonly paramLlmAction: string;
   /** tuningParams 的「组」量词（OCR review 以组为单位）。 */
@@ -382,13 +391,14 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     middleEllipsis: " …[中间省略]… ",
     execTimedOut:
       "ocr 执行超时（实际生效 {minutes} 分钟 = min(请求, shell.maxTimeoutMs)）：" +
-      "请缩小审查范围（exclude/--commit/更小改动）、调低 OCR 每组 --timeout，" +
+      "请缩小审查范围（exclude/--commit/更小改动）、调低 OCR 每组 --timeout（工具参数 timeoutMinutes），" +
       "抬高 shell 执行器（bash-local/pwsh-local）设置项里的 maxTimeoutMs，" +
       "或改用 wait=false 后台模式（默认不设时限）",
     execTimedOutExplicit:
-      "ocr 执行超时（配置的 timeoutMinutes = {minutes} 分钟，由本插件自管，宿主的 " +
-      "maxTimeoutMs 不参与）：请调高本插件的 timeoutMinutes，或缩小审查范围" +
-      "（exclude/--commit/更小改动）、调低 OCR 每组 --timeout，也可改用 wait=false 后台模式",
+      "ocr 执行超时（设置项 foregroundWaitMinutes = {minutes} 分钟，由本插件计时，宿主的 " +
+      "maxTimeoutMs 不参与）：请调高本插件的 foregroundWaitMinutes，或缩小审查范围" +
+      "（exclude/--commit/更小改动）、调低 OCR 每组 --timeout（工具参数 timeoutMinutes），" +
+      "也可改用 wait=false 后台模式",
     execAborted: "ocr 执行被中止",
     execNotFound:
       "ocr 命令不存在：命令词交下去没被系统找到（PATH 上那份可能刚被移走或改名）。" +
@@ -496,6 +506,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     pathsRequired: "paths 必填：至少传一个待审查文件的仓库相对路径",
     invalidAction: "action 非法：{action}（期望 {expected}）",
     sessionLimitRange: "limit 需要为 1-100 的整数（缺省 10），收到 {received}",
+    sessionCommentLimitRange: "commentLimit 需要为 1-500 的整数（缺省 100），收到 {received}",
     listRejectsId: "action=list 不接受 id（查单个会话请用 action=show 或 action=comments）",
     resultSchemaViolation: "ocr {tool}: 返回值不符合该工具的 output schema：{violations}",
     resultSchemaUnsupported:
@@ -566,13 +577,18 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "已导出为自包含 HTML 文件，路径在 sessionOutput 里（文件留在临时目录，过期后由后续导出自动清理）。" +
       "这是给用户看的成品：用 present 工具把它声明为交付物——present 的 files 里写这个路径——用户才能在回复结束后一键打开；" +
       "急着让用户自己打开就先在回复里直接给出路径。",
+    sessionExportMissing:
+      "action=export 已退出，但预期 HTML 没有出现在 {path}；请检查该会话是否仍有可导出内容，或改用 action=show 查看会话。",
     sourceSettingsUnavailable:
       "dsh 设置服务（ctx.settings）未装配：本插件需要它读取已配置的 provider 列表",
     sourceSettingsFailed: "调用 dsh 设置服务失败：{message}",
     sourceNamespaceUnavailable:
       "dsh 配置里没有 {ns} 命名空间：未安装 pi-ai 适配器，或还没配置任何 provider",
+    sourceProfileInvalid:
+      "dsh 配置里的 {ns} profile 读不出可用 provider：检查 baseURL 是否缺失或形状不对",
     sourceCredentialsUnavailable:
       "dsh 凭据服务（ctx.credentials）未装配：无法确认 provider 的 API key 是否已配置",
+    providerDeepSeekFallbackName: "DeepSeek API",
     badEnvKey:
       "非法 env key：{key}（get-cred 只接受 ^[A-Z0-9_]+$ 的大写 ref 名；" +
       "请在 dsh 配置里把该 provider 的 apiKeyEnv 改成大写字母/数字/下划线）",
@@ -626,9 +642,9 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     providerModelRequired: "provider 与 model 必填",
     bodyParseFailed: "body 解析失败：{message}",
     reviewToolDescription:
-      "用 open-code-review（ocr）对 Git 变更做深度学习代码审查：OCR 调用其自身配置的 LLM（provider/model 在 ocr-review 设置卡选择）独立审查，返回按严重度/类别聚合的评论摘要。scope=workspace 审工作区变更（默认；staged+unstaged+untracked 都算，且不套 .gitignore——被忽略的跟踪文件同样计入）；scope=commit 审单个提交；scope=branch 用从/到分支对比（merge-base）。常用先 ocr_delegate_preview 看范围。effort 控制深度（low=1 轮/medium=2/high=3，越深越贵）。analysis=true 额外跑一趟行为/影响分析（仅 commit/branch，不能与 preview/resume 同用；wait=true 时报告随摘要的 analysis 字段返回，后台模式的结果在会话的 analysis/ 目录）；分析失败不改变 review 结果。background 提供需求/业务上下文能显著提升质量。preview=true 只做文件选择（零 LLM、不建会话）；noFilter 保留全部评论；rule/backgroundFile 只收 repo 根内文件。首次审查前确保 ocr 已配置且 'ocr llm test' 通过。",
+      "用 open-code-review（ocr）对 Git 变更做深度学习代码审查：OCR 调用其自身配置的 LLM（provider/model 在 ocr-review 设置卡选择）独立审查，返回按严重度/类别聚合的评论摘要。scope=workspace 审工作区变更（默认；staged+unstaged+untracked 都算，且不套 .gitignore——被忽略的跟踪文件同样计入）；scope=commit 审单个提交；scope=branch 用从/到分支对比（merge-base）。常用先 ocr_delegate_preview 看范围。effort 控制深度（low=1 轮/medium=2/high=3，越深越贵）。analysis=true 额外跑一趟行为/影响分析（仅 commit/branch，不能与 preview/resume 同用；wait=true 时报告随摘要的 analysis 字段返回，后台模式的结果在会话的 analysis/ 目录）；分析失败不改变 review 结果。background 提供需求/业务上下文能显著提升质量。preview=true 只做文件选择（零 LLM、不建会话）；noFilter 保留全部评论；rule/backgroundFile 只收 repo 根内文件。注意：maxComments 是设置卡里的全局设置项，不是 ocr_review 的调用参数；调用时不要传 maxComments。另外，timeoutMinutes 是本次调用透传给 OCR 的每任务 --timeout，不是设置卡里的前台等待上限；设置卡字段叫 foregroundWaitMinutes，两者不互通。首次审查前确保 ocr 已配置且 'ocr llm test' 通过。",
     scanToolDescription:
-      "用 open-code-review（ocr）做全文件扫描审查（无需 Git 变更/无 diff，适合审计陌生代码库或指定目录）。--path 逗号分隔的仓库相对目录/文件（缺省整个仓库，路径不存在会报错）。与 ocr_review 一样由 OCR 自身 LLM 独立审查，返回聚合评论摘要。preview=true 只列扫描范围；noPlan/noDedup/noSummary 降本；resume 续扫；rule 只收 repo 根内文件。",
+      "用 open-code-review（ocr）做全文件扫描审查（无需 Git 变更/无 diff，适合审计陌生代码库或指定目录）。--path 逗号分隔的仓库相对目录/文件（缺省整个仓库，路径不存在会报错）。与 ocr_review 一样由 OCR 自身 LLM 独立审查，返回聚合评论摘要。preview=true 只列扫描范围；noPlan/noDedup/noSummary 降本；resume 续扫；rule 只收 repo 根内文件。注意：maxComments 是设置卡里的全局设置项，不是 ocr_scan 的调用参数；调用时不要传 maxComments。另外，timeoutMinutes 是本次调用透传给 OCR 的每任务 --timeout，不是设置卡里的前台等待上限；设置卡字段叫 foregroundWaitMinutes，两者不互通。",
     previewToolDescription:
       "open-code-review 委托模式第 1 步：列出待审查文件清单（mode/ref/merge_base/reviewable 文件路径+状态+增删行/被排除文件及原因），不调 LLM、秒级返回。用于确认 ocr_review/ocr_scan 的审查范围，或配合 ocr_delegate_rule 后由你自己（dsh 会话模型）读取 diff 完成审查。scope 与 ocr_review 一致（workspace/commit/branch）。",
     ruleToolDescription:
@@ -657,7 +673,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramWait:
       "false（缺省）=后台启动、立即返回作业 id，用 ocr_session 轮询结果——一次 review 是分钟级长任务，" +
       "阻塞等待会占住整轮；true=前台阻塞到完成并直接返回聚合摘要。后台模式的兜底窗口由设置项 " +
-      "ocrBackgroundMaxMs 给出（默认 0 = 不设窗口）。两种模式都带宿主回收守护：" +
+      "ocrBackgroundMaxMs 给出（默认 0 = 不设窗口）；wait=true 的前台宿主等待上限是设置项 foregroundWaitMinutes，不是 OCR 的 --timeout。两种模式都带宿主回收守护：" +
       "dsh 退出（含 kill -9）时 OCR 进程一并结束",
     paramProvider: "本次运行临时指定已配置 provider",
     paramModel: "本次运行临时覆盖 model",
@@ -701,13 +717,16 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     paramSessionBranch: "action=list 时按分支过滤（与会话记录的分支精确匹配；先过滤后 limit）",
     branchOnlyForList: "branch 只适用于 action=list（show/comments 给了 id 时也不接受）",
     paramSessionLimit: "list 上限 1-100（缺省 10）",
+    paramSessionCommentLimit: "comments 上限 1-500（缺省 100）；commentLimit 在 list/show 下不生效",
+    paramSessionIncludeThinking:
+      "仅 comments：是否带出 OCR 的内部 thinking 文本（缺省关闭；它通常是最大的字段）",
     paramRulesPath: "待查询的文件路径（仓库相对或绝对；仅用于规则匹配）",
     paramLlmAction: "providers：内置 provider 列表 / models：ChatGPT 账号模型列表",
     unitGroup: "组",
     unitFile: "文件",
     tuningConcurrency: "并发{unit}数（OCR --concurrency；缺省不传=OCR 原生 8）",
     tuningTimeout:
-      "每{unit}任务超时分钟（OCR --timeout；review 会按 effort 轮数线性放大，scan 不放大；0=不限时；缺省不传=OCR 原生 15）",
+      "每{unit}任务超时分钟（OCR --timeout；review 会按 effort 轮数线性放大，scan 不放大；0=不限时；缺省不传=OCR 原生 15）。这是调用参数 timeoutMinutes，不是设置卡里的前台等待上限 foregroundWaitMinutes",
     tuningMaxTools:
       "每{unit}工具调用轮数上限（OCR --max-tools；0=模板默认；1-49 会被 OCR 抬到 50；≥50 起精确生效——review 模板默认 100，传 50-99 会把上限从 100 压到该值；缺省不传=模板默认）",
     tuningMaxToolsScan:
@@ -788,14 +807,14 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     middleEllipsis: " …[middle omitted]… ",
     execTimedOut:
       "ocr timed out (effective {minutes} min = min(request, shell.maxTimeoutMs)): " +
-      "narrow the review scope (exclude / --commit / a smaller diff), lower OCR's per-group --timeout, " +
-      "raise maxTimeoutMs in the shell executor's own settings (bash-local/pwsh-local), " +
-      "or switch to background mode with wait=false (no time limit by default)",
+      "narrow the review scope (exclude / --commit / a smaller diff), lower OCR's per-group --timeout " +
+      "(the timeoutMinutes tool argument), raise maxTimeoutMs in the shell executor's own settings " +
+      "(bash-local/pwsh-local), or switch to background mode with wait=false (no time limit by default)",
     execTimedOutExplicit:
-      "ocr timed out (timeoutMinutes = {minutes} min, enforced by this plugin; the host's " +
-      "maxTimeoutMs does not apply): raise this plugin's timeoutMinutes, narrow the review scope " +
-      "(exclude / --commit / a smaller diff), or lower OCR's per-group --timeout; " +
-      "background mode with wait=false is also available",
+      "ocr timed out (setting foregroundWaitMinutes = {minutes} min, enforced by this plugin; the host's " +
+      "maxTimeoutMs does not apply): raise this plugin's foregroundWaitMinutes, narrow the review scope " +
+      "(exclude / --commit / a smaller diff), or lower OCR's per-group --timeout (the timeoutMinutes " +
+      "tool argument); background mode with wait=false is also available",
     execAborted: "ocr execution aborted",
     execNotFound:
       "ocr command not found: the command word was handed to the shell and nothing answered it " +
@@ -931,6 +950,7 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     pathsRequired: "paths is required: pass at least one repo-relative path of a file to review",
     invalidAction: "invalid action: {action} (expected {expected})",
     sessionLimitRange: "limit must be an integer 1-100 (default 10), got {received}",
+    sessionCommentLimitRange: "commentLimit must be an integer 1-500 (default 100), got {received}",
     listRejectsId:
       "action=list does not take an id (use action=show or action=comments for a single session)",
     resultSchemaViolation:
@@ -1007,13 +1027,18 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     sessionExportHint:
       "Exported as a self-contained HTML file; the path is in sessionOutput. It stays in the temp directory and older exports are cleaned up automatically. " +
       "This is a finished deliverable for the user: declare it with the present tool — put this path in present's files — so the user can open it once your turn ends; if they need it sooner, give the path in your reply.",
+    sessionExportMissing:
+      "action=export exited but the expected HTML did not appear at {path}; check whether the session still has exportable content, or use action=show to inspect it.",
     sourceSettingsUnavailable:
       "the dsh settings service (ctx.settings) is not wired up: this plugin needs it to read the configured provider list",
     sourceSettingsFailed: "calling the dsh settings service failed: {message}",
     sourceNamespaceUnavailable:
       "the dsh configuration has no {ns} namespace: the pi-ai adapter is not installed, or no provider is configured yet",
+    sourceProfileInvalid:
+      "the {ns} profile in the dsh configuration has no usable provider: check whether baseURL is missing or the shape is wrong",
     sourceCredentialsUnavailable:
       "the dsh credentials service (ctx.credentials) is not wired up: cannot confirm whether a provider's API key is configured",
+    providerDeepSeekFallbackName: "DeepSeek API",
     badEnvKey:
       "invalid env key: {key} (get-cred only accepts uppercase ref names matching ^[A-Z0-9_]+$; " +
       "change the provider's apiKeyEnv in the dsh configuration to uppercase letters/digits/underscores)",
@@ -1090,7 +1115,10 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "analysis/ directory; a failed analysis does not change the review result. " +
       "Passing requirements/business context via background markedly improves quality. preview=true selects " +
       "files only (no LLM, no session); " +
-      "noFilter keeps every comment; rule/backgroundFile accept repo-root files only. Before the first " +
+      "noFilter keeps every comment; rule/backgroundFile accept repo-root files only. Note: maxComments is a " +
+      "global setting on the settings card, not an ocr_review parameter; do not pass it in tool calls. Also, " +
+      "timeoutMinutes is the per-task OCR --timeout passed through for this call, not the settings-card " +
+      "foreground wait cap; that field is foregroundWaitMinutes, and the two are unrelated. Before the first " +
       "review make sure ocr is configured and 'ocr llm test' passes.",
     scanToolDescription:
       "Whole-file scan review with open-code-review (ocr) — no Git changes or diff required, good for " +
@@ -1098,7 +1126,10 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "directories/files (default: the whole repo; a nonexistent path errors). Like ocr_review, OCR's " +
       "own LLM reviews independently and an aggregated comment summary is returned. preview=true lists " +
       "the scan scope only; noPlan/noDedup/noSummary reduce cost; resume continues an interrupted scan; " +
-      "rule accepts a repo-root file only.",
+      "rule accepts a repo-root file only. Note: maxComments is a global setting on the settings card, " +
+      "not an ocr_scan parameter; do not pass it in tool calls. Also, timeoutMinutes is the per-task OCR " +
+      "--timeout passed through for this call, not the settings-card foreground wait cap; that field is " +
+      "foregroundWaitMinutes, and the two are unrelated.",
     previewToolDescription:
       "Step 1 of open-code-review delegate mode: list the files to review (mode/ref/merge_base/reviewable " +
       "path+status+added/removed lines, plus excluded files and why). No LLM call, returns in seconds. Use " +
@@ -1149,7 +1180,8 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
       "false (default) = start in the background, return the job id immediately and poll with ocr_session - " +
       "a review is a minutes-long task and blocking the call ties up the whole turn; true = block until it " +
       "finishes and return the aggregated summary directly. The background backstop window is the " +
-      "ocrBackgroundMaxMs setting (default 0 = none). Both modes carry the host reaper guard: when dsh " +
+      "ocrBackgroundMaxMs setting (default 0 = none); the foreground host wait cap is foregroundWaitMinutes, " +
+      "not OCR's --timeout. Both modes carry the host reaper guard: when dsh " +
       "exits (including kill -9) the OCR process is terminated too",
     paramProvider: "Temporarily use a configured provider for this run",
     paramModel: "Temporarily override the model for this run",
@@ -1196,13 +1228,17 @@ export const MESSAGES: MessagesCatalog<OcrReviewMessages> = {
     branchOnlyForList:
       "branch applies to action=list only (show/comments with an id reject it too)",
     paramSessionLimit: "list cap 1-100 (default 10)",
+    paramSessionCommentLimit:
+      "comments cap 1-500 (default 100); commentLimit is ignored by list/show",
+    paramSessionIncludeThinking:
+      "comments only: include OCR's internal thinking text (off by default; it is usually the largest field)",
     paramRulesPath: "File path to look up (repo-relative or absolute; used only for rule matching)",
     paramLlmAction: "providers: built-in provider list / models: ChatGPT account model list",
     unitGroup: "group",
     unitFile: "file",
     tuningConcurrency: "Concurrent {unit} count (OCR --concurrency; unset = OCR native 8)",
     tuningTimeout:
-      "Per-{unit} task timeout in minutes (OCR --timeout; review scales it by the effort round count, scan does not; 0 = unlimited; unset = OCR native 15)",
+      "Per-{unit} task timeout in minutes (OCR --timeout; review scales it by the effort round count, scan does not; 0 = unlimited; unset = OCR native 15). This is the timeoutMinutes call argument, not the settings-card foregroundWaitMinutes field",
     tuningMaxTools:
       "Per-{unit} tool-call round cap (OCR --max-tools; 0 = template default; 1-49 is raised to 50 by OCR; values >= 50 apply exactly — the review template defaults to 100, so 50-99 lowers that cap to the given value; unset = template default)",
     tuningMaxToolsScan:

@@ -24,6 +24,16 @@ const RAW_SPACE_OR_CONTROL = /[\p{Cc} ]/u;
  *  `apiKeyEnv` 时它不会被当作 ref 送进凭据查询、也不会在失败文案里被原样回显。 */
 export const CREDENTIAL_ENV_KEY = /^[A-Z0-9_]+$/u;
 
+/** 宿主 provider 目录（`ctx.llm.listConfigurableProviders()`）里本包用到的默认值。
+ *  目录本身是宿主对「装了什么 catalog」的回答；settings 值里省略 baseURL 的目录项
+ *  靠 `defaultBaseURL` 才画得出可用行。 */
+export interface ProviderDefault {
+  provider: string;
+  displayName: string;
+  settingsNs: string;
+  defaultBaseURL?: string;
+}
+
 /** provider 的单个模型（settings 值里的形状，多余字段上游加了也不影响）。 */
 export interface DshModel {
   id: string;
@@ -155,8 +165,15 @@ function isAcceptableBaseUrl(value: string): boolean {
   return parsed.username === "" && parsed.password === "";
 }
 
+/** settings 里的 baseURL 为空时用目录默认值补齐；两者都不合格就返回 null。 */
+function baseUrlOf(rawBaseURL: unknown, fallback?: string): string | null {
+  const raw = typeof rawBaseURL === "string" ? rawBaseURL.trim() : "";
+  const baseURL = raw === "" ? (fallback ?? "").trim() : raw;
+  return baseURL !== "" && isAcceptableBaseUrl(baseURL) ? baseURL : null;
+}
+
 /** 原始 provider 对象 → DshProvider（缺 baseURL 或形状不合视为无效，返回 null）。 */
-function providerFromRaw(name: string, raw: unknown): DshProvider | null {
+function providerFromRaw(name: string, raw: unknown, defaultBaseURL?: string): DshProvider | null {
   if (!isRecord(raw)) {
     return null;
   }
@@ -176,8 +193,8 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
   // baseURL 同样 trim，而且必须是可用的 http(s) URL（判据见 isAcceptableBaseUrl）：
   // 故障在读侧就暴露，不是延到 OCR 调用期。读侧宽容的落法是整条丢弃（卡片照常打开，
   // 用户去 settings 修），不是替用户猜一个修正值。
-  const baseURL = typeof entry["baseURL"] === "string" ? entry["baseURL"].trim() : "";
-  if (!baseURL || !isAcceptableBaseUrl(baseURL)) {
+  const baseURL = baseUrlOf(entry["baseURL"], defaultBaseURL);
+  if (baseURL === null) {
     return null;
   }
   // 「models 未声明（缺省/显式空数组）」与「声明了但形状不对/每条都无效」必须分开：
@@ -215,7 +232,10 @@ function providerFromRaw(name: string, raw: unknown): DshProvider | null {
  *     baseURL, models?: [{id,name,…}] }
  * 形状不合的条目整条丢弃（读侧宽容：卡片要能打开让用户去修），写侧才 fail-loud。
  */
-export function providersFromSettingsValue(value: unknown): DshProvider[] {
+export function providersFromSettingsValue(
+  value: unknown,
+  defaults: readonly ProviderDefault[] = [],
+): DshProvider[] {
   const providers = fieldOf(value, PROVIDERS_FIELD);
   if (!isRecord(providers)) {
     return [];
@@ -226,7 +246,8 @@ export function providersFromSettingsValue(value: unknown): DshProvider[] {
     // 与 1.13.3 拒绝的空点号分段在投影层整条丢弃（写侧对普通对象赋值，
     // "__proto__" 是 setter、写进去会凭空丢失）。
     const usable = isUsableProviderName(name);
-    const parsed = usable ? providerFromRaw(name, raw) : null;
+    const fallback = defaults.find((entry) => entry.provider === name);
+    const parsed = usable ? providerFromRaw(name, raw, fallback?.defaultBaseURL) : null;
     if (parsed !== null) {
       out.push(parsed);
     }
@@ -236,4 +257,42 @@ export function providersFromSettingsValue(value: unknown): DshProvider[] {
   // 下游取「首个 provider 当默认」，整数样命名可能选到声明顺序之外的那条；这是
   // Object.entries 的枚举契约，不在投影层重排。
   return out;
+}
+/**
+ * 单 provider 命名空间（`llm-deepseek-api-key` 这类整个 section 就是一份 profile）→ DshProvider。
+ *
+ * 与 pi-ai 的 `providers.<name>` 表不同，这里没有外层桶；`settingsPath: []` 就是宿主
+ * 目录对它的声明。`models` 既可能是对象数组（DeepSeek 的 catalog model）也可能是字符串，
+ * 两种都按 id 归一；空数组留给卡片走自由输入，不伪造模型列表。
+ */
+export function providerFromProfile(value: unknown, profile: ProviderDefault): DshProvider | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const rawApiKeyEnv = typeof value["apiKeyEnv"] === "string" ? value["apiKeyEnv"].trim() : "";
+  const apiKeyEnv = CREDENTIAL_ENV_KEY.test(rawApiKeyEnv) ? rawApiKeyEnv : null;
+  const apiKeyEnvInvalid = apiKeyEnv === null && rawApiKeyEnv !== "" ? rawApiKeyEnv : null;
+  const baseURL = baseUrlOf(value["baseURL"], profile.defaultBaseURL);
+  if (baseURL === null) {
+    return null;
+  }
+  const modelsRaw = value["models"];
+  const models = (Array.isArray(modelsRaw) ? modelsRaw : []).flatMap((model) => {
+    if (typeof model === "string") {
+      return model.trim() === "" ? [] : [{ id: model.trim(), name: model.trim() }];
+    }
+    const parsed = modelFromRaw(model);
+    return parsed === null ? [] : [parsed];
+  });
+  const displayName = typeof profile.displayName === "string" ? profile.displayName.trim() : "";
+  return {
+    name: profile.provider,
+    displayName: displayName === "" ? profile.provider : displayName,
+    apiKeyEnv,
+    apiKeyEnvInvalid,
+    // DeepSeek 的官方 route 走 OpenAI Chat Completions；路线目录不声明协议时按这条。
+    protocol: "openai",
+    baseURL,
+    models,
+  };
 }

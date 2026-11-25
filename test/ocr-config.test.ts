@@ -34,7 +34,7 @@ import {
   providersForCard,
   resolveOcrConfigPath,
 } from "../lib/ocr-config.ts";
-import { providersFromSettingsValue } from "../lib/provider-projection.ts";
+import { providerFromProfile, providersFromSettingsValue } from "../lib/provider-projection.ts";
 import { markKeyFlags, PI_AI_NAMESPACE, readProviders } from "../lib/provider-source.ts";
 import {
   ConfigWriteConflictError,
@@ -50,7 +50,7 @@ import {
   writeConfigAtomic,
 } from "../lib/config-store.ts";
 import type { AppliedConfig, CardPayload } from "../lib/ocr-config.ts";
-import type { DshProvider } from "../lib/provider-projection.ts";
+import type { DshProvider, ProviderDefault } from "../lib/provider-projection.ts";
 import type { ProviderDescriptor, ProviderSource } from "../lib/provider-source.ts";
 import type { OcrPaths, SelectInput } from "../lib/config-store.ts";
 import { MESSAGES, format } from "../lib/messages.ts";
@@ -76,8 +76,18 @@ const SENSENOVA_MODEL = "deepseek-v4-flash";
 const SENSENOVA_LITE_MODEL = "sensenova-6.8-flash-lite";
 const SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1";
 const DEEPSEEK_NAME = "deepseek";
+const DEEPSEEK_ROUTE = "deepseek-official";
+const DEEPSEEK_NS = "llm-deepseek-api-key";
+/** 目录把 DeepSeek section 改名后的样本（改名仍算 DeepSeek 是正式支持面）。 */
+const DEEPSEEK_RENAMED_NS = "renamed-deepseek";
+const DEEPSEEK_KEY = "DEEPSEEK_API_KEY";
+const DEEPSEEK_REASONER = "deepseek-reasoner";
+const DEEPSEEK_LABEL = "DeepSeek Chat";
+const DEEPSEEK_DISPLAY = "DeepSeek API";
 const DEEPSEEK_MODEL = "deepseek-chat";
 const DEEPSEEK_URL = "https://api.deepseek.com";
+/** 自定义 provider 的 baseURL 为空时用的名字（同一字面量在入参与断言各出现一次）。 */
+const CUSTOM_EMPTY_NAME = "custom-empty";
 /** parseApiKeyCmd 用例共用的样本脚本路径与 amd 那条的真实型号。 */
 const SAMPLE_SCRIPT = "/a/get-cred.mjs";
 const AMD_MODEL = "DeepSeek-V4-Flash";
@@ -384,6 +394,132 @@ describe("describe() 命名空间值里的防御分支", () => {
     expect(withResponses.find((providerCfg) => providerCfg.name === "noBaseUrl")).toBeUndefined();
   });
 
+  it("宿主目录的 defaultBaseURL 补齐 settings 省略的 baseURL；没有默认值的仍丢弃", () => {
+    const catalog: ProviderDefault[] = [
+      {
+        provider: "catalog",
+        displayName: "Catalog",
+        settingsNs: "llm-pi-ai",
+        defaultBaseURL: "https://catalog.example/v1",
+      },
+    ];
+    const value = { providers: { catalog: { models: [{ id: "cat-model", name: "Cat" }] } } };
+    const withDefault = providersFromSettingsValue(value, catalog);
+    expect(withDefault).toHaveLength(1);
+    expect(withDefault[0]?.baseURL).toBe("https://catalog.example/v1");
+    expect(withDefault[0]?.models[0]?.id).toBe("cat-model");
+    expect(providersFromSettingsValue(value)).toStrictEqual([]);
+  });
+
+  it("单 section 的 DeepSeek profile（settingsPath 为空）投影成一个 provider", () => {
+    const profile: ProviderDefault = {
+      provider: DEEPSEEK_ROUTE,
+      displayName: DEEPSEEK_DISPLAY,
+      settingsNs: DEEPSEEK_NS,
+      defaultBaseURL: DEEPSEEK_URL,
+    };
+    const projected = providerFromProfile(
+      {
+        apiKeyEnv: DEEPSEEK_KEY,
+        models: [{ id: DEEPSEEK_MODEL, name: DEEPSEEK_LABEL }, DEEPSEEK_REASONER],
+      },
+      profile,
+    );
+    expect(projected).toStrictEqual({
+      name: DEEPSEEK_ROUTE,
+      displayName: DEEPSEEK_DISPLAY,
+      apiKeyEnv: DEEPSEEK_KEY,
+      apiKeyEnvInvalid: null,
+      protocol: "openai",
+      baseURL: DEEPSEEK_URL,
+      models: [
+        { id: DEEPSEEK_MODEL, name: DEEPSEEK_LABEL },
+        { id: DEEPSEEK_REASONER, name: DEEPSEEK_REASONER },
+      ],
+    });
+    const { defaultBaseURL: _unused, ...withoutBase } = profile;
+    expect(providerFromProfile({ apiKeyEnv: DEEPSEEK_KEY }, withoutBase)).toBeNull();
+  });
+
+  it("单 section 的非法 key / 空白模型 / 空 displayName 都被归一，不把坏值带进配置", () => {
+    const profile: ProviderDefault = {
+      provider: DEEPSEEK_ROUTE,
+      displayName: "",
+      settingsNs: DEEPSEEK_NS,
+      defaultBaseURL: DEEPSEEK_URL,
+    };
+    const projected = providerFromProfile({ apiKeyEnv: "BAD KEY", models: ["", {}, "m"] }, profile);
+    expect(projected).toMatchObject({
+      apiKeyEnv: null,
+      apiKeyEnvInvalid: "BAD KEY",
+      displayName: DEEPSEEK_ROUTE,
+      models: [{ id: "m", name: "m" }],
+    });
+    const absent = providerFromProfile({ models: [] }, profile);
+    expect(absent).toMatchObject({ apiKeyEnv: null, apiKeyEnvInvalid: null });
+    // 目录来自宿主运行时值，displayName 缺字段时不能对 undefined 调 .trim() 把整张卡打穿。
+    const missingDisplay = {
+      provider: DEEPSEEK_ROUTE,
+      settingsNs: DEEPSEEK_NS,
+      defaultBaseURL: DEEPSEEK_URL,
+    } as unknown as ProviderDefault;
+    expect(providerFromProfile({ models: [] }, missingDisplay)).toMatchObject({
+      displayName: DEEPSEEK_ROUTE,
+    });
+  });
+
+  it("providerFromProfile 对非对象值回 null；目录按 settingsNs 改名后仍认 DeepSeek，坏 profile 也报实际 section", () => {
+    const profile: ProviderDefault = {
+      provider: DEEPSEEK_ROUTE,
+      displayName: DEEPSEEK_DISPLAY,
+      settingsNs: DEEPSEEK_RENAMED_NS,
+    };
+    expect(providerFromProfile("not-profile", profile)).toBeNull();
+    const renamed = makeGateway({
+      descriptors: [
+        { ns: DEEPSEEK_RENAMED_NS, value: { apiKeyEnv: DEEPSEEK_KEY, baseURL: DEEPSEEK_URL } },
+      ],
+    });
+    renamed.configurableProviders = () => [profile];
+    const read = readProviders(renamed, zh);
+    expect(read.providers.map((entry) => entry.name)).toStrictEqual([DEEPSEEK_ROUTE]);
+    const fallback = makeGateway({
+      descriptors: [{ ns: DEEPSEEK_NS, value: { apiKeyEnv: DEEPSEEK_KEY, baseURL: DEEPSEEK_URL } }],
+    });
+    fallback.configurableProviders = () => [];
+    const fallbackRead = readProviders(fallback, zh);
+    expect(fallbackRead.providers.map((entry) => entry.name)).toStrictEqual([DEEPSEEK_ROUTE]);
+    expect(fallbackRead.providers[0]?.displayName).toBe(zh.providerDeepSeekFallbackName);
+    const invalid = makeGateway({ descriptors: [{ ns: DEEPSEEK_NS, value: {} }] });
+    invalid.configurableProviders = () => "nope" as unknown as [];
+    const invalidRead = readProviders(invalid, zh);
+    expect(invalidRead.providers).toStrictEqual([]);
+    // profile 存在但既没有 settings baseURL、目录也没有 defaultBaseURL：这是配置读不出来，
+    // 不是「没配 provider」，不能退回 ready + 空清单。
+    expect(invalidRead.source.status).toBe(SETTINGS_FAILED);
+    expect(invalidRead.source.message).toContain(DEEPSEEK_NS);
+    // 目录把 settingsNs 改名后，坏 profile 的错误必须点名实际 section，不能固定写默认 ns。
+    const renamedInvalid = makeGateway({
+      descriptors: [{ ns: DEEPSEEK_RENAMED_NS, value: {} }],
+    });
+    renamedInvalid.configurableProviders = () => [profile];
+    const renamedInvalidRead = readProviders(renamedInvalid, zh);
+    expect(renamedInvalidRead.providers).toStrictEqual([]);
+    expect(renamedInvalidRead.source.status).toBe(SETTINGS_FAILED);
+    expect(renamedInvalidRead.source.message).toContain(DEEPSEEK_RENAMED_NS);
+    expect(renamedInvalidRead.source.message).not.toContain(DEEPSEEK_NS);
+  });
+
+  it("可选的 provider 目录抛错时不连坐 pi-ai 清单，只按空目录继续投影", () => {
+    const gateway = makeGateway();
+    gateway.configurableProviders = () => {
+      throw new Error("catalog service blew up");
+    };
+    const read = readProviders(gateway, zh);
+    expect(read.source.status).toBe("ready");
+    expect(read.providers.map((entry) => entry.name)).toContain("sensenova");
+  });
+
   it("命名空间值顶层不是对象 / providers 不是对象 ⇒ 一律空列表（读侧宽容，写侧才抛）", () => {
     expect(providersFromSettingsValue(undefined)).toStrictEqual([]);
     expect(providersFromSettingsValue("nope")).toStrictEqual([]);
@@ -499,6 +635,22 @@ describe("readProviders：官方通道的四种降级", () => {
     expect(source.message).toMatch(/provider field blew up/u);
   });
 
+  it("只装配 llm-deepseek-api-key 时也列出 deepseek-official，不只认 pi-ai", () => {
+    const deepseekDescriptor = {
+      ns: DEEPSEEK_NS,
+      value: {
+        apiKeyEnv: DEEPSEEK_KEY,
+        baseURL: "https://api.deepseek.example",
+        models: [{ id: DEEPSEEK_MODEL, name: DEEPSEEK_LABEL }],
+      },
+    };
+    const gateway = makeGateway({ descriptors: [deepseekDescriptor] });
+    const { providers, source } = readOf(gateway);
+    expect(source.status).toBe("ready");
+    expect(providers.map((entry) => entry.name)).toStrictEqual([DEEPSEEK_ROUTE]);
+    expect(providers[0]?.baseURL).toBe("https://api.deepseek.example");
+  });
+
   it("providers 键是敌意 getter ⇒ 与键缺席同形（namespace-unavailable），不穿破不抛契约", () => {
     // shared 的 fieldOf 把读取抛错收成「取不到」：敌意键和「没配 providers」在这个读取处
     // 不可区分，一律按 namespace-unavailable。仍能区分的故障形态（describe 形状、
@@ -529,6 +681,27 @@ describe("markKeyFlags", () => {
       ["antdigital", false],
     ]);
     expect(gateway.describedRefs).toStrictEqual(ALL_REFS);
+  });
+
+  it("hasKey 与 apply 同一把可达性闸：env/project-env 层不算可选", async () => {
+    const gateway = makeGateway({
+      configured: ALL_REFS,
+      sources: {
+        SENSENOVA_API_KEY: "env",
+        XKIRO_API_KEY: "project-env",
+        AMD_API_KEY: "user-env",
+        ANTDIGITAL_API_KEY: "file",
+      },
+    });
+    const keyed = await markKeyFlags(gateway, providers);
+    expect(keyed.map((entry) => [entry.name, entry.hasKey])).toStrictEqual([
+      ["sensenova", false],
+      ["xkiro", false],
+      ["amd", true],
+      ["antdigital", true],
+    ]);
+    expect(gateway.describedRefs).toStrictEqual(ALL_REFS);
+    expect(gateway.resolvedRefs).toStrictEqual(ALL_REFS);
   });
 
   it("未声明 apiKeyEnv 的 provider 不去问凭据服务", async () => {
@@ -716,11 +889,11 @@ describe("renderSelectedConfig", () => {
     const preset: DshProvider = {
       name: DEEPSEEK_NAME,
       displayName: "DeepSeek",
-      apiKeyEnv: "DEEPSEEK_API_KEY",
+      apiKeyEnv: DEEPSEEK_KEY,
       apiKeyEnvInvalid: null,
       protocol: "openai",
       baseURL: DEEPSEEK_URL,
-      models: [{ id: DEEPSEEK_MODEL, name: "DeepSeek Chat" }],
+      models: [{ id: DEEPSEEK_MODEL, name: DEEPSEEK_LABEL }],
     };
     const out = renderOf({
       existingText: '{"custom_providers":{"keep":{"url":"x"}}}',
@@ -739,6 +912,53 @@ describe("renderSelectedConfig", () => {
     expect(doc.custom_providers[DEEPSEEK_NAME]).toBeUndefined();
     // 不相关的自定义条目不能被这一笔写丢。
     expect(doc.custom_providers["keep"]).toStrictEqual({ url: "x" });
+  });
+
+  it("内置 provider 的 baseURL 为空时省略 url，交给 OCR 的 preset 默认端点", () => {
+    const preset: DshProvider = {
+      name: DEEPSEEK_NAME,
+      displayName: "DeepSeek",
+      apiKeyEnv: DEEPSEEK_KEY,
+      apiKeyEnvInvalid: null,
+      protocol: "openai",
+      baseURL: "",
+      models: [{ id: DEEPSEEK_MODEL, name: DEEPSEEK_LABEL }],
+    };
+    const out = renderOf({
+      existingText: "{}",
+      configLabel: CONFIG_LABEL,
+      providers: [preset],
+      provider: DEEPSEEK_NAME,
+      model: DEEPSEEK_MODEL,
+      apiKeyCmd: cmd,
+    });
+    const doc = JSON.parse(out) as { providers: Record<string, Record<string, unknown>> };
+    expect(doc.providers[DEEPSEEK_NAME]?.["url"]).toBeUndefined();
+    expect(doc.providers[DEEPSEEK_NAME]?.["protocol"]).toBe("openai");
+  });
+
+  it("自定义 provider 的 baseURL 为空时不写空 url，保留既有 url", () => {
+    const custom: DshProvider = {
+      name: CUSTOM_EMPTY_NAME,
+      displayName: CUSTOM_EMPTY_NAME,
+      apiKeyEnv: null,
+      apiKeyEnvInvalid: null,
+      protocol: "openai",
+      baseURL: "",
+      models: [],
+    };
+    const out = renderOf({
+      existingText: '{"custom_providers":{"custom-empty":{"url":"https://keep.example/v1"}}}',
+      configLabel: CONFIG_LABEL,
+      providers: [custom],
+      provider: CUSTOM_EMPTY_NAME,
+      model: "m",
+      apiKeyCmd: cmd,
+    });
+    const doc = JSON.parse(out) as {
+      custom_providers: Record<string, Record<string, unknown>>;
+    };
+    expect(doc.custom_providers[CUSTOM_EMPTY_NAME]?.["url"]).toBe("https://keep.example/v1");
   });
 
   it("provider 不在 dsh 配置列表 / model 不在列表时报错", () => {
@@ -1341,14 +1561,14 @@ describe("migratePlaintextKeys", () => {
       descriptors: descriptorsWithValue({
         providers: {
           deepseek: {
-            apiKeyEnv: "DEEPSEEK_API_KEY",
+            apiKeyEnv: DEEPSEEK_KEY,
             api: "openai-completions",
             baseURL: DEEPSEEK_URL,
-            models: [{ id: DEEPSEEK_MODEL, name: "DeepSeek Chat" }],
+            models: [{ id: DEEPSEEK_MODEL, name: DEEPSEEK_LABEL }],
           },
         },
       }),
-      configured: ["DEEPSEEK_API_KEY"],
+      configured: [DEEPSEEK_KEY],
       sources: { DEEPSEEK_API_KEY: "file" },
     });
     const { migrated, skippedUnknown } = await migrateOf(gateway, paths);
@@ -1357,7 +1577,7 @@ describe("migratePlaintextKeys", () => {
     const doc = JSON.parse(readFileSync(paths.ocrConfigJson, "utf8")) as {
       providers: Record<string, Record<string, unknown>>;
     };
-    expect(doc.providers[DEEPSEEK_NAME]!["api_key_cmd"]).toContain("DEEPSEEK_API_KEY");
+    expect(doc.providers[DEEPSEEK_NAME]!["api_key_cmd"]).toContain(DEEPSEEK_KEY);
     expect(doc.providers[DEEPSEEK_NAME]!["api_key"]).toBeUndefined();
   });
 
@@ -1669,6 +1889,7 @@ describe("配置通道文案双语（en 注入）", () => {
       en.sourceSettingsUnavailable,
       en.sourceSettingsFailed,
       en.sourceNamespaceUnavailable,
+      en.sourceProfileInvalid,
       en.sourceCredentialsUnavailable,
     ]) {
       expect(text).not.toMatch(/[\u4E00-\u9FFF]/u);
@@ -1962,12 +2183,7 @@ describe("repointDanglingKeyScripts", () => {
     const paths = makePaths();
     try {
       const live = { script: paths.getCredScript, dshHome: current.dshHome };
-      const stale = buildApiKeyCmd(
-        "/old/scripts/get-cred.mjs",
-        "DEEPSEEK_API_KEY",
-        "/old/.dsh",
-        zh,
-      );
+      const stale = buildApiKeyCmd("/old/scripts/get-cred.mjs", DEEPSEEK_KEY, "/old/.dsh", zh);
       const doc: Record<string, unknown> = {
         provider: DEEPSEEK_NAME,
         providers: { [DEEPSEEK_NAME]: { api_key_cmd: stale, temperature: 0.1 } },
@@ -1976,7 +2192,7 @@ describe("repointDanglingKeyScripts", () => {
       expect(result.repointed).toStrictEqual([DEEPSEEK_NAME]);
       const entry = (doc["providers"] as Record<string, Record<string, unknown>>)[DEEPSEEK_NAME]!;
       expect(entry["api_key_cmd"]).toBe(
-        buildApiKeyCmd(live.script, "DEEPSEEK_API_KEY", current.dshHome, zh),
+        buildApiKeyCmd(live.script, DEEPSEEK_KEY, current.dshHome, zh),
       );
       expect(entry["temperature"]).toBe(0.1);
     } finally {

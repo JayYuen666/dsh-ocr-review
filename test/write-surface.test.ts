@@ -45,10 +45,17 @@ const RULES: readonly SyncRule[] = [
   { name: "mkdirSync", allowed: isTest },
   { name: "truncateSync", allowed: isTest },
   { name: "writeFileSync", allowed: (file) => file === "lib/config-store.ts" || isTest(file) },
-  { name: "mkdtempSync", allowed: (file) => file === "host.ts" || isTest(file) },
+  {
+    name: "mkdtempSync",
+    allowed: (file) => file === "host.ts" || file === "lib/session-tool.ts" || isTest(file),
+  },
   {
     name: "rmSync",
-    allowed: (file) => file === "host.ts" || file === "lib/config-store.ts" || isTest(file),
+    allowed: (file) =>
+      file === "host.ts" ||
+      file === "lib/session-tool.ts" ||
+      file === "lib/config-store.ts" ||
+      isTest(file),
   },
 ];
 

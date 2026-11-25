@@ -54,8 +54,8 @@
 ## <img src="https://api.iconify.design/lucide/shield.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 它做什么
 
 - **设置卡还承载两块管理区**：可校验的 MCP servers JSON 编辑器（保存只改 `mcp_servers`），以及报告 `ocr auth` 登录态并切换 OCR provider/model 的 ChatGPT 区。两块都由人操作，不是模型工具（stdio MCP server 会执行命令，OAuth 登录需要浏览器与本地回调）。
-- **把外部 `ocr`（open-code-review）CLI 封装成七个模型工具。** 宿主不校验工具的入参，形状、类型和枚举的关卡全在本包里：用户可控的字符串一律做单引号转义，枚举一律按白名单取值，类型不对直接报错——不会静默缩小或扩大审查范围。
-- **一张设置卡片**（client 半）从宿主自己的 `llm-pi-ai` 设置条目取 provider/model 清单、从宿主凭据服务取 key 状态。两个服务缺席时卡片显示降级原因，工具与设置照常可用。
+- **把外部 `ocr`（open-code-review）CLI 封装成七个模型工具，Web Client 里用 shared v3 工具行。** 七个 wire 名各注册一条 keyed `tool.call.toolview` 槽；每行是 shared `ToolRow` + `ToolRowGrid`，只画宿主真实投射的字段（参数与结果 JSON），不把原始大输出再复制一遍。宿主不校验工具的入参，形状、类型和枚举的关卡全在本包里：用户可控的字符串一律做单引号转义，枚举一律按白名单取值，类型不对直接报错——不会静默缩小或扩大审查范围。
+- **一张设置卡片**（client 半）从宿主模型命名空间取 provider/model 清单（`llm-pi-ai`，外加单 section 的 `llm-deepseek-api-key` 里的 `deepseek-official`），从宿主凭据服务取 key 状态。目录里的 `defaultBaseURL` 会补齐 settings 省略的端点；目录没有模型时改用模型 ID 自由输入，不画空下拉。服务缺席时卡片显示降级原因，工具与设置照常可用。
 - **应用一次选择写的是 CLI 自己的 `~/.opencodereview/config.json`**——写进去的是 `api_key_cmd` 命令，OCR 运行期经它读宿主凭据 ref；本包不把明文 key 写进 `config.json`，但首次改写前复制的 `.bak` 保留改写前的整份内容，其中可能有迁移前的明文 key（权限 0600），迁移后自行删除该备份。
 - **评审结果是一份结构化摘要，字段分两组含义**：OCR 审出了什么（`status`/`aggregation`/`topComments`/`warnings`），以及这一场有没有真把选中的文件审完（`coverage`/`budgetExceeded`/`toolCalls`）。CLI 以 `--audience agent` 调用，进度输出被它压掉——后一组只能从这些字段里读出来。
 - **CLI 的可得性只有一处判断**（`lib/cli.ts` 的 `resolveOcrAvailability`）：只读文件系统、绝不起进程、每次调用重新读一遍。设置卡的状态行、插件详情页的徽标和启用指引显示的都是这同一份结论，「用的是哪一份」不许有三种说法。
@@ -81,11 +81,11 @@ dsh plugin --profile web add @jayyuen66/dsh-ocr-review
 
 ## <img src="https://api.iconify.design/lucide/terminal.svg?color=%23658EFF&height=22" height="22" width="22" align="absmiddle" alt="" /> 外部 CLI
 
-本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.14.2** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
+本包只 spawn `ocr`，从不安装或升级它。命令契约按 **1.14.3** 核对（`lib/cli.ts` 的 `EXPECTED_OCR_CLI_VERSION`，版本号只在 package.json 的 `ocrCliVersion` 声明一次——测试把 manifest、代码常量与两侧 README 钉成同一个串）。
 
 ```sh
 brew install open-code-review                        # formula 只跟上游最新版
-npm i -g @alibaba-group/open-code-review@1.14.2      # 钉在本包核对的那一版
+npm i -g @alibaba-group/open-code-review@1.14.3      # 钉在本包核对的那一版
 ```
 
 - **brew 钉不住版本。** `homebrew/core` 里只有一份 stable formula、没有版本化变体，`brew install` / `brew upgrade` 拿到的永远是上游最新。带得上核对版本的只有 npm 那条。
@@ -123,10 +123,10 @@ npm i -g @alibaba-group/open-code-review@1.14.2      # 钉在本包核对的那�
 | 工具 | 入参与约束 |
 | --- | --- |
 | `ocr_review` | repo（绝对路径，缺省=当前会话工作区）、scope workspace/commit/branch（branch 必须给 from；to 可省略——OCR 1.13.10 起只给 from 时默认以 HEAD 收尾——且与 commit 互斥）、effort、background、exclude、provider/model/resume——workspace/commit/branch 三种都支持 resume（OCR 1.13.10 起）；能不能恢复由 OCR 自己按 identity 判，被拒时插件把英文原文转成中文提示。analysis / analysisMaxTokensBudget（OCR 1.14 的行为/影响分析；仅 commit 或 branch，不能与 preview/resume 同用；wait=true 时报告以 `analysis` 返回，后台模式的结果在会话的 `analysis/` 目录；分析失败不改变 review 结果）。preview（只做文件选择）、noFilter、maxGitProcs、rule/backgroundFile（仅 repo 根内文件）、wait |
-| 数值参数组（review 与 scan） | concurrency / timeoutMinutes / maxTools / maxTokens / maxTokensBudget，落 `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`。取值忠实透传；下限 concurrency 为 1、其余为 0，非整数或低于下限直接报错，不钳制 |
+| 数值参数组（review 与 scan） | concurrency / timeoutMinutes / maxTools / maxTokens / maxTokensBudget，落 `--concurrency` `--timeout` `--max-tools` `--max-tokens` `--max-tokens-budget`。这里的 `timeoutMinutes` 是**工具参数**（OCR 的 `--timeout`），不是设置卡里的 `foregroundWaitMinutes`；取值忠实透传，下限 concurrency 为 1、其余为 0，非整数或低于下限直接报错，不钳制 |
 | `ocr_scan` | repo、path、exclude、batch none/by-language/by-directory、provider/model（CLI 原生共享旗标）、同一组数值参数、maxTools（只升不降：低于模板默认 60 完全无效）、maxTokens（模板默认 58888 会撞 80% 提示词闸门）、preview、noPlan/noDedup/noSummary、resume、maxGitProcs、rule（repo 根内文件）、wait。扫描深度这几个旋钮缺省会取设置卡里的值（scanMaxTokens / scanConcurrency / scanMaxTools / scanNoPlan / scanNoDedup），模型显式传参优先。repo 规范到 git 顶层（path/exclude 从原目录重基，扫描范围不变），这样子目录发起的扫描会话也能被 `ocr_session` 查到。整仓扫描，无需 git diff |
-| `ocr_delegate_preview` / `ocr_delegate_rule` | preview：repo、scope/commit/from/to、exclude、background、backgroundFile/rule/maxGitProcs；返回完整文件清单与 totalFiles/reviewableCount/excludedCount（不截断）。rule：repo 加 paths——必填、最多 200 条、经 `--` 分隔作位置参数、逐条转义——外加 rule。OCR 端零 LLM 消耗：只回文件清单与规则分组 |
-| `ocr_session` | repo、action list/show/comments/compare/export、id、before/after（compare）、severity/category（comments 过滤）、branch（list 过滤；精确匹配、先过滤后 limit——show/comments 带 id 时拒绝）、limit——缺省 10；显式给出必须是 1–100 的整数，越界报错而不是钳制。compare 返回四桶，export 返回 HTML 路径（旧导出目录按 TTL 由后续导出自动清理） |
+| `ocr_delegate_preview` / `ocr_delegate_rule` | preview：repo、scope/commit/from/to、exclude、background、backgroundFile/rule/maxGitProcs；返回每个桶最多 1000 条文件清单（`reviewableDropped` / `excludedDropped` 报告省略条数），`totalFiles` / `reviewableCount` / `excludedCount` 仍按完整清单计数。rule：repo 加 paths——必填、最多 200 条、经 `--` 分隔作位置参数、逐条转义——外加 rule（repo 根内 JSON）。OCR 端零 LLM 消耗：只回文件清单与规则分组 |
+| `ocr_session` | repo、action list/show/comments/compare/export、id、before/after（compare）、severity/category（comments 过滤）、branch（list 过滤；精确匹配、先过滤后 limit——show/comments 带 id 时拒绝）、limit（list，缺省 10；1–100）、commentLimit（comments，缺省 100；1–500）、includeThinking（comments，缺省 false——thinking 往往是最大字段）。list/show/comments 返回结构化投影：摘要带身份、范围、计数、`run_manifest` 终态/失败归因/覆盖度，以及启用 analysis 时的 `analysisDir`；comments 默认省略 `thinking`。compare 返回四桶；export 返回 HTML 路径并核对文件确实存在（旧导出目录按 TTL 由后续导出自动清理） |
 | `ocr_rules_check` | repo、path（必填）、rule（repo 根内文件）：打印命中的规则层、glob 与正文；不调 LLM |
 | `ocr_llm` | action providers/models：只读查询 LLM 清单；不评审、不测连通性 |
 | 清单上限 | exclude 和 path 各收 2000 条；超过上限直接拒绝整次调用。条目绝不静默丢掉——「比清单少审了几份」不许报成成功 |
@@ -137,13 +137,20 @@ npm i -g @alibaba-group/open-code-review@1.14.2      # 钉在本包核对的那�
 
 命名空间是条目 id `ocr-review`；卡片上的字段是 `.volatile()` 的那几枚。
 
+**四个 timeout 不要混用：**
+
+- `foregroundWaitMinutes`（设置卡）：只影响 `wait=true` 时宿主 shell 等 ocr 的墙钟；0/未设置 = 请求宿主上限。不是 OCR 的 `--timeout`。
+- `timeoutMinutes`（`ocr_review` / `ocr_scan` 的工具参数）：本次调用透传给 OCR 的 `--timeout`，按每组/每文件任务计；与设置卡无关。
+- `toolTimeoutMs`（部署键）：宿主 `ToolDefinition.timeoutMs` 的兜底天花，超时归因是 `TOOL_TIMEOUT`；默认后台不经过它。
+- `ocrBackgroundMaxMs`（部署键）：`wait=false` 后台作业的兜底回收窗口；0 = 不设窗口。
+
 | 字段 | 取值、默认与用途 |
 | --- | --- |
 | `effort` | auto/low/medium/high，内置默认 auto；`auto` 不传 `--effort`，让 OCR 自己的配置生效。`ocr_review` 未显式传 effort 时用它。**只对 review 生效**——OCR 只在 review 上注册 `--effort`，而它唯一改变的 `MaxReviewRounds` 在 scan 模板里不存在，调它不会让扫描更深；扫描深度看下面 `scan*` 那组 |
 | `language` | 中文/English，默认 中文；应用选择时作为顶层 `language` 键写进 CLI config |
 | `autoVerify` | 默认 true；select 成功后自动跑一次 `ocr llm test`（上限由 `llmTestTimeoutMs` 管） |
 | `maxComments` | 默认 12，即摘要保留条数；0 = 不截断，非整数或负数回退 12 |
-| `timeoutMinutes` | 默认 0 = 向宿主要上限（宿主按 min(请求, shell.maxTimeoutMs) 收敛，`bash-local` 默认 10 分钟）；大于 0 表示分钟数，由**本插件**计时兜底（关掉 `onExpiry`，宿主的钳制不会把它截短） |
+| `foregroundWaitMinutes` | 默认未设置（按 0 处理）= 向宿主要上限；只作用于 `wait=true` 的前台等待，不是 OCR 的 `--timeout`。正数是分钟数，由**本插件**计时兜底（关掉 `onExpiry`，宿主的钳制不会把它截短）。旧 profile 的 `timeoutMinutes` 设置名仍会被读取一次；把这一项改动并保存后写入新名，不动它时旧值继续生效 |
 | `ocrConfigPath` | CLI 配置的位置；留空按 `<home>/.opencodereview/config.json` 派生，接受 `~` 与 `~/` 前缀，相对路径直接报错。自定义值必须是 `<X>/.opencodereview/config.json` 布局——CLI 没有配置文件级的路径覆盖，插件靠给子进程注入 `HOME=<X>` 让它生效（config 与 sessions 一并重定向）；布局外的路径在设置层就拒绝。仅 POSIX：Windows 无此通道 |
 | `scanMaxTokens` | 默认 0 = 不传 `--max-tokens`、用 OCR 模板的 58888。OCR 在提示词超过它的 80%（47110）时会告警并收敛，大文件反复撞这道闸时把它调大 |
 | `scanConcurrency` | 默认 0 = 不传 `--concurrency`、用 OCR 模板的 8。想对 provider 限速更温和就调小（OCR 内部仍会自己重试） |
@@ -159,7 +166,7 @@ npm i -g @alibaba-group/open-code-review@1.14.2      # 钉在本包核对的那�
 | `scanMaxTools` | `0` | `ocr_scan` 的 `--max-tools` 缺省值；0 = 不传、用模板的 60。scan 侧**只升不降**：小于 60 完全无效（把 1-49 抬到 50 的是 review 那条链） |
 | `scanNoPlan` | `false` | 缺省就给 `--no-plan`：跳过逐文件的 plan 预检（不足 200 行的文件本来就会跳过） |
 | `scanNoDedup` | `false` | 缺省就给 `--no-dedup`：跳过批内去重那道任务 |
-| `toolTimeoutMs` | `3600000` | 交给宿主的兜底天花（`ToolDefinition.timeoutMs`，rc.2 的 timeout 策略按它截止、超时报 `TOOL_TIMEOUT`）。它**不是**一次评审的时长预算：`timeoutMinutes` 大于 0 时本包走 `onExpiry: "none"` 加自管截止，刻意绕开 `shell.maxTimeoutMs`，所以一次全仓 `ocr_scan` 跑几个小时是正常的。把这一枚压到接近 `shell` 上限的值会掐断一次正常的长审查，而痕迹只有宿主那句 `tool call timed out`——本包自己的超时归因根本没机会说话。默认 1 小时覆盖「几小时」这一档，同时仍是一条有限的兜底；`timeoutMinutes` 配到 1 小时以上的部署请同步抬这一枚。与 `timeoutMinutes` 不同，它不能是 volatile：宿主在 `tools.register` 时校验一次，之后从不重算 |
+| `toolTimeoutMs` | `3600000` | 交给宿主的兜底天花（`ToolDefinition.timeoutMs`，rc.2 的 timeout 策略按它截止、超时报 `TOOL_TIMEOUT`）。它**不是**一次评审的时长预算，也只兜前台工具调用（`wait=true`）；默认 `wait=false` 的后台启动即返回，不经过它。`foregroundWaitMinutes` 大于 0 时本包走 `onExpiry: "none"` 加自管截止，刻意绕开 `shell.maxTimeoutMs`。默认 1 小时只约束前台调用；几小时级审查请用后台，或同步抬高 `foregroundWaitMinutes` 与这一枚——只压这一枚会在正常长审查中途由宿主掐断，而痕迹只有宿主那句 `tool call timed out`，本包自己的超时归因根本没机会说话。与 `foregroundWaitMinutes` 不同，它不能是 volatile：宿主在 `tools.register` 时校验一次，之后从不重算 |
 | `ocrNoAutoUpdate` | `false` | 置真时本包起的每条命令都带 `OCR_NO_UPDATE=1`，拦住上游在评审中途把新版 `npm i -g` 装上；置假保持上游行为。版本探测不受本开关影响，恒定带上该变量 |
 | `ocrInstallHint` | `both` | 还没装时先推哪条装法：`both` / `brew` / `npm`。只是兜底而不是强制——机器上已经有一份时按那份自己的来源说，因为对着 brew 用户端出 `npm i -g` 会多出第二份、PATH 上还是旧的。npm 那条恒带核对版本，brew 那条恒带不了 |
 | `ocrSandbox` | `full` | ocr 子进程的文件围栏。`full` 一律请求 `danger-full-access`（0.1.14 起的既有行为：ocr 的状态在 `$HOME/.opencodereview`、落在工作区之外，收窄后跑完的评审会在 `finalize session` 处丢掉）。`inherit` 改为跟随宿主执行器自报的沙箱模式：`workspace-write` 收窄到工作区根，另加 OCR 状态目录与系统临时区的 `additionalWritableRoots`；`read-only` 与认不出的模式直接拒绝；Windows 上的 `workspace-write` 也直接拒绝——dsh 0.2.2-rc.2 起 Windows 的额外可写目录只作用于文件工具、不下发给受限子进程，OCR 的状态目录放不进去。继承档不带上部署自己配的 `additionalWritableRoots`——要放行更多路径的部署请用 `full` |

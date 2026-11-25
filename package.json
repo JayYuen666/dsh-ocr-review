@@ -1,6 +1,6 @@
 {
   "name": "@jayyuen66/dsh-ocr-review",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "dsh 工作区代码审查插件：把 open-code-review（ocr CLI）封装为 7 个模型工具 + 设置卡片（从宿主设置服务的 provider 清单选 provider/model 应用到 OCR 配置）。",
   "keywords": [
     "ai-code-review",
@@ -79,11 +79,14 @@
     "@deepseek-ai/dsh-bash-local": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-locale": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-store": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-ui-layout": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-ui-tool": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-credentials": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-error": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-home-paths": "0.2.3-alpha.2",
@@ -109,6 +112,7 @@
     "@deepseek-ai/dsh-tools": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-typert-protocol": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-user-approval": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-user-questions": "0.2.3-alpha.2",
     "@deepseek-ai/schemastery": "3.20.0-alpha.1",
     "@e18e/eslint-plugin": "catalog:",
     "@types/node": "catalog:",
@@ -154,5 +158,5 @@
       ]
     }
   },
-  "ocrCliVersion": "1.14.2"
+  "ocrCliVersion": "1.14.3"
 }

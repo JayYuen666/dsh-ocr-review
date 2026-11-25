@@ -210,7 +210,7 @@ interface FakeShell {
 /** 从（被宿主回收守护二次转义的）命令串里取 --output 路径。 */
 function outputPathOf(command: string): string | undefined {
   const normalized = command.replaceAll(String.raw`'\''`, "'");
-  return /--output '(?<path>[^']+)'/u.exec(normalized)?.groups?.["path"];
+  return /(?:--output|-o) '(?<path>[^']+)'/u.exec(normalized)?.groups?.["path"];
 }
 
 function withResolvers(): { promise: Promise<void>; resolve: () => void } {
@@ -705,6 +705,9 @@ interface FakeHostOptions {
   skills?: boolean;
   /** true ⇒ describe/resolve 直接 reject（宿主侧凭据服务故障，不该把卡片打成 500）。 */
   credentialsReject?: boolean;
+  /** false ⇒ get("llm") 缺席；true ⇒ listConfigurableProviders 抛错。 */
+  llmService?: boolean;
+  llmReject?: boolean;
   /** true ⇒ resolve 命中但值是空串（凭据层的「空值即不存在」规则）。 */
   emptyValue?: boolean;
   /**
@@ -787,7 +790,7 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
       language: "中文",
       autoVerify: true,
       maxComments: 12,
-      timeoutMinutes: 0,
+      foregroundWaitMinutes: 0,
       // 装载期自检默认关：它会起一次 `ocr version` 子进程，而本文件大量用例断言
       // 「apply 不产生子进程」。要测自检的用例自己把它置 true（见「装载期自检」组）。
       // 上游端点不在装载期验，所以这里没有第二个开关。
@@ -881,6 +884,21 @@ function makeHost(options: FakeHostOptions = {}): FakeHost {
         };
       } else if (name === "settings" && options.settingsService !== false) {
         service = host.settings;
+      } else if (name === "llm" && options.llmService !== false) {
+        service = {
+          listConfigurableProviders: () => {
+            if (options.llmReject === true) {
+              throw new Error("llm provider catalog unavailable");
+            }
+            return [
+              {
+                provider: "deepseek-official",
+                displayName: "DeepSeek API",
+                settingsNs: "llm-deepseek-api-key",
+              },
+            ];
+          },
+        };
       } else if (name === "jobs" && options.jobs !== false) {
         service = host.jobs;
       } else if (name === "skills" && options.skills !== false) {
@@ -948,13 +966,13 @@ function schemaDefaults(): Record<string, unknown> {
 const EDITABLE = [
   "autoVerify",
   "effort",
+  "foregroundWaitMinutes",
   "language",
   "maxComments",
   "ocrConfigPath",
   // ocr_scan 的两个常用旋钮：模型调用本身就在探「该多深/多快」，改完下一次调用就生效。
   "scanConcurrency",
   "scanMaxTokens",
-  "timeoutMinutes",
 ];
 
 /** 字段化的部署值：在 Config 里但**不标** volatile ⇒ 只在行 config 上改。 */
@@ -974,6 +992,9 @@ const DEPLOYMENT = [
   "scanNoDedup",
   "scanNoPlan",
 ];
+
+/** 旧设置名的迁移面：不在表单、不是部署调优值，但必须留在 schema 里供旧 profile 读取。 */
+const LEGACY = ["timeoutMinutes"];
 
 /**
  * 复刻 cordis 交进 apply 的那份 Config：**volatile** 字段是稳定引用、其 get() 现读
@@ -1425,7 +1446,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       // 期望值独立写死（不从实现派生）。
       //
       // 这一格早先按「宿主 bash-local 的 maxTimeoutMs 默认 10 分钟 + git 探测 10 秒」
-      // 算成 15 分钟，**那是错的**：`timeoutMinutes` 非 0 时本包走 `onExpiry: "none"`
+      // 算成 15 分钟，**那是错的**：`foregroundWaitMinutes` 非 0 时本包走 `onExpiry: "none"`
       // 加自管截止（lib/run-scope.ts 的 `runExpiry`），刻意绕开宿主那道上限，所以一次
       // 全仓 ocr_scan 真的可以跑几个小时。工具级这一枚若按「宿主上限」给，就会在一次
       // 正常的长审查中途把调用掐掉，而模型读到的是宿主那句 `tool call timed out after
@@ -1466,7 +1487,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       const resolved = resolveRowConfig({ effort: "high", language: undefined, maxComments: 3 });
       expect(resolved["effort"]?.get()).toBe("high");
       expect(resolved["maxComments"]?.get()).toBe(3);
-      expect(resolved["timeoutMinutes"]?.get()).toBe(0);
+      expect(resolved["foregroundWaitMinutes"]?.get()).toBeUndefined();
       expect(resolved["ocrConfigPath"]?.get()).toBeUndefined();
     });
 
@@ -1560,7 +1581,11 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
         language: "中文",
         autoVerify: true,
         maxComments: 12,
-        timeoutMinutes: 0,
+        // 新字段不写 schema 默认：undefined 才能让旧设置名作为迁移值被读到。
+        // 运行期 undefined 与 0 都表示「请求宿主上限」，卡片显示 0。
+        foregroundWaitMinutes: undefined,
+        // 0.1.22 及更早的旧名，保留供迁移读取；非 volatile，不进设置卡。
+        timeoutMinutes: undefined,
         // 路径**不给**默认：内置底座一旦写死绝对路径就又回到「作者机器布局」。
         ocrConfigPath: undefined,
         // 部署级那一组：llmTestTimeoutMs / stdoutMaxBytes 与原常量同值，
@@ -1602,9 +1627,9 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       const form = volatileFormOf(plugin.Config as unknown as SchemaNode);
       expect(form).not.toBeNull();
       expect(form?.toSorted()).toStrictEqual(EDITABLE);
-      // Config 的字段全集 = 设置卡八项 + 部署值（后者不进表单，但仍在 schema 上）
+      // Config 的字段全集 = 设置卡八项 + 部署值 + 旧设置名迁移位（后两者不进表单，但仍在 schema 上）
       expect(Object.keys(configDict()).toSorted()).toStrictEqual(
-        [...EDITABLE, ...DEPLOYMENT].toSorted(),
+        [...EDITABLE, ...DEPLOYMENT, ...LEGACY].toSorted(),
       );
     });
   });
@@ -3418,7 +3443,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
     });
 
     it("超时 ⇒ 点名实际生效分钟数与行动建议", async () => {
-      host.settingsValue["timeoutMinutes"] = 3;
+      host.settingsValue["foregroundWaitMinutes"] = 3;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
       await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /实际生效 3 分钟/u,
@@ -3428,8 +3453,8 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
     it("宿主收敛之后 ⇒ 报收敛后的值，不报请求值", async () => {
       // 请求 60 分钟，宿主按 shell.maxTimeoutMs 收敛到 10 分钟：文案自称
       // 「实际生效」，就得打印收敛后的那个数——请求值只会把上限说成天文数字
-      // （timeoutMinutes 留空时请求值是 2^31-1 ms，即 35791 分钟）。
-      host.settingsValue["timeoutMinutes"] = 60;
+      // （foregroundWaitMinutes 留空时请求值是 2^31-1 ms，即 35791 分钟）。
+      host.settingsValue["foregroundWaitMinutes"] = 60;
       host.shell.maxTimeoutMs = 600_000;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
       await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
@@ -3440,7 +3465,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
     });
 
     it("请求值不超过上限时 ⇒ 原样报请求值", async () => {
-      host.settingsValue["timeoutMinutes"] = 10;
+      host.settingsValue["foregroundWaitMinutes"] = 10;
       host.shell.maxTimeoutMs = 600_000;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
       await expect(preview.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
@@ -3532,8 +3557,8 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(spilled).toContain("/tmp/spill.txt");
     });
 
-    it("timeoutMinutes 非法 ⇒ 按 0 处理并请求宿主上限", async () => {
-      host.settingsValue["timeoutMinutes"] = "soon";
+    it("foregroundWaitMinutes 非法 ⇒ 按 0 处理并请求宿主上限", async () => {
+      host.settingsValue["foregroundWaitMinutes"] = "soon";
       host.shell.scripts.push({ stdoutText: "{}" });
       await preview.execute({ repo: "/repo", wait: true }, makeExec());
       expect(host.shell.resolveCalls[0]?.timeoutMs).toBe(2_147_483_647);
@@ -3679,29 +3704,224 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(bad).toMatch(/rule 输出解析失败/u);
     });
 
-    it("session：空会话的提示、超长内容原样透传后截断、action 的白名单", async () => {
+    it("session：空会话的提示、list 走结构化投影、action 的白名单", async () => {
       const session = toolOf(host, "ocr_session");
       host.shell.scripts.push({ stdoutText: "null" });
       const empty = (await session.execute({ repo: "/repo" }, makeExec())) as {
         sessionOutput: string;
       };
       expect(empty.sessionOutput).toMatch(/暂无历史评审会话/u);
-      host.shell.scripts.push({ stdoutText: `${PLAIN_KEY}${"x".repeat(12_500)}` });
+      // comments 的空数组是「该会话没有评论」，不是「没有任何历史会话」；投影必须
+      // 保留 kind/total，否则一次成功的查询会被说成没跑过评审。
+      host.shell.scripts.push({ stdoutText: "[]" });
+      const noComments = (await session.execute(
+        { repo: "/repo", action: "comments", id: "s" },
+        makeExec(),
+      )) as { sessionOutput: string };
+      expect(noComments.sessionOutput).toContain('"kind":"comments"');
+      expect(noComments.sessionOutput).toContain('"total":0');
+      // 超过旧 12KB 闸的 list：投影只保留摘要字段，未知的大字段（这里是 filler）被丢掉，
+      // 因此既不会把 payload 截成假完整，也不会把明文 key 带出去。
+      host.shell.scripts.push({
+        stdoutText: JSON.stringify([
+          {
+            session_id: "s",
+            file_path: "/repo/a.jsonl",
+            repo_dir: "/repo",
+            review_mode: "workspace",
+            selected_files: 2,
+            total_comments: 3,
+            filler: `${PLAIN_KEY}${"x".repeat(12_500)}`,
+          },
+        ]),
+      });
       const long = (await session.execute({ repo: "/repo", action: "list" }, makeExec())) as {
         sessionOutput: string;
       };
-      expect(long.sessionOutput).toContain("[截断]");
+      expect(long.sessionOutput).toContain('"kind":"list"');
+      expect(long.sessionOutput).toContain('"sessionId":"s"');
       expect(long.sessionOutput).not.toContain(PLAIN_KEY);
+      expect(long.sessionOutput).not.toContain("[截断]");
       host.shell.scripts.push({ stdoutText: `[{"session_id":"s","note":"${PLAIN_KEY}"}]` });
       const shown = (await session.execute(
         { repo: "/repo", action: "show", id: "s" },
         makeExec(),
       )) as { sessionOutput: string };
-      expect(shown.sessionOutput).toContain("session_id");
+      expect(shown.sessionOutput).toContain("s");
       expect(shown.sessionOutput).not.toContain(PLAIN_KEY);
       await expect(
         session.execute({ repo: "/repo", action: "rm -rf /" }, makeExec()),
       ).rejects.toThrow(/action 非法/u);
+    });
+
+    it("session comments：stdout 被截断时从 spill 读回完整 JSON，默认省略 thinking", async () => {
+      const session = toolOf(host, "ocr_session");
+      const spill = path.join(HOME, "session-comments-spill.json");
+      writeFileSync(
+        spill,
+        JSON.stringify([
+          {
+            path: "a.ts",
+            content: "正文",
+            thinking: `推理${"x".repeat(8000)}`,
+            severity: "high",
+            category: "bug",
+            start_line: 3,
+            end_line: 4,
+          },
+          { path: "b.ts", content: "第二条", severity: "low" },
+        ]),
+      );
+      // 宿主只交回被截断的 stdout，完整 JSON 在 spillPath；插件必须读回后者。
+      host.shell.scripts.push({
+        stdoutText: '[{"path":"a.ts","content":"截断',
+        stdoutTruncated: true,
+        stdoutSpillPath: spill,
+      });
+      const result = (await session.execute(
+        { repo: "/repo", action: "comments", id: "s" },
+        makeExec(),
+      )) as { sessionOutput: string };
+      const projected = JSON.parse(result.sessionOutput) as {
+        kind: string;
+        total: number;
+        comments: { content: string; thinking?: string }[];
+        thinkingOmitted: number;
+      };
+      expect(projected.kind).toBe("comments");
+      expect(projected.total).toBe(2);
+      expect(projected.comments).toHaveLength(2);
+      expect(projected.comments[0]?.content).toBe("正文");
+      expect(projected.comments[0]?.thinking).toBeUndefined();
+      expect(projected.thinkingOmitted).toBe(1);
+      expect(result.sessionOutput).not.toContain("推理");
+      // 结构化投影仍是模型可见输出：评论正文/代码片段里出现密钥形态时必须脱敏，
+      // 不能因为从 raw 改成 JSON 投影就绕过 output.ts 那道闸。
+      host.shell.scripts.push({
+        stdoutText: JSON.stringify([{ path: "a.ts", content: `正文 ${PLAIN_KEY}` }]),
+      });
+      const redacted = (await session.execute(
+        { repo: "/repo", action: "comments", id: "s" },
+        makeExec(),
+      )) as { sessionOutput: string };
+      expect(redacted.sessionOutput).not.toContain(PLAIN_KEY);
+    });
+
+    it("session 参数守卫、spill 读回失败与 export 缺文件都走可读错误", async () => {
+      const session = toolOf(host, "ocr_session");
+      await expect(
+        session.execute(
+          { repo: "/repo", action: "comments", id: "s", includeThinking: "yes" },
+          makeExec(),
+        ),
+      ).rejects.toThrow(/includeThinking 必须/u);
+      await expect(
+        session.execute(
+          { repo: "/repo", action: "comments", id: "s", commentLimit: 0 },
+          makeExec(),
+        ),
+      ).rejects.toThrow(/commentLimit 需要/u);
+      host.shell.scripts.push({ stdoutText: '[{"path":"a.ts","content":"正文"}]' });
+      const ok = (await session.execute(
+        { repo: "/repo", action: "comments", id: "s", includeThinking: true, commentLimit: 2 },
+        makeExec(),
+      )) as { sessionOutput: string };
+      expect(ok.sessionOutput).toContain('"kind":"comments"');
+      // stdout 被截断但 spill 文件读不回来：退回截断原文，不能把整次调用打成失败。
+      host.shell.scripts.push({
+        stdoutText: '[{"path":"a.ts","content":"trunc',
+        stdoutTruncated: true,
+        stdoutSpillPath: path.join(HOME, "missing-spill.json"),
+      });
+      const fallback = (await session.execute(
+        { repo: "/repo", action: "comments", id: "s" },
+        makeExec(),
+      )) as { sessionOutput: string };
+      expect(fallback.sessionOutput).toContain("trunc");
+      // export exit 0 但 SQLite 没写出 HTML：拒绝而不是把半成品路径交出去。
+      host.shell.scripts.push({ stdoutText: "[]" });
+      await expect(
+        session.execute({ repo: "/repo", action: "export", id: "s" }, makeExec()),
+      ).rejects.toThrow(/预期 HTML 没有出现/u);
+    });
+
+    it("preview：backgroundFile / rule / maxGitProcs 都接线，rule 也进 delegate rule", async () => {
+      const repo = mkdtempSync(path.join(tmpdir(), "ocr-delegate-params-"));
+      writeFileSync(path.join(repo, "rule.json"), "{}");
+      writeFileSync(path.join(repo, "bg.md"), "background");
+      const preview = toolOf(host, "ocr_delegate_preview");
+      host.shell.scripts.push({
+        stdoutText: JSON.stringify({
+          mode: "workspace",
+          repository: repo,
+          total_files: 0,
+          reviewable_files: [],
+          excluded_files: [],
+        }),
+      });
+      await preview.execute(
+        {
+          repo,
+          backgroundFile: "bg.md",
+          rule: "rule.json",
+          maxGitProcs: 4,
+        },
+        makeExec(),
+      );
+      const previewCommand = String(host.shell.resolveCalls.at(-1)?.command);
+      expect(previewCommand).toContain("--background-file");
+      expect(previewCommand).toContain("--rule");
+      expect(previewCommand).toContain("--max-git-procs 4");
+      const rule = toolOf(host, "ocr_delegate_rule");
+      host.shell.scripts.push({
+        stdoutText: JSON.stringify({ schema_version: 1, groups: [] }),
+      });
+      await rule.execute({ repo, paths: ["a.ts"], rule: "rule.json" }, makeExec());
+      expect(String(host.shell.resolveCalls.at(-1)?.command)).toContain("--rule");
+      rmSync(repo, { recursive: true, force: true });
+    });
+
+    it("preview：完整 JSON 超过桶上限时分桶保留 1000 条，并如实报 dropped", async () => {
+      const preview = toolOf(host, "ocr_delegate_preview");
+      const reviewable = Array.from({ length: 1001 }, (entry, index) => {
+        void entry;
+        return {
+          path: `f${index}.ts`,
+          status: "modified",
+          insertions: 1,
+          deletions: 0,
+        };
+      });
+      const excluded = Array.from({ length: 1001 }, (entry, index) => {
+        void entry;
+        return {
+          path: `e${index}.lock`,
+          exclude_reason: "binary",
+        };
+      });
+      host.shell.scripts.push({
+        stdoutText: JSON.stringify({
+          mode: "workspace",
+          repository: "/repo",
+          total_files: 2002,
+          reviewable_files: reviewable,
+          excluded_files: excluded,
+        }),
+      });
+      const result = (await preview.execute({ repo: "/repo" }, makeExec())) as {
+        reviewableFiles: unknown[];
+        excludedFiles: unknown[];
+        reviewableDropped: number;
+        excludedDropped: number;
+        reviewableCount: number;
+        excludedCount: number;
+      };
+      expect(result.reviewableFiles).toHaveLength(1000);
+      expect(result.excludedFiles).toHaveLength(1000);
+      expect(result.reviewableDropped).toBe(1);
+      expect(result.excludedDropped).toBe(1);
+      expect(result.reviewableCount).toBe(1001);
+      expect(result.excludedCount).toBe(1001);
     });
 
     it("session compare：结构化四桶，compare 子命令带两个 -- 后的位置参数", async () => {
@@ -3731,7 +3951,8 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
 
     it("session export：返回 HTML 路径；comments 的 severity/category 进命令", async () => {
       const session = toolOf(host, "ocr_session");
-      host.shell.scripts.push({});
+      // 替身按命令里的 --output 写文件：导出路径必须真的存在，插件才会交回它。
+      host.shell.scripts.push({ output: "<html>review</html>" });
       const exported = (await session.execute(
         { repo: "/repo", action: "export", id: "s1" },
         makeExec(),
@@ -3841,6 +4062,28 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
     it("descriptors() 在 settings 服务缺席时抛可读错，不返回空表", () => {
       const gateway = createGateway(makeHost({ settingsService: false }) as unknown as GatewayArg);
       expect(() => gateway.descriptors()).toThrow(/设置服务/u);
+    });
+
+    it("configurableProviders 透传 llm 目录；服务缺席与抛错都降级为空表", () => {
+      expect(
+        createGateway(makeHost() as unknown as GatewayArg).configurableProviders?.(),
+      ).toStrictEqual([
+        {
+          provider: "deepseek-official",
+          displayName: "DeepSeek API",
+          settingsNs: "llm-deepseek-api-key",
+        },
+      ]);
+      expect(
+        createGateway(
+          makeHost({ llmService: false }) as unknown as GatewayArg,
+        ).configurableProviders?.(),
+      ).toStrictEqual([]);
+      expect(
+        createGateway(
+          makeHost({ llmReject: true }) as unknown as GatewayArg,
+        ).configurableProviders?.(),
+      ).toStrictEqual([]);
     });
 
     it("credentialConfigured 走 describe、credentialSource 走 resolve，只回存在性/层 id", async () => {
@@ -4040,6 +4283,66 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       expect(host.skillsRegistered[0]?.content).toBe(MESSAGES.en.routingText);
     });
 
+    it("工具说明明确 maxComments 是设置项，不是调用参数，且两语都写", () => {
+      const zhHost = makeHost();
+      applyPlugin(zhHost);
+      const zhReview = toolOf(zhHost, "ocr_review");
+      const zhScan = toolOf(zhHost, "ocr_scan");
+      expect(zhReview.description).toContain(
+        "maxComments 是设置卡里的全局设置项，不是 ocr_review 的调用参数",
+      );
+      expect(zhScan.description).toContain(
+        "maxComments 是设置卡里的全局设置项，不是 ocr_scan 的调用参数",
+      );
+      expect(
+        Object.keys((zhReview.parameters as { properties: Record<string, unknown> }).properties),
+      ).not.toContain("maxComments");
+
+      const enHost = makeHost({ locale: { preference: "en-US" } });
+      applyPlugin(enHost);
+      const enReview = toolOf(enHost, "ocr_review");
+      const enScan = toolOf(enHost, "ocr_scan");
+      expect(enReview.description).toContain(
+        "maxComments is a global setting on the settings card, not an ocr_review parameter",
+      );
+      expect(enScan.description).toContain(
+        "maxComments is a global setting on the settings card, not an ocr_scan parameter",
+      );
+      expect(
+        Object.keys((enReview.parameters as { properties: Record<string, unknown> }).properties),
+      ).not.toContain("maxComments");
+    });
+
+    it("工具说明明确 timeoutMinutes 是 OCR --timeout，不是设置项 foregroundWaitMinutes", () => {
+      const zhHost = makeHost();
+      applyPlugin(zhHost);
+      const zhReview = toolOf(zhHost, "ocr_review");
+      const zhScan = toolOf(zhHost, "ocr_scan");
+      expect(zhReview.description).toContain(
+        "timeoutMinutes 是本次调用透传给 OCR 的每任务 --timeout",
+      );
+      expect(zhScan.description).toContain(
+        "timeoutMinutes 是本次调用透传给 OCR 的每任务 --timeout",
+      );
+      expect(zhReview.description).toContain("foregroundWaitMinutes");
+      expect(zhScan.description).toContain("foregroundWaitMinutes");
+      expect(
+        Object.keys((zhReview.parameters as { properties: Record<string, unknown> }).properties),
+      ).toContain("timeoutMinutes");
+      expect(
+        Object.keys((zhReview.parameters as { properties: Record<string, unknown> }).properties),
+      ).not.toContain("foregroundWaitMinutes");
+
+      const enHost = makeHost({ locale: { preference: "en-US" } });
+      applyPlugin(enHost);
+      const enReview = toolOf(enHost, "ocr_review");
+      const enScan = toolOf(enHost, "ocr_scan");
+      expect(enReview.description).toContain("timeoutMinutes is the per-task OCR --timeout");
+      expect(enScan.description).toContain("timeoutMinutes is the per-task OCR --timeout");
+      expect(enReview.description).toContain("foregroundWaitMinutes");
+      expect(enScan.description).toContain("foregroundWaitMinutes");
+    });
+
     it("locale 未注册或 preference 为中文系 ⇒ 中文默认（未注册不抛）", () => {
       const unset = makeHost();
       applyPlugin(unset);
@@ -4058,7 +4361,7 @@ describe("host.ts（工具注册 + 7 个工具的执行路径 + 9 条 ocrReview 
       const host = makeHost({ locale: { preference: "en" } });
       applyPlugin(host);
       const review = toolOf(host, "ocr_review");
-      host.settingsValue["timeoutMinutes"] = 2;
+      host.settingsValue["foregroundWaitMinutes"] = 2;
       host.shell.scripts.push({ exitCode: null, timedOut: true });
       await expect(review.execute({ repo: "/repo", wait: true }, makeExec())).rejects.toThrow(
         /^ocr timed out \(effective 2 min = min\(request, shell\.maxTimeoutMs\)\)/u,
@@ -4483,9 +4786,27 @@ describe("装载期自检：只量本地 CLI 版本，上游端点不在装载�
 });
 
 describe("前台超时：显式分钟数由本包自管", () => {
-  it("timeoutMinutes=30 ⇒ 请求值直给、onExpiry 关掉（不被宿主 10 分钟上限截短）", async () => {
+  it("旧设置名 timeoutMinutes 仍可迁移；新字段显式 0 覆盖旧值", async () => {
     const host = makeHost();
+    delete host.settingsValue["foregroundWaitMinutes"];
     host.settingsValue["timeoutMinutes"] = 30;
+    host.shell.scripts.push({ output: REVIEW_JSON });
+    applyPlugin(host);
+    await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
+    expect(host.shell.resolveCalls[0]?.timeoutMs).toBe(30 * 60_000);
+
+    const explicitZero = makeHost();
+    explicitZero.settingsValue["foregroundWaitMinutes"] = 0;
+    explicitZero.settingsValue["timeoutMinutes"] = 30;
+    explicitZero.shell.scripts.push({ output: REVIEW_JSON });
+    applyPlugin(explicitZero);
+    await toolOf(explicitZero, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
+    expect(explicitZero.shell.resolveCalls[0]?.timeoutMs).toBe(2_147_483_647);
+  });
+
+  it("foregroundWaitMinutes=30 ⇒ 请求值直给、onExpiry 关掉（不被宿主 10 分钟上限截短）", async () => {
+    const host = makeHost();
+    host.settingsValue["foregroundWaitMinutes"] = 30;
     host.shell.scripts.push({ output: REVIEW_JSON });
     applyPlugin(host);
     await toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());
@@ -4496,7 +4817,7 @@ describe("前台超时：显式分钟数由本包自管", () => {
   it("到点自行 abort：按配置的那几分钟报错，不等宿主的 deadline", async () => {
     vi.useFakeTimers();
     const host = makeHost();
-    host.settingsValue["timeoutMinutes"] = 30;
+    host.settingsValue["foregroundWaitMinutes"] = 30;
     const calls = abortGatedShell(host);
     applyPlugin(host);
     const run = toolOf(host, "ocr_review").execute({ repo: "/repo", wait: true }, makeExec());

@@ -25,7 +25,7 @@ import { HarnessError } from "@deepseek-ai/dsh-error";
 export const OCR_TOOL_ERROR_CODES = {
   /** `ocr` 二进制不在 PATH 上：出路是装它，不是重试。 */
   binaryMissing: "OCR_BINARY_MISSING",
-  /** 显式给的 timeoutMinutes 到了：可调大再试，或缩小扫描面。 */
+  /** 显式给的 foregroundWaitMinutes 到了：可调大再试，或缩小扫描面。 */
   timedOut: "OCR_TIMED_OUT",
   /** 调用被取消（宿主 signal 中止或作业被停）：不是失败，是别人叫停了。 */
   aborted: "OCR_ABORTED",

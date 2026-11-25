@@ -609,11 +609,16 @@ export function renderSelectedConfig(input: SelectInput, messages: OcrReviewMess
   const existingEntry = isRecord(existingRaw) ? existingRaw : {};
   const entry: Record<string, unknown> = {
     ...existingEntry,
-    url: target.baseURL,
     protocol: target.protocol,
     model: input.model,
     api_key_cmd: input.apiKeyCmd,
   };
+  // 内置 provider 的 url 可省略：OCR 的 preset 目录会按 provider 名填默认端点。
+  // 目录 route 的 defaultBaseURL 在投影层已经填进来；这里为空只可能是宿主目录没给
+  // 默认值（catalog 形状变化），此时保留 OCR 侧可能已有的自定义 url，不写空串覆盖它。
+  if (target.baseURL !== "") {
+    entry["url"] = target.baseURL;
+  }
   // 迁移：同 provider 旧明文 api_key 移除（静态 api_key 优先于 api_key_cmd，留下会
   // 让动态命令永远不生效，也违背「不落明文」决策）。
   delete entry["api_key"];

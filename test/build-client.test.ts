@@ -41,7 +41,7 @@ const PKG_NAME = (
 const PKG_DIR = path.resolve(import.meta.dirname, "..");
 
 /**
- * 本包注入的六个槽名。字面量提出来是因为它们在这里要被**逐个点名**断言：槽名和 key
+ * 本包注入的槽名：7 个 keyed 工具行 + 6 个既有贡献点。字面量提出来是因为它们在这里要被**逐个点名**断言：槽名和 key
  * 一样，写错的后果都是那块表面静默不出现，而复用同一个串才让"改名"这件事立刻变红。
  * 与 installed dsh-client-ui-plugin-manager/lib/types/client/slot-contract.d.ts 与
  * dsh-client-ui-settings/lib/types/client/contract/slots.d.ts 的 `SlotMap` 声明逐字一致
@@ -52,12 +52,22 @@ const PKG_DIR = path.resolve(import.meta.dirname, "..");
  * 后两个是设置页的一级分区与它的导航图标：两者靠**同一个 id** 对上
  * （`settings.section.icon` 的 doc：「unmatched ids never render」），所以那一位单独断言。
  */
+const TOOLVIEW_SLOT = "tool.call.toolview";
 const CARD_SLOT = "plugins.bundle.config";
 const BADGE_SLOT = "plugins.detail.badge";
 const SECTION_SLOT = "plugins.detail.section";
 const ACTIVATION_SLOT = "plugins.bundle.activation";
 const SETTINGS_SECTION_SLOT = "settings.section";
 const SETTINGS_SECTION_ICON_SLOT = "settings.section.icon";
+const OCR_TOOLVIEW_KEYS = [
+  "ocr_review",
+  "ocr_scan",
+  "ocr_session",
+  "ocr_delegate_preview",
+  "ocr_delegate_rule",
+  "ocr_rules_check",
+  "ocr_llm",
+] as const;
 /** 分区在导航里的位次（src 的 `SECTION_ORDER`）。独立写死：实现里改了它而这里没改就该红。 */
 const EXPECTED_SECTION_ORDER = 32;
 
@@ -436,8 +446,10 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     // installed dsh-client-ui-settings/lib/client.js:1309-1315 把入参原样当命名空间用。
     assert.deepEqual(trace.entryIds, bareIds, "只取本条目那张共享表单，且只取一次");
 
-    // 四个贡献点逐个点名（顺序即 src 的注入顺序）：改名或漏注的症状都是那块表面静默不出现。
+    // 贡献点逐个点名（顺序即 src 的注入顺序）：改名或漏注的症状都是那块表面静默不出现。
+    // toolview 是一条 inject、7 次 keyed register；余下 6 条是卡片与详情/设置页外壳。
     assert.deepEqual(trace.slotNames, [
+      TOOLVIEW_SLOT,
       CARD_SLOT,
       BADGE_SLOT,
       SECTION_SLOT,
@@ -449,7 +461,12 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
     // 同样是静默不出现，而 inject 与 register 分家后只有这条能把两者钉在一起。
     assert.deepEqual(
       trace.slots.map((one) => one.name),
-      trace.slotNames,
+      [...OCR_TOOLVIEW_KEYS.map(() => TOOLVIEW_SLOT), ...trace.slotNames.slice(1)],
+    );
+    // 7 个 OCR wire 名必须逐个落在 toolview 的 keyed 槽里；漏一个就是该工具回落到 generic 卡。
+    assert.deepEqual(
+      trace.slots.filter((one) => one.name === TOOLVIEW_SLOT).map((one) => one.key),
+      OCR_TOOLVIEW_KEYS,
     );
 
     const card = slotOf(trace, CARD_SLOT);
@@ -507,8 +524,8 @@ describe("client.js 装配契约（槽 key = bundle 包名，表单 = 裸条目 
       [["effort", "low"]],
       "改的是槽 key，不是表单来源：写入仍要落回 configForms.get(裸条目 id) 那张表单",
     );
-    // 六个槽各回收一次：disposer 存在、可调用，且一次都不碰 provider 持有的共享表单。
-    assert.equal(trace.slots.length, 6);
+    // 13 个注册各回收一次：7 个工具行 key + 6 个既有槽，且一次都不碰 provider 持有的共享表单。
+    assert.equal(trace.slots.length, 13);
     for (const one of trace.slots) {
       one.cleanup();
       assert.equal(one.released, true, `${one.name} 的 disposer 必须可调用`);

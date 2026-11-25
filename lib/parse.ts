@@ -35,6 +35,7 @@
 import { format } from "./messages.ts";
 import type { OcrReviewMessages } from "./messages.ts";
 import { isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
+import { truncateEnd } from "@jayyuen66/dsh-plugin-shared/lib/text";
 import { aggregateComments, severityRank } from "./severity.ts";
 import type { CommentAggregation } from "./severity.ts";
 
@@ -170,10 +171,14 @@ export interface AnalysisView {
   declaredCompletion: string;
   /** `analysis_meta.stop_reason`：为什么停（none / budget / rounds …）。 */
   stopReason: string;
+  /** `analysis_meta.submission_status`：提交是否被接受/拒绝，以及原因分类。 */
+  submissionStatus: string;
   /** 人读的分析报告（`analysis` 字段；已去掉内部 observation 标记）。 */
   markdown: string;
   /** 报告超过 {@link ANALYSIS_MARKDOWN_LIMIT} 时为 true。 */
   markdownTruncated: boolean;
+  /** `analysis_meta.artifact_dir`：报告全文与会话产物的落盘目录。 */
+  artifactDir: string;
   /** `analysis_meta.scope` 的文件数。 */
   scopeFiles: number;
   /** 分析引用的观测条数。 */
@@ -181,11 +186,25 @@ export interface AnalysisView {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   model: string;
+  /** `analysis_meta.session_id`：分析自己的会话（与 Review 会话不同）。 */
+  sessionId: string;
+  /** `analysis_meta.tool_failures`：分析里失败的 LLM 工具调用。 */
+  toolFailures: ToolFailureView | null;
+  /** `analysis_meta.retry_report`：分析自己发生的重试（全零时为 null）。 */
+  retry: RetryView | null;
   /** `analysis_meta.errors`：分析自己的失败原因（截到 DIAGNOSTIC_DETAIL_LIMIT）。 */
   errors: string[];
   /** `analysis_meta.warnings`：分析自己的告警（截到 DIAGNOSTIC_DETAIL_LIMIT）。 */
   warnings: string[];
+}
+
+/** 分析报告里的工具失败：与顶层 `tool_calls` 同形，减少两个摘要的读法分叉。 */
+export interface ToolFailureView {
+  total: number;
+  failures: string[];
 }
 
 export interface ParsedReview {
@@ -653,6 +672,34 @@ function metaCount(usage: Record<string, unknown> | undefined, key: string): num
   return usage === undefined ? 0 : num(usage[key]);
 }
 
+/** `analysis_meta.tool_failures` 的逐条渲染；空数组与缺席都按「没有失败」处理。 */
+function analysisToolFailuresOf(raw: unknown, messages: OcrReviewMessages): ToolFailureView | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      total: 0,
+      failures: [format(messages.diagnosticUnreadable, { field: "tool_failures" })],
+    };
+  }
+  if (raw.length === 0) {
+    return null;
+  }
+  const rendered = raw
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    .map((entry) => {
+      const tool = str(entry["tool_name"]);
+      const file = str(entry["file_path"]);
+      const error = str(entry["error"]);
+      return `${tool || messages.statusNone}${file === "" ? "" : ` @ ${file}`}: ${error}`;
+    });
+  return {
+    total: rendered.length,
+    failures: capLines(rendered.slice(0, DIAGNOSTIC_DETAIL_LIMIT), rendered.length, messages),
+  };
+}
+
 function analysisViewOf(
   meta: Record<string, unknown> | undefined,
   markdown: string,
@@ -669,14 +716,21 @@ function analysisViewOf(
     completed: boolOf(metaValue(meta, "submission_accepted")),
     declaredCompletion: metaText(meta, "declared_completion"),
     stopReason: metaText(meta, "stop_reason"),
-    markdown: truncated ? markdown.slice(0, ANALYSIS_MARKDOWN_LIMIT) : markdown,
+    submissionStatus: metaText(meta, "submission_status"),
+    markdown: truncated ? truncateEnd(markdown, ANALYSIS_MARKDOWN_LIMIT) : markdown,
     markdownTruncated: truncated,
+    artifactDir: metaText(meta, "artifact_dir"),
     scopeFiles: metaArray(meta, "scope").length,
     citedObservations: metaArray(meta, "cited_observation_ids").length,
     totalTokens: metaCount(usage, "total_tokens"),
     inputTokens: metaCount(usage, "input_tokens"),
     outputTokens: metaCount(usage, "output_tokens"),
+    cacheReadTokens: metaCount(usage, "cache_read_tokens"),
+    cacheWriteTokens: metaCount(usage, "cache_write_tokens"),
     model: metaText(meta, "model"),
+    sessionId: metaText(meta, "session_id"),
+    toolFailures: analysisToolFailuresOf(metaValue(meta, "tool_failures"), messages),
+    retry: retryOf(metaValue(meta, "retry_report")),
     errors: capLines(errors.slice(0, DIAGNOSTIC_DETAIL_LIMIT), errors.length, messages),
     warnings: warningLinesOf(metaArray(meta, "warnings"), messages).lines,
   };
@@ -760,7 +814,7 @@ export function parseReviewOutput(text: string, messages: OcrReviewMessages): Pa
     limitReached: diagnostics.limitReached,
     llm: llmOf(root["llm"]),
     projectSummary:
-      rawProjectSummary === "" ? null : rawProjectSummary.slice(0, PROJECT_SUMMARY_LIMIT),
+      rawProjectSummary === "" ? null : truncateEnd(rawProjectSummary, PROJECT_SUMMARY_LIMIT),
     projectSummaryTruncated,
     resume: resumeOf(root["resume"]),
     groupCount: Array.isArray(root["groups"]) ? root["groups"].length : 0,

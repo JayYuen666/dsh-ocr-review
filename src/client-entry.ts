@@ -2,7 +2,7 @@
 // 功能：经官方 Typert Remote（src/remote.ts）从宿主配置服务列出可选 provider+model，
 // 选择后写到外部 ocr CLI 的 config.json（key 走 api_key_cmd 动态读取，不写到磁盘明文）；
 // 附带 llm test 验证、明文 key 一键迁移，以及 effort/language/autoVerify/maxComments/
-// timeoutMinutes/ocrConfigPath 与 scanMaxTokens/scanConcurrency 设置行（保存条暂存-写入）。
+// foregroundWaitMinutes/ocrConfigPath 与 scanMaxTokens/scanConcurrency 设置行（保存条暂存-写入）。
 // React 一律 createElement；卡片注册进 keyed
 // plugins.bundle.config 槽的 **bundle 包名**键（`@jayyuen66/dsh-ocr-review`，见 BUNDLE_PKG），
 // 不是裸条目 id。
@@ -74,6 +74,7 @@ import {
 import type { BadgeTone, DotTone, SelectOption } from "@jayyuen66/dsh-plugin-shared/client";
 import { OCR_BUNDLE_PACKAGE } from "../lib/remote-shape.ts";
 import { OCR_LOGO_DATA_URI } from "./ocr-icon.ts";
+import { OCR_TOOLVIEW_NAMES, OcrToolRow } from "./toolview.ts";
 import { createOcrReader } from "./remote.ts";
 import type { OcrReader } from "./remote.ts";
 import type { OcrSelectRequest } from "../lib/remote-shape.ts";
@@ -420,7 +421,7 @@ export interface OcrCardDeps {
   languageValue: OcrLanguage;
   autoVerifyValue: boolean;
   maxCommentsValue: number;
-  timeoutMinutesValue: number;
+  foregroundWaitMinutesValue: number;
   ocrConfigPathValue: string;
   /** ocr_scan 的缺省深度（见 host.ts 的 scanMaxTokens / scanConcurrency）。 */
   scanMaxTokensValue: number;
@@ -927,12 +928,10 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     label: providerOptionLabel(t, provider),
     disabled: !provider.hasKey,
   }));
-  const fallbackModelName = deps.effectiveModel === "" ? t("noModel") : deps.effectiveModel;
-  const modelOptions: SelectOption[] = (
-    deps.modelOptions.length > 0
-      ? deps.modelOptions
-      : [{ id: deps.effectiveModel, name: fallbackModelName }]
-  ).map((model) => ({ value: model.id, label: model.name }));
+  const modelOptions: SelectOption[] = deps.modelOptions.map((model) => ({
+    value: model.id,
+    label: model.name,
+  }));
   const effortOptions: SelectOption[] = [
     { value: "auto", label: t("effortAuto") },
     { value: "low", label: t("effortLow") },
@@ -955,15 +954,29 @@ function buildReadyProviderSection(deps: OcrCardDeps, data: ProvidersPayload): R
     disabled: data.providers.length === 0 || deps.configWritesBusy,
     onChange: deps.onPickProvider,
   });
-  const modelField = createElement(SelectField, {
-    label: "Model",
-    ...(modelUrl === "" ? {} : { hint: modelUrl }),
-    field: "ocrModel",
-    value: deps.effectiveModel,
-    options: modelOptions,
-    disabled: !deps.chosenProvider || deps.modelOptions.length === 0 || deps.configWritesBusy,
-    onChange: deps.onPickModel,
-  });
+  // 目录 provider（catalog route）可能没有 models 列表：此时不能画一个禁用的空下拉，
+  // 否则用户明明选到了 provider 却永远填不进 model。退回自由输入，apply 侧对空
+  // models 列表本来就不做白名单收窄（renderSelectedConfig 的 modelOk）。
+  const modelField =
+    deps.modelOptions.length === 0
+      ? createElement(TextField, {
+          label: "Model",
+          hint: t("modelFreeHint"),
+          field: "ocrModel",
+          value: deps.effectiveModel,
+          placeholder: t("modelPlaceholder"),
+          disabled: !deps.chosenProvider || deps.configWritesBusy,
+          onChange: deps.onPickModel,
+        })
+      : createElement(SelectField, {
+          label: "Model",
+          ...(modelUrl === "" ? {} : { hint: modelUrl }),
+          field: "ocrModel",
+          value: deps.effectiveModel,
+          options: modelOptions,
+          disabled: !deps.chosenProvider || deps.configWritesBusy,
+          onChange: deps.onPickModel,
+        });
   const effortField = createElement(SelectField, {
     label: t("effortLabel"),
     ...splitHint(t("effortHint")),
@@ -1113,7 +1126,7 @@ function resolveSelection(
   };
 }
 
-/** 审查参数小节：评论条数、运行超时、配置文件路径 + 保存条。 */
+/** 审查参数小节：评论条数、前台等待上限、配置文件路径 + 保存条。 */
 export function buildSettingsSection(
   deps: OcrCardDeps,
   writable: boolean,
@@ -1138,20 +1151,20 @@ export function buildSettingsSection(
     },
   });
   const timeoutRow = createElement(NumberField, {
-    label: t("timeoutLabel"),
-    ...splitHint(t("timeoutHint")),
-    field: "timeoutMinutes",
-    value: deps.timeoutMinutesValue,
+    label: t("foregroundWaitLabel"),
+    ...splitHint(t("foregroundWaitHint")),
+    field: "foregroundWaitMinutes",
+    value: deps.foregroundWaitMinutesValue,
     ...(COUNT_SCHEMA.minValue === null ? {} : { min: COUNT_SCHEMA.minValue }),
     step: 1,
     invalidHint: t("outOfRange"),
     disabled: !writable || deps.settingsBusy,
     resetToken: deps.resetToken,
     onInvalidChange: (invalid: boolean): void => {
-      deps.reportInvalid("timeoutMinutes", invalid);
+      deps.reportInvalid("foregroundWaitMinutes", invalid);
     },
     onChange: (next: number | undefined): void => {
-      setField("timeoutMinutes", next);
+      setField("foregroundWaitMinutes", next);
     },
   });
   const configPathRow = createElement(TextField, {
@@ -1221,7 +1234,7 @@ export interface AdminSectionProps {
 /** 扫描深度小节：两枚 volatile（改完下一次 ocr_scan 就生效）+ 一段说明这两条
  *  只影响 ocr_scan 的缺省值、模型显式传值时以模型为准。
  *
- *  为什么要单独一节而不是塞进「审查参数」：那一节里的 effort/timeoutMinutes 作用在
+ *  为什么要单独一节而不是塞进「审查参数」：那一节里的 effort/foregroundWaitMinutes 作用在
  *  ocr_review 上，混在一起读会让人以为 maxTokens 也管评审。 */
 /** 导出仅供单测（保存期间的字段冻结断言要走这里的渲染产物）。 */
 export function buildScanSection(
@@ -1709,7 +1722,7 @@ interface DraftFields {
   languageValue: OcrLanguage;
   autoVerifyValue: boolean;
   maxCommentsValue: number;
-  timeoutMinutesValue: number;
+  foregroundWaitMinutesValue: number;
   ocrConfigPathValue: string;
   scanMaxTokensValue: number;
   scanConcurrencyValue: number;
@@ -1726,7 +1739,13 @@ function draftFieldsOf(
     languageValue: textOf(eff("language", "中文"), LANGUAGE_SCHEMA, "中文"),
     autoVerifyValue: booleanOf(eff("autoVerify", true), true),
     maxCommentsValue: numOf(eff("maxComments", 12), 12, COUNT_SCHEMA),
-    timeoutMinutesValue: numOf(eff("timeoutMinutes", 0), 0, COUNT_SCHEMA),
+    // 旧设置名 timeoutMinutes 只在 0.1.22 及更早的 profile 里存在；新字段未出现时
+    // 用它兜底显示，改这一项并保存后写的是新字段。新字段即使显式 0 也优先（0 = 宿主上限）。
+    foregroundWaitMinutesValue: numOf(
+      eff("foregroundWaitMinutes", value["timeoutMinutes"] ?? 0),
+      0,
+      COUNT_SCHEMA,
+    ),
     ocrConfigPathValue: strOf(eff("ocrConfigPath", "")),
     // 0 = 「不传该 flag、用 OCR 模板默认」，是合法初值而不是「未设置」。
     scanMaxTokensValue: numOf(eff("scanMaxTokens", 0), 0, COUNT_SCHEMA),
@@ -1961,7 +1980,7 @@ interface SettingsDrafts {
 }
 
 /**
- * 设置行（effort/language/autoVerify/configPath + maxComments/timeoutMinutes 两个数字行
+ * 设置行（effort/language/autoVerify/configPath + maxComments/foregroundWaitMinutes 两个数字行
  * + scan 深度两个数字行）的草稿状态。
  *
  * 越界那两位（`onInvalidChange` / `resetToken`）与 `NumberField` 配套：它对越界草稿**不调
@@ -2383,6 +2402,19 @@ function apply(ctx: ClientCtx): void {
     set: (field: string, value: unknown): boolean | Promise<boolean> => scope.set(field, value),
     reader,
   });
+  // 模型工具行：Web Client 不消费 Host 的 presentCall/presentResult，按 wire 工具名
+  // 逐个注册 keyed slot；一个都不注册时宿主回落到 generic 卡。
+  ctx.slots.inject("tool.call.toolview", () => {
+    const disposers = OCR_TOOLVIEW_NAMES.map((key) =>
+      ctx.slots.register({ name: "tool.call.toolview", key, locale: NS }, OcrToolRow),
+    );
+    return () => {
+      for (const dispose of disposers) {
+        dispose();
+      }
+    };
+  });
+
   ctx.slots.inject("plugins.bundle.config", () => {
     const unregister = ctx.slots.register(
       {

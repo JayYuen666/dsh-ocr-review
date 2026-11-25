@@ -126,6 +126,7 @@ const PLUGIN_ENTRY_ID = "ocr-review";
 
 /** 本包贡献的四个槽位名（与 src/client-entry.ts 的注册一一对应；四处共用同一份常量，
  *  槽位被改名时症状是那块表面静默不出现，常量在这里钉成断言）。 */
+const TOOLVIEW_SLOT = "tool.call.toolview";
 const CARD_SLOT = "plugins.bundle.config";
 const BADGE_SLOT = "plugins.detail.badge";
 const SECTION_SLOT = "plugins.detail.section";
@@ -134,6 +135,46 @@ const ACTIVATION_SLOT = "plugins.bundle.activation";
 // 槽位被改名的症状是那块表面静默不出现，所以这六条一起断言。
 const SETTINGS_SECTION_SLOT = "settings.section";
 const SETTINGS_SECTION_ICON_SLOT = "settings.section.icon";
+
+/** 元素 props 里本文件会读到的那几位。刻意用具体接口而不是 `Record<string, unknown>`：
+ *  TS 的 noPropertyAccessFromIndexSignature 要 `["children"]`，而 oxlint 的 dot-notation
+ *  要 `.children`，索引签名类型同时喂两条就必红一边——具名属性两边都 satisfied。
+ *  `data-field` 带连字符，本来就只能走方括号，两条规则对它都无话可说。 */
+interface ElementProps {
+  "data-field"?: string;
+  children?: unknown;
+  className?: string;
+  disabled?: boolean;
+  value?: unknown;
+  placeholder?: string;
+  onClick?: (() => void) | undefined;
+  /** shared 的 Callout 走 `field`（组件内再写成 data-field），元素树里只能看这一位。 */
+  field?: string;
+  tone?: string;
+  dot?: string;
+}
+
+/** 元素树里按 data-field 找一位：文本断言看不出 class 与 disabled，属性得单独取。 */
+function fieldProps(node: unknown, field: string): ElementProps | null {
+  if (typeof node !== "object" || node === null) {
+    return null;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const hit = fieldProps(item, field);
+      if (hit !== null) {
+        return hit;
+      }
+    }
+    return null;
+  }
+  const { props } = node as { props?: ElementProps };
+  if (props === undefined) {
+    return null;
+  }
+  const hitHere = props["data-field"] === field || props.field === field;
+  return hitHere ? props : fieldProps(props.children, field);
+}
 
 // ── 最小 document 替身（node 环境没有 jsdom）────────────────────────────────
 // apply 的样式 effect 只用到 createElement / head.append / remove 三件事，
@@ -386,7 +427,7 @@ const BASE_DEPS: OcrCardDeps = {
   languageValue: "中文",
   autoVerifyValue: true,
   maxCommentsValue: 12,
-  timeoutMinutesValue: 0,
+  foregroundWaitMinutesValue: 0,
   ocrConfigPathValue: "",
   // 0 = 「不传该 flag、用 OCR 模板默认」，是这两枚的合法初值（不是「未设置」）。
   scanMaxTokensValue: 0,
@@ -557,14 +598,28 @@ describe("apply 的官方 locale 接线", () => {
     // 表单按 **profile 条目 id** 取（0.1.7 起设置命名空间即条目 id），本包那一行是
     // cordis.patch.yml 里的不带前缀的 id `ocr-review`（和下面装配那条用例用同一个判断）。
     expect(harness.formEntryIds).toStrictEqual([PLUGIN_ENTRY_ID]);
-    // 六个槽：插件页卡片、详情页徽章、详情页区块、启用指引，加上设置页一级分区与它的导航图标。
+    // 七个槽：插件页卡片、详情页徽章、详情页区块、启用指引，设置页一级分区与它的导航图标，
+    // 外加模型工具行（tool.call.toolview）。
     expect(harness.slots).toStrictEqual([
+      TOOLVIEW_SLOT,
       CARD_SLOT,
       BADGE_SLOT,
       SECTION_SLOT,
       ACTIVATION_SLOT,
       SETTINGS_SECTION_SLOT,
       SETTINGS_SECTION_ICON_SLOT,
+    ]);
+    // keyed slot 必须逐字对上 7 个 wire 工具名；少一个就静默回落到 generic 卡。
+    expect(
+      harness.slotDescs.filter((desc) => desc.name === TOOLVIEW_SLOT).map((desc) => desc.key),
+    ).toStrictEqual([
+      "ocr_review",
+      "ocr_scan",
+      "ocr_session",
+      "ocr_delegate_preview",
+      "ocr_delegate_rule",
+      "ocr_rules_check",
+      "ocr_llm",
     ]);
     // 官方类型化 register：一次调用带齐两语，故 (命名空间, locale) 的展开结果与旧的两份
     // 每种语言的注册逐字相同——"两种语言都注册到本包命名空间"这一条没有松动。
@@ -594,7 +649,7 @@ describe("apply 的官方 locale 接线", () => {
     );
     // 三个 effect：apply claim + 样式 + locale 字典（locale 字典随 effect 回收）。
     expect(harness.effects).toHaveLength(3);
-    expect(harness.slotCleanups).toHaveLength(6);
+    expect(harness.slotCleanups).toHaveLength(7);
     expect(document.head.querySelector(CARD_STYLE_SELECTOR)).not.toBeNull();
     harness.cleanSlots();
     expect(harness.payloadOf()).toBeNull();
@@ -645,10 +700,12 @@ describe("apply 的官方 locale 接线", () => {
     // 解析；反过来也**不硬抄**那串包名——硬抄一个错值就会像之前那样一路绿到页面上什么都不渲染。
     // 这里只留反向漂移钉：key 必须是非空字符串，且绝不能再退回裸条目 id `ocr-review`
     //（installed dsh-client-ui-renderer/lib/client.js:1154 逐字相等，退回 = 卡片静默消失）。
-    expect(harness.slotDescs).toHaveLength(6);
+    // tool.call.toolview 的 7 个 key 在上面单独钉；这里只点设置卡那 6 条。
+    const surfaceSlots = harness.slotDescs.filter((one) => one.name !== TOOLVIEW_SLOT);
+    expect(surfaceSlots).toHaveLength(6);
     // 六条注册逐个点名（顺序即 apply 里的注册顺序）：槽位被改名的症状是那块表面静默
     // 不出现，比只断言条数更能第一时间红。
-    expect(harness.slotDescs.map((one) => one.name)).toStrictEqual([
+    expect(surfaceSlots.map((one) => one.name)).toStrictEqual([
       CARD_SLOT,
       BADGE_SLOT,
       SECTION_SLOT,
@@ -658,7 +715,7 @@ describe("apply 的官方 locale 接线", () => {
     ]);
     // 两条 keyed 槽（卡片、启用指引）必须同键，且那个键既不是空串也不是裸条目 id：
     // renderer 按逐字相等匹配 entryKey，退回不带前缀的 id 就等于让表面静默消失。
-    const keyedSlots = harness.slotDescs.filter((one) => one.key !== undefined);
+    const keyedSlots = surfaceSlots.filter((one) => one.key !== undefined);
     expect(keyedSlots.map((one) => one.name)).toStrictEqual([CARD_SLOT, ACTIVATION_SLOT]);
     const cardKey = keyedSlots[0]?.key;
     expect(keyedSlots[1]?.key).toBe(cardKey);
@@ -666,7 +723,7 @@ describe("apply 的官方 locale 接线", () => {
     expect(cardKey).not.toBe("");
     expect(cardKey).not.toBe(PLUGIN_ENTRY_ID);
     // disposer 只 unregister：0.1.7 的 ConfigForm 没有 dispose，跑到绊线就抛（→ 用例红）。
-    expect(harness.slotCleanups).toHaveLength(6);
+    expect(harness.slotCleanups).toHaveLength(7);
     harness.cleanSlots();
     expect(harness.disposedOf()).toBe(0);
   });
@@ -779,6 +836,8 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(zhModel).toContain("应用后自动验证");
     const zh = textOf(buildSettingsSection(depsWith(tZh), true, noop));
     expect(zh).toContain("摘要评论条数 (maxComments)");
+    expect(zh).toContain("前台等待上限 (foregroundWaitMinutes)");
+    expect(zh).not.toContain("运行超时 (foregroundWaitMinutes)");
     const enModel = textOf(buildProviderSection(modelDeps(tEn)));
     expect(enModel).toContain("Review depth (effort, review only)");
     expect(enModel).toContain("auto — follow the OCR config");
@@ -791,7 +850,24 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(enModel).toContain("Review language");
     const en = textOf(buildSettingsSection(depsWith(tEn), true, noop));
     expect(en).toContain("Summary comment cap (maxComments)");
+    expect(en).toContain("Foreground wait cap (foregroundWaitMinutes)");
     expect(en).toContain("Review parameters");
+  });
+
+  it("目录 provider 没有 models 时退回自由输入，不再画禁用空下拉", () => {
+    const noModels: NonNullable<OcrCardDeps["chosenProvider"]> = { ...SENSENOVA, models: [] };
+    const deps = depsWith(tZh, {
+      data: READY_DATA,
+      chosenProvider: noModels,
+      modelOptions: [],
+      effectiveModel: SENSENOVA_MODEL,
+    });
+    const section = buildProviderSection(deps);
+    expect(textOf(section)).toContain("该 provider 没有目录模型列表，可直接输入模型 ID。");
+    const modelField = fieldProps(section, "ocrModel");
+    expect(modelField?.disabled).toBe(false);
+    expect(modelField?.placeholder).toBe("例如 gpt-4o");
+    expect(modelField?.value).toBe(SENSENOVA_MODEL);
   });
 
   it("当前配置行与 provider 标签由字典模板插值（两语各得其所）", () => {
@@ -809,45 +885,6 @@ describe("卡片双语（换 translator 即换语言，同一条渲染路径）"
     expect(providerOptionLabel(tEn, XKIRO)).toBe("xkiro (no key configured)");
   });
 });
-
-/** 元素 props 里本文件会读到的那几位。刻意用具体接口而不是 `Record<string, unknown>`：
- *  TS 的 noPropertyAccessFromIndexSignature 要 `["children"]`，而 oxlint 的 dot-notation
- *  要 `.children`，索引签名类型同时喂两条就必红一边——具名属性两边都 satisfied。
- *  `data-field` 带连字符，本来就只能走方括号，两条规则对它都无话可说。 */
-interface ElementProps {
-  "data-field"?: string;
-  children?: unknown;
-  className?: string;
-  disabled?: boolean;
-  value?: unknown;
-  onClick?: (() => void) | undefined;
-  /** shared 的 Callout 走 `field`（组件内再写成 data-field），元素树里只能看这一位。 */
-  field?: string;
-  tone?: string;
-  dot?: string;
-}
-
-/** 元素树里按 data-field 找一位：文本断言看不出 class 与 disabled，属性得单独取。 */
-function fieldProps(node: unknown, field: string): ElementProps | null {
-  if (typeof node !== "object" || node === null) {
-    return null;
-  }
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      const hit = fieldProps(item, field);
-      if (hit !== null) {
-        return hit;
-      }
-    }
-    return null;
-  }
-  const { props } = node as { props?: ElementProps };
-  if (props === undefined) {
-    return null;
-  }
-  const hitHere = props["data-field"] === field || props.field === field;
-  return hitHere ? props : fieldProps(props.children, field);
-}
 
 describe("admin section", () => {
   it("管理区：MCP 编辑器与 ChatGPT 按钮的双语/禁用/回调", () => {
@@ -1487,13 +1524,13 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
   it("部分字段被拒 ⇒ 只把被拒的留在 touched 上，成功的算已写", async () => {
     // 函数式更新把「卡片此刻的 touched」当 prev：替身的初值就是 saveDeps 收到的那份，
     // 不是别的种子对象——否则 keepNewerEdits 的合并基准就是假的。
-    let touchedAfter: Record<string, unknown> = { maxComments: 20, timeoutMinutes: 30 };
+    let touchedAfter: Record<string, unknown> = { maxComments: 20, foregroundWaitMinutes: 30 };
     let error: string | null = null;
     let busyAfter: boolean | undefined;
     await saveSettingsDraft(
       saveDeps(
-        { maxComments: true, timeoutMinutes: false },
-        { maxComments: 20, timeoutMinutes: 30 },
+        { maxComments: true, foregroundWaitMinutes: false },
+        { maxComments: 20, foregroundWaitMinutes: 30 },
         {
           setTouched: (incoming) => {
             touchedAfter = typeof incoming === "function" ? incoming(touchedAfter) : incoming;
@@ -1508,8 +1545,8 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
       ),
     );
     // 重试只会重写真正没写到磁盘的那一个；已写入的若留在 touched 上会被重复提交。
-    expect(touchedAfter).toStrictEqual({ timeoutMinutes: 30 });
-    expect(error).toContain("timeoutMinutes");
+    expect(touchedAfter).toStrictEqual({ foregroundWaitMinutes: 30 });
+    expect(error).toContain("foregroundWaitMinutes");
     expect(error).not.toContain("maxComments");
     expect(busyAfter).toBe(false);
   });
@@ -1527,7 +1564,7 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
     const deps: SaveDraftDeps = {
       t: tZh,
       value: {},
-      touched: { maxComments: 20, timeoutMinutes: 30 },
+      touched: { maxComments: 20, foregroundWaitMinutes: 30 },
       blocked: false,
       set: (field: string) => {
         seen.push(field);
@@ -1554,7 +1591,7 @@ describe("saveSettingsDraft：按字段收集受理结果，不是一处失败�
     expect(busyAfter).toBe(true);
     await running;
     expect(busyAfter).toBe(false);
-    expect(seen).toStrictEqual(["maxComments", "timeoutMinutes"]);
+    expect(seen).toStrictEqual(["maxComments", "foregroundWaitMinutes"]);
   });
 
   it("全部受理 ⇒ 清空 touched 且不报错", async () => {
@@ -1876,7 +1913,7 @@ describe("configWritesBusy 与 settingsBusy 的禁用面", () => {
     };
     const frozen = buildSettingsSection(depsWith(tZh, { settingsBusy: true }), true, setField);
     expect(fieldProps(frozen, "maxComments")?.disabled).toBe(true);
-    expect(fieldProps(frozen, "timeoutMinutes")?.disabled).toBe(true);
+    expect(fieldProps(frozen, "foregroundWaitMinutes")?.disabled).toBe(true);
     expect(fieldProps(frozen, "ocrConfigPath")?.disabled).toBe(true);
     const scan = buildScanSection(depsWith(tZh, { settingsBusy: true }), true, setField);
     expect(fieldProps(scan, "scanMaxTokens")?.disabled).toBe(true);
@@ -1892,17 +1929,17 @@ describe("configWritesBusy 与 settingsBusy 的禁用面", () => {
 describe("saveSettingsDraft 补充：onSaved 与保存窗口内的新编辑", () => {
   it("全部受理 ⇒ onSaved 一次；已提交键摘除、窗口内的新编辑保留", async () => {
     // touched 快照演的是「settle 时刻」的状态：maxComments 在保存窗口内被改成 24
-    // （未冻结控件/另一客户端），timeoutMinutes 没动；effort 是本轮提交之外的新编辑。
+    // （未冻结控件/另一客户端），foregroundWaitMinutes 没动；effort 是本轮提交之外的新编辑。
     let touchedAfter: Record<string, unknown> = {
       maxComments: 24,
-      timeoutMinutes: 30,
+      foregroundWaitMinutes: 30,
       effort: "high",
     };
     let savedCalls = 0;
     await saveSettingsDraft(
       saveDeps(
-        { maxComments: true, timeoutMinutes: true },
-        { maxComments: 20, timeoutMinutes: 30 },
+        { maxComments: true, foregroundWaitMinutes: true },
+        { maxComments: 20, foregroundWaitMinutes: 30 },
         {
           setTouched: (incoming) => {
             touchedAfter = typeof incoming === "function" ? incoming(touchedAfter) : incoming;
@@ -1925,11 +1962,11 @@ describe("saveSettingsDraft 补充：onSaved 与保存窗口内的新编辑", ()
   });
 
   it("部分被拒 ⇒ 被拒键按提交值保留（重试写当初那份）；窗口内的新编辑不丢", async () => {
-    let touchedAfter: Record<string, unknown> = { maxComments: 24, timeoutMinutes: 31 };
+    let touchedAfter: Record<string, unknown> = { maxComments: 24, foregroundWaitMinutes: 31 };
     await saveSettingsDraft(
       saveDeps(
-        { maxComments: true, timeoutMinutes: false },
-        { maxComments: 20, timeoutMinutes: 30 },
+        { maxComments: true, foregroundWaitMinutes: false },
+        { maxComments: 20, foregroundWaitMinutes: 30 },
         {
           setTouched: (incoming) => {
             touchedAfter = typeof incoming === "function" ? incoming(touchedAfter) : incoming;
@@ -1943,7 +1980,7 @@ describe("saveSettingsDraft 补充：onSaved 与保存窗口内的新编辑", ()
         },
       ),
     );
-    expect(touchedAfter).toStrictEqual({ timeoutMinutes: 30, maxComments: 24 });
+    expect(touchedAfter).toStrictEqual({ foregroundWaitMinutes: 30, maxComments: 24 });
   });
 });
 

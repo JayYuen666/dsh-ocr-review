@@ -1,7 +1,7 @@
 // ocr-review dsh 插件 Host 半。
 //
 // 职责：
-//   1. 声明设置项（effort、language、autoVerify、maxComments、timeoutMinutes、
+//   1. 声明设置项（effort、language、autoVerify、maxComments、foregroundWaitMinutes、
 //      ocrConfigPath、scanMaxTokens、scanConcurrency；另有三枚 scan 部署级旋钮
 //      scanMaxTools / scanNoPlan / scanNoDedup）。命名空间是**隐式**的：宿主把本包
 //      导出 `Config` 里标了 `.volatile()` 的字段投影成设置表单，ns = profile 条目 id
@@ -129,7 +129,7 @@ import {
 import { truncateEnd } from "@jayyuen66/dsh-plugin-shared/lib/text";
 import { MESSAGES, format } from "./lib/messages.ts";
 import { foregroundSummaryOf, RAW_ECHO_LIMIT } from "./lib/foreground-summary.ts";
-import { echoRaw, failureDetail, readOutFile } from "./lib/output-file.ts";
+import { completeOutputText, echoRaw, failureDetail, readOutFile } from "./lib/output-file.ts";
 import { containedProbe } from "./lib/probe-guard.ts";
 import { OCR_TOOL_ERROR_CODES, OcrToolError } from "./lib/tool-error.ts";
 import type { OcrReviewMessages } from "./lib/messages.ts";
@@ -140,7 +140,6 @@ import {
   wrapWithHostReaper,
   buildDelegatePreviewCommand,
   buildDelegateRuleCommand,
-  buildSessionCommand,
   buildRulesCheckCommand,
   buildLlmCommand,
   buildLlmTestCommand,
@@ -157,17 +156,12 @@ import {
 } from "./lib/cli.ts";
 import type { OcrBinaryStatus, OcrInstallChannel, OcrInstallPreference } from "./lib/cli.ts";
 import { clampEffort } from "./lib/argv-guard.ts";
-import {
-  parsePreviewOutput,
-  parseSessionCompare,
-  parseDelegatePreview,
-  parseDelegateRules,
-} from "./lib/parse.ts";
+import { parsePreviewOutput, parseDelegatePreview, parseDelegateRules } from "./lib/parse.ts";
+import { registerSessionTool } from "./lib/session-tool.ts";
 import {
   REVIEW_OUTPUT_SCHEMA,
   PREVIEW_OUTPUT_SCHEMA,
   RULES_OUTPUT_SCHEMA,
-  SESSION_OUTPUT_SCHEMA,
   TEXT_OUTPUT_SCHEMA,
 } from "./lib/tool-schemas.ts";
 import { ROUTING_NAME, ROUTING_ORDER } from "./lib/routing.ts";
@@ -206,7 +200,6 @@ import {
   MAX_TIMEOUT_REQUEST_MS,
   runExpiry,
 } from "./lib/run-scope.ts";
-import { SESSION_EXPORT_PREFIX, sweepStaleSessionExports } from "./lib/tmp-cleanup.ts";
 import { isPathInside, rebaseScanScope } from "./lib/scan-scope.ts";
 import {
   applyScanDefaults,
@@ -225,6 +218,7 @@ import {
 import { PI_AI_NAMESPACE } from "./lib/provider-source.ts";
 import { defaultCredScriptPath } from "./lib/config-store.ts";
 import type { DshConfigGateway, ProviderDescriptor } from "./lib/provider-source.ts";
+import type { ProviderDefault } from "./lib/provider-projection.ts";
 import type { OcrPaths } from "./lib/config-store.ts";
 import { hasMethods, isRecord } from "@jayyuen66/dsh-plugin-shared/lib/record";
 import { errorText } from "@jayyuen66/dsh-plugin-shared/lib/errors";
@@ -266,16 +260,16 @@ const VERSION_PROBE_TIMEOUT_MS = 15_000;
  * 工具级墙钟预算的默认值（rc.2 的 `ToolDefinition.timeoutMs`，由宿主
  * `@deepseek-ai/dsh-tool-call-timeout-policy` 兑现）。
  *
- * **为什么它必须是一个独立声明的部署值，而不能从 `timeoutMinutes` 算出来**：
- * `timeoutMinutes` 是 **volatile**（卡片上运行期可改），本包每趟执行都现读它；
+ * **为什么它必须是一个独立声明的部署值，而不能从 `foregroundWaitMinutes` 算出来**：
+ * `foregroundWaitMinutes` 是 **volatile**（卡片上运行期可改），本包每趟执行都现读它；
  * 而工具级这一枚由宿主在 `tools.register` 时校验并**存成静态数字**，之后每次
  * execute 只读那一份、绝不重算（`dsh-tools/lib/index.js` 的 `register()` +
  * `dsh-tool-call-timeout-policy/lib/index.js` 的 `ctx.tools.get(...)?.timeoutMs`）。
- * 若让它跟着 volatile 改动，卡片上把超时调大、工具级上限却停在旧值，两层就各说一套。
+ * 若让它跟着 volatile 改动，卡片上把等待上限调大、工具级上限却停在旧值，两层就各说一套。
  *
  * **它是兜底天花，不是 OCR 的预算**——这一条决定了默认值该有多大。正常时长由
- * `timeoutMinutes` 管（并且 `timeoutMinutes > 0` 时走 `onExpiry: "none"` + 本包自管
- * 截止，**刻意绕开宿主 `shell.maxTimeoutMs` 的收敛**，见 lib/run-scope.ts 的
+ * `foregroundWaitMinutes` 管（并且 `foregroundWaitMinutes > 0` 时走 `onExpiry: "none"` +
+ * 本包自管截止，**刻意绕开宿主 `shell.maxTimeoutMs` 的收敛**，见 lib/run-scope.ts 的
  * `runExpiry`）。于是这条路径真的可以跑几个小时：一次全仓 `ocr_scan` 在大型仓库上
  * 就是数小时量级（用户实测见过最长几小时）。
  *
@@ -284,12 +278,19 @@ const VERSION_PROBE_TIMEOUT_MS = 15_000;
  * 把调用掐掉，而模型看到的是宿主那句 `tool call timed out after Nms`，读不出是 OCR
  * 还没跑完、还是插件卡了——本包自己的超时归因（`execTimedOutExplicit`）根本没机会说话。
  *
- * 默认 1 小时：覆盖「几小时」这一档实测，同时仍是一条有限的兜底。要跑更久的部署
- * 直接抬这一枚（它是部署值，改完随重启生效）；前台长审查本来就该优先走
- * `wait: false` 的后台模式——那条路径启动即返回，根本不经过这条墙钟。
+ * 默认 1 小时：只兜前台工具调用（`wait=true`）这一条，后台 `wait=false` 启动即返回、
+ * 不经过它。真正几小时量级的长审查默认走后台；若一定要前台跑，必须把
+ * `foregroundWaitMinutes` 与这一枚同步抬高，否则 1 小时会先掐断。
  */
 const TOOL_TIMEOUT_MS = 1 * 60 * 60_000;
 const STDOUT_MAX_BYTES = 400_000;
+/**
+ * ocr_delegate_preview 每个桶（reviewable / excluded）最多交给模型多少条文件。
+ * 真实大仓实测 5000 个已修改文件时 OCR 输出 820KB，完整 JSON 可以解析，但整份塞回
+ * 工具结果会再次触发宿主上限；这里保留前 1000 条并把被省略条数单独报出。
+ * 1000 条 × 两份约 160KB，低于默认 stdout 上限，仍留出余量给别的字段。
+ */
+const PREVIEW_FILE_LIMIT = 1000;
 /**
  * 单实例锁的服务名。dshmarket 热挂子树与 bundle 层会各跑一次 `apply`，第二遍的注册面会撞
  * 「同名已注册」而把 fiber 打成 failed；抢这把锁能把第二遍安静地挡在注册面之外。
@@ -865,7 +866,7 @@ async function runForeground(
   const failed = result.exitCode !== 0 || result.timedOut || result.aborted;
   if (failed) {
     if (expiry.deadline?.fired() === true) {
-      // 这条截止是**本包**设的（显式 timeoutMinutes），不是宿主按 maxTimeoutMs 收敛出来的，
+      // 这条截止是**本包**设的（显式 foregroundWaitMinutes），不是宿主按 maxTimeoutMs 收敛出来的，
       // 所以文案不能说「= min(请求, 宿主上限)」，否则用户会去调宿主那格设置而白忙。
       const minutes = Math.round(spec.timeoutMs / 60_000);
       throw new OcrToolError(
@@ -876,7 +877,7 @@ async function runForeground(
     if (result.timedOut) {
       // 报 spec.timeoutMs 而不是 run.timeoutMs：resolve 已按
       // min(请求, shell.maxTimeoutMs) 收敛，spec 里那个才是**实际生效**的值。
-      // run.timeoutMs 是请求值，timeoutMinutes 留空时为 MAX_TIMEOUT_REQUEST_MS
+      // run.timeoutMs 是请求值，foregroundWaitMinutes 留空时为 MAX_TIMEOUT_REQUEST_MS
       // (2^31-1)，照它算会把「实际生效 N 分钟」印成 35791 这种天文数字。
       const minutes = Math.round(spec.timeoutMs / 60_000);
       throw new OcrToolError(
@@ -1155,16 +1156,40 @@ function readMaxComments(config: Config): number {
   return MAX_COMMENTS_DEFAULT;
 }
 
-/**
- * 外层墙钟超时（分钟）→ 实际请求毫秒。0/未设置 = 请求宿主上限（宿主按
- * min(请求, shell.maxTimeoutMs) 收敛，见 MAX_TIMEOUT_REQUEST_MS 的注释）；
- * >0 = 指定分钟（同样被宿主 clamp）。非法值按 0 处理。
- */
-function readTimeoutMinutes(config: Config): number {
-  const raw: unknown = config.timeoutMinutes.get();
+/** 解析非负分钟数；undefined / null / 非整数 / 负数都算未给出。 */
+function nonNegativeMinutes(raw: unknown): number | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
   const num = typeof raw === "number" ? raw : Number(raw);
-  if (Number.isSafeInteger(num) && num > 0) {
-    return num * 60_000;
+  if (Number.isSafeInteger(num) && num >= 0) {
+    return num;
+  }
+  return null;
+}
+
+/**
+ * 前台等待上限（分钟）→ 实际请求毫秒。
+ *
+ * `foregroundWaitMinutes` 是设置卡字段，只影响 `wait=true` 时宿主 shell 的墙钟；
+ * 它**不是** OCR 的 `--timeout`——那一个是工具参数 `timeoutMinutes`，由
+ * `buildReviewCommand` / `buildScanCommand` 透传。两者名字过去相同，造成过混淆；
+ * 现在设置项唯一叫 `foregroundWaitMinutes`。
+ *
+ * 0/未设置 = 请求宿主上限（宿主按 min(请求, shell.maxTimeoutMs) 收敛，见
+ * MAX_TIMEOUT_REQUEST_MS 的注释）；>0 = 指定分钟（走本包自管截止）。非法值按 0 处理。
+ *
+ * 兼容 0.1.22 及更早发布的旧设置名 `timeoutMinutes`：新字段只要被设置（含显式 0）
+ * 就以新字段为准；新字段完全未设置时才读旧值。旧字段不再投影到设置卡。
+ */
+function readForegroundWaitMinutes(config: Config): number {
+  const current = nonNegativeMinutes(config.foregroundWaitMinutes.get());
+  if (current !== null) {
+    return current > 0 ? current * 60_000 : MAX_TIMEOUT_REQUEST_MS;
+  }
+  const legacy = nonNegativeMinutes(config.timeoutMinutes);
+  if (legacy !== null && legacy > 0) {
+    return legacy * 60_000;
   }
   return MAX_TIMEOUT_REQUEST_MS;
 }
@@ -1181,12 +1206,12 @@ export function ocrEnv(config: Config): Record<string, string> | undefined {
   return config.ocrNoAutoUpdate ? { ...NO_UPDATE_ENV } : undefined;
 }
 
-/** 一次前台执行的下发值：墙钟每次现读（`timeoutMinutes` 是 volatile 设置项），stdout 上限
+/** 一次前台执行的下发值：墙钟每次现读（`foregroundWaitMinutes` 是 volatile 设置项），stdout 上限
  *  与自动更新开关取装载期 config（非 volatile）。后台与 llm test 各有各的墙钟来源，但那一枚
  *  开关三条路径都经 `ocrEnv` 现取，所以不会在某一条 spawn 上漏。 */
 function tuningOf(config: Config): RunTuning {
   return {
-    timeoutMs: readTimeoutMinutes(config),
+    timeoutMs: readForegroundWaitMinutes(config),
     stdoutMaxBytes: config.stdoutMaxBytes,
     env: ocrEnv(config),
     ...sandboxDeployment(config),
@@ -1272,7 +1297,7 @@ interface ToolSpec {
  *
  * 预算取 `config.toolTimeoutMs`（**非 volatile** 部署值）：宿主在 `tools.register`
  * 时校验它是正有限数，之后每次 execute 只读注册时那一份、从不重算。因此它不能
- * 跟着 `timeoutMinutes`（volatile、卡片运行期可改）走，否则卡片把超时调大、
+ * 跟着 `foregroundWaitMinutes`（volatile、卡片运行期可改）走，否则卡片把等待上限调大、
  * 工具级上限停在旧值，两层各说一套。
  */
 function define(host: HostCtx, config: Config, spec: ToolSpec): void {
@@ -1361,8 +1386,9 @@ function analysisParams(messages: OcrReviewMessages): Record<string, unknown> {
  *  校验并填默认后交进 apply，优先级：设置卡运行时值 > 行 config > schema 默认。
  *  命名空间不再是本包持有的字符串：宿主按 `.volatile()` 投影表单，ns = profile 条目
  *  id（`ocr-review`，见 cordis.patch.yml）；原先那份 `settings.register(ns, schema,
- *  { base })` 的 `base` 底座已删除，逐字段落成下面的 `.default(...)`（本包没有数组
- *  字段——数组是整体替换，默认值必须是完整的一份）。设置卡上那几项全是用户随时翻的
+ *  { base })` 的 `base` 底座已删除，逐字段落成下面的 `.default(...)` 或刻意无默认
+ *  （`foregroundWaitMinutes` 无默认，才能让旧设置名作为迁移值被读到；卡片显示 0）。
+ *  （本包没有数组字段——数组是整体替换，默认值必须是完整的一份）。设置卡上那几项全是用户随时翻的
  *  开关，故标 `.volatile()`；一个都不标会让整条从 describe() 消失、写入抛
  *  `has no volatile fields`。volatile 字段以引用形态交进来，读当前值一律 `.get()`。
  *  其余都是**部署级**调优值，刻意不标 volatile：它们不进设置卡，改值随重启
@@ -1377,8 +1403,15 @@ export interface Config {
   autoVerify: Volatile<boolean>;
   /** 回显给模型的评论条数（0 = 全量）。 */
   maxComments: Volatile<number>;
-  /** ocr_* 外层墙钟超时（分钟）；0 = 请求宿主上限（OCR 原生每组 --timeout 管控）。 */
-  timeoutMinutes: Volatile<number>;
+  /** `ocr_*` 前台等待上限（分钟）；只影响 `wait=true` 的宿主 shell 墙钟。
+   *  0/未设置 = 请求宿主上限；不是 OCR 的 `--timeout`（那是工具参数 `timeoutMinutes`）。 */
+  foregroundWaitMinutes: Volatile<number | undefined>;
+  /**
+   * 旧设置名（0.1.22 及更早），仅用于配置迁移读取；不是工具参数。
+   * 新配置一律写 `foregroundWaitMinutes`；本字段不再进设置卡，新字段被设置后
+   * （包括显式 0）本字段不参与。
+   */
+  timeoutMinutes?: number;
   /**
    * 外部 ocr CLI 配置文件路径；**刻意不给默认**：内置底座一旦写死绝对路径就又回到
    * 「作者机器布局」。undefined（或空白）= 按 os.homedir() 派生。
@@ -1422,10 +1455,11 @@ export interface Config {
   /**
    * 工具级墙钟预算（毫秒，交给宿主 `ToolDefinition.timeoutMs`）。部署级值：改值随重启生效。
    *
-   * 与 `timeoutMinutes`（本包内部、volatile、卡片可改）不是一回事：这一枚是宿主在工具
-   * 外面套的截止，超时产出 `{ code: 'TOOL_TIMEOUT' }`，与「ocr 自己跑超时」在归因上分开。
-   * 它必须**大于**本包内部一次执行可能达到的最坏耗时（`timeoutMinutes` 与宿主
-   * `shell.maxTimeoutMs` 收敛之后的那个值），否则宿主会先掐断，本包的超时文案永远说不出话。
+   * 与 `foregroundWaitMinutes`（本包内部、volatile、卡片可改的前台等待上限）不是一回事：
+   * 这一枚是宿主在工具外面套的截止，超时产出 `{ code: 'TOOL_TIMEOUT' }`，与「ocr 自己跑超时」
+   * 在归因上分开。它必须**大于**本包内部一次执行可能达到的最坏耗时（`foregroundWaitMinutes`
+   * 与宿主 `shell.maxTimeoutMs` 收敛之后的那个值），否则宿主会先掐断，本包的超时文案永远
+   * 说不出话。
    */
   toolTimeoutMs: number;
   /**
@@ -1469,8 +1503,12 @@ const configSchema = Schema.object({
   language: Schema.union(["中文", "English"]).default("中文").volatile(),
   autoVerify: Schema.boolean().default(true).volatile(),
   maxComments: Schema.natural().default(MAX_COMMENTS_DEFAULT).volatile(),
-  // 0 = 「请求宿主上限」这个语义本身，不是「未设置」，故默认值就写在 schema 上。
-  timeoutMinutes: Schema.natural().default(0).volatile(),
+  // 前台等待上限：只作用于 wait=true 的宿主 shell 墙钟，不是 OCR 的 --timeout。
+  // 不给默认值（undefined = 未设置），这样旧设置名 timeoutMinutes 才能作为迁移值
+  // 被读取；卡片把 undefined 显示为 0（请求宿主上限）。
+  foregroundWaitMinutes: Schema.natural().volatile(),
+  /** 旧设置名；非 volatile，不投影到设置卡，仅兼容 0.1.22 及更早的 profile。 */
+  timeoutMinutes: Schema.natural(),
   // 外部 ocr CLI 自己的配置文件位置。留空 = 按 os.homedir()/.opencodereview/config.json
   // 派生；写死进默认就等于把作者机器的布局重新钉回包里。
   ocrConfigPath: Schema.string().volatile(),
@@ -1749,23 +1787,23 @@ function waitOf(value: unknown, messages: OcrReviewMessages): boolean {
   return value;
 }
 
-/** session action 的只读归一：错类型交给 builder 的消息表闸。 */
-function actionOf(value: unknown): string {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
-/** preview 入参闸：缺省 false；非布尔抛错。 */
-function previewOf(value: unknown, messages: OcrReviewMessages): boolean {
+/** 通用布尔入参闸：缺省 false；非布尔抛错。name 只用于报错文案。 */
+function optionalBool(value: unknown, name: string, messages: OcrReviewMessages): boolean {
   if (value === undefined || value === null) {
     return false;
   }
   if (typeof value !== "boolean") {
     throw new OcrToolError(
       OCR_TOOL_ERROR_CODES.badArguments,
-      format(messages.boolMustBeBoolean, { name: "preview", received: describeValue(value) }),
+      format(messages.boolMustBeBoolean, { name, received: describeValue(value) }),
     );
   }
   return value;
+}
+
+/** preview 入参闸：缺省 false；非布尔抛错。 */
+function previewOf(value: unknown, messages: OcrReviewMessages): boolean {
+  return optionalBool(value, "preview", messages);
 }
 
 /** 服务界面齐备才算可用（get() 可能返回半装配对象，也可能返回 undefined）。 */
@@ -1815,6 +1853,21 @@ export function createGateway(host: HostCtx): DshConfigGateway {
         // 会变成 500，而本包对 settings 不可用早已用 ProviderSourceStatus 表示降级——
         // 两侧的处理必须一致，否则一个宿主侧的故障就把整张 provider 卡打死。
         return false;
+      }
+    },
+    configurableProviders: (): ProviderDefault[] => {
+      const svc = usableService(host.get("llm"), ["listConfigurableProviders"]) as
+        | { listConfigurableProviders: () => readonly ProviderDefault[] }
+        | undefined;
+      if (svc === undefined) {
+        return [];
+      }
+      // 目录是可选增强：服务在但调用抛错时按空目录处理，不把整张 provider 卡打成
+      // settings-failed——settings.describe 那一路仍能给出 pi-ai 的完整清单。
+      try {
+        return [...svc.listConfigurableProviders()];
+      } catch {
+        return [];
       }
     },
     credentialSource: async (envKey: string): Promise<string | undefined> => {
@@ -2708,7 +2761,10 @@ function registerDelegatePreviewTool(
         from: { type: "string", description: msgs.paramFromShort },
         to: { type: "string", description: msgs.paramToShort },
         background: { type: "string", description: msgs.paramBackgroundPreview },
+        backgroundFile: { type: "string", description: msgs.paramBackgroundFile },
         exclude: { type: "array", items: { type: "string" }, description: msgs.paramExcludeShort },
+        rule: { type: "string", description: msgs.paramRule },
+        maxGitProcs: { type: "integer", description: msgs.paramMaxGitProcs },
       },
     },
     concurrencySafe: true,
@@ -2732,7 +2788,10 @@ function registerDelegatePreviewTool(
         tuningOf(config),
         exec.signal,
       );
-      const parsed = parseDelegatePreview(stdout.text);
+      // 真实 5000 文件仓库实测 preview JSON 820KB，默认 stdout 上限 400KB 会把它截成
+      // 不可解析的半截；完整文本在 spillPath，解析必须对那份做。
+      const full = completeOutputText(stdout, runMsgs);
+      const parsed = parseDelegatePreview(full);
       if (!parsed.ok) {
         // 解析失败分支的诚实值就是一段说明字符串（schema 的 string 分支）。截断说明
         // 单独拼在尾部：载荷被截断恰恰必然解析失败，而 raw 只回显头部，spill 写到磁盘
@@ -2741,24 +2800,29 @@ function registerDelegatePreviewTool(
           format(runMsgs.parseFailedPlain, {
             tool: "ocr delegate preview",
             limit: String(RAW_ECHO_LIMIT),
-            raw: echoRaw(stdout.text, RAW_ECHO_LIMIT),
+            raw: echoRaw(full, RAW_ECHO_LIMIT),
           }) + stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs)
         );
       }
+      const reviewableFiles = parsed.reviewable.slice(0, PREVIEW_FILE_LIMIT);
+      const excludedFiles = parsed.excluded.slice(0, PREVIEW_FILE_LIMIT);
       // 清单对象直返（canonical value）。mergeBase 一并带出：previewHint 让模型用
       // `git diff <merge_base>..<to>` 取 diff，此前解析了却没交出去，模型只能再跑一次。
       return {
         mode: parsed.mode,
         repository: parsed.repository,
         mergeBase: parsed.mergeBase === "" ? null : parsed.mergeBase,
-        // 清单保持完整（委托场景要拿全量文件），计数让调用方不必自己数数组。
+        // 两个 count 是完整清单的规模；数组各有上限，超出部分用 dropped 计数如实报告，
+        // 不把「只给了前 1000 条」写成「完整清单」。
         totalFiles: parsed.totalFiles,
         reviewableCount: parsed.reviewable.length,
         excludedCount: parsed.excluded.length,
         insertions: parsed.reviewable.reduce((acc, file) => acc + file.insertions, 0),
         deletions: parsed.reviewable.reduce((acc, file) => acc + file.deletions, 0),
-        reviewableFiles: parsed.reviewable,
-        excludedFiles: parsed.excluded,
+        reviewableFiles,
+        excludedFiles,
+        reviewableDropped: parsed.reviewable.length - reviewableFiles.length,
+        excludedDropped: parsed.excluded.length - excludedFiles.length,
         hint: runMsgs.previewHint,
       };
     },
@@ -2785,6 +2849,7 @@ function registerDelegateRuleTool(
           items: { type: "string" },
           description: msgs.paramPaths,
         },
+        rule: { type: "string", description: msgs.paramRule },
       },
       required: ["paths"],
     },
@@ -2798,7 +2863,7 @@ function registerDelegateRuleTool(
       assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
       const repo = ocrRepo(args, exec, runMsgs);
       const { command, workdir } = buildDelegateRuleCommand(
-        { repo, paths: args["paths"] },
+        { repo, paths: args["paths"], rule: args["rule"] },
         runMsgs,
       );
       const stdout = await runForeground(
@@ -2830,126 +2895,6 @@ function registerDelegateRuleTool(
           rule: group.rule,
         })),
         hint: runMsgs.ruleHint,
-      };
-    },
-  });
-}
-
-function registerSessionTool(host: HostCtx, config: Config, probe: OcrAvailabilityProbe): void {
-  const msgs = localeMessages(host);
-  // ocr_session：历史评审会话（配合恢复中断的 review 这条链路）。
-  define(host, config, {
-    name: "ocr_session",
-    description: msgs.sessionToolDescription,
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        repo: { type: "string", description: msgs.paramRepo },
-        action: {
-          type: "string",
-          enum: ["list", "show", "comments", "compare", "export"],
-          description: msgs.paramSessionAction,
-        },
-        id: { type: "string", description: msgs.paramSessionId },
-        before: { type: "string", description: msgs.paramSessionBefore },
-        after: { type: "string", description: msgs.paramSessionAfter },
-        severity: {
-          type: "array",
-          items: { type: "string" },
-          description: msgs.paramSessionSeverity,
-        },
-        category: {
-          type: "array",
-          items: { type: "string" },
-          description: msgs.paramSessionCategory,
-        },
-        branch: { type: "string", description: msgs.paramSessionBranch },
-        limit: { type: "integer", description: msgs.paramSessionLimit },
-      },
-    },
-    // 同 repo 的两次 ocr_session 会争同一份 sessions JSONL（O_TRUNC） ⇒ 并行不安全。
-    concurrencySafe: false,
-    schema: SESSION_OUTPUT_SCHEMA,
-    run: async (args, exec) => {
-      const runMsgs = localeMessages(host);
-      // 先问文件系统再决定要不要起进程：两条路都没有候选时，这里就给模型「哪条路都没
-      // 找到 + 怎么装」，而不是让 bash 跑到 exit 127 再反推。
-      const cliStatus = probe();
-      assertOcrPresent(cliStatus, runMsgs, ocrInstallText(cliStatus, config, runMsgs));
-      // 与 ocr_review 同一个归一化：两侧必须落在同一个会话目录，否则 review 写进去、
-      // 这里查的是另一个目录（缺陷 1）。
-      const repo = await canonicalReviewRoot(host, ocrRepo(args, exec, runMsgs), config);
-      const action = actionOf(args["action"]);
-      const before = typeof args["before"] === "string" ? args["before"].trim() : "";
-      const after = typeof args["after"] === "string" ? args["after"].trim() : "";
-      // 未声明 action 但给了 before/after 时，builder 会推断为 compare；这里同步分支。
-      if (action === "compare" || (action === "" && (before !== "" || after !== ""))) {
-        const { command, workdir } = buildSessionCommand({ ...args, repo }, runMsgs);
-        const stdout = await runForeground(
-          host,
-          withHomeEnv(command, ocrHome(config)),
-          workdir,
-          tuningOf(config),
-          exec.signal,
-        );
-        const parsed = parseSessionCompare(stdout.text, runMsgs);
-        if (parsed.ok) {
-          return { ...parsed.view, hint: runMsgs.sessionCompareHint };
-        }
-        return {
-          sessionOutput:
-            echoRaw(stdout.text, RAW_ECHO_LIMIT) +
-            stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs),
-          hint: runMsgs.sessionCompareHint,
-        };
-      }
-      if (action === "export") {
-        // 旧导出目录按 TTL 收走：HTML 是用户产物，不成功后立刻删，但也不能让
-        // tmpdir 无限增长。放在 mkdtemp 之前，本次新目录永远不会被这一趟清掉。
-        await sweepStaleSessionExports(tmpdir());
-        const exportDir = mkdtempSync(path.join(tmpdir(), SESSION_EXPORT_PREFIX));
-        const output = path.join(exportDir, "review.html");
-        try {
-          const { command, workdir } = buildSessionCommand({ ...args, repo, output }, runMsgs);
-          await runForeground(
-            host,
-            withHomeEnv(command, ocrHome(config)),
-            workdir,
-            tuningOf(config),
-            exec.signal,
-          );
-          return { sessionOutput: output, hint: runMsgs.sessionExportHint };
-        } catch (error) {
-          rmSync(exportDir, { recursive: true, force: true });
-          throw error;
-        }
-      }
-      const { command, workdir } = buildSessionCommand({ ...args, repo }, runMsgs);
-      // session 也读 OCR 家目录（sessions 清单），随 ocrConfigPath 一并重定向。
-      const stdout = await runForeground(
-        host,
-        withHomeEnv(command, ocrHome(config)),
-        workdir,
-        tuningOf(config),
-        exec.signal,
-      );
-      const { text } = stdout;
-      // 无会话时 OCR 返回 JSON null → 转友好提示，避免模型困惑。
-      const stripped = text.trim();
-      const empty = stripped === "null" || stripped === "[]";
-      // session 输出体量小，直接透传（含长度保护，避免假完整 + 明文 key 脱敏）。
-      // 截断说明拼在尾部：stdout 被截断时 session JSON 也会缺尾，模型需要知道去哪读全。
-      const capped =
-        text.length > 12_000
-          ? `${echoRaw(text, 11_900)}\n${runMsgs.sessionTruncated}`
-          : redactKeyMaterial(text);
-      // 对象直返（canonical value）；sessionOutput 保持一手透传字符串的诚实值。
-      return {
-        sessionOutput:
-          (empty ? runMsgs.sessionEmpty : capped) +
-          stdoutTruncationNote(config.stdoutMaxBytes, stdout, runMsgs),
-        hint: runMsgs.sessionResumeHint,
       };
     },
   });
@@ -3151,7 +3096,21 @@ export function apply(ctx: Context, config: Config, probe: OcrAvailabilityProbe)
   registerScanTool(host, config, probe, versionSink, jobLedger);
   registerDelegatePreviewTool(host, config, probe);
   registerDelegateRuleTool(host, config, probe);
-  registerSessionTool(host, config, probe);
+  registerSessionTool({
+    define: (spec) => {
+      define(host, config, spec);
+    },
+    messages: () => localeMessages(host),
+    probe,
+    assertPresent: (status, messages) => {
+      assertOcrPresent(status, messages, ocrInstallText(status, config, messages));
+    },
+    resolveRepo: (args, exec, messages) =>
+      canonicalReviewRoot(host, ocrRepo(args, exec, messages), config),
+    run: (command, workdir, signal) =>
+      runForeground(host, withHomeEnv(command, ocrHome(config)), workdir, tuningOf(config), signal),
+    note: (stdout, messages) => stdoutTruncationNote(config.stdoutMaxBytes, stdout, messages),
+  });
   registerRulesCheckTool(host, config, probe);
   registerLlmTool(host, config, probe);
 
